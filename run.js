@@ -19,6 +19,7 @@ const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
+const { clickByText } = require('./lib/playwright-helpers');
 
 const USER_DATA_DIR = 'C:\\Users\\hecto\\AppData\\Local\\ChromeAutomationProfile';
 const PROFILE_DIRECTORY = 'Profile 1';
@@ -353,14 +354,6 @@ line 4
 
 **Advertencias:** [any phonetic re-spelling used, or other concerns for manual review — write "Ninguna" if none]`;
 
-async function clickByText(page, text) {
-  const locator = page.getByRole('button', { name: text, exact: false })
-    .or(page.getByRole('link', { name: text, exact: false }))
-    .or(page.getByText(text, { exact: false }));
-  await locator.first().waitFor({ state: 'visible', timeout: 20000 });
-  await locator.first().click();
-}
-
 async function readSongId(page) {
   return page.evaluate(() => {
     const labels = Array.from(document.querySelectorAll('span.font-semibold'));
@@ -475,36 +468,60 @@ function hardValidate(fullResponse, surveyText) {
   const { sections, errors: structErrors } = parseSections(fullResponse);
   failures.push(...structErrors);
 
-  // Extraer primer nombre del dedicado desde la encuesta
-  const nameRaw =
+  // Extraer nombre(s) del/de los dedicado(s) desde la encuesta. El campo puede
+  // tener uno o varios nombres con relleno alrededor (ej. "Mis hijos Christopher
+  // y Soraya."), así que filtramos las palabras de relleno comunes en vez de
+  // asumir que la primera palabra es el nombre — eso rompía por completo la
+  // validación en encuestas multi-destinatario (ver LESSONS.md).
+  const nameFieldRaw =
     (surveyText.match(/What['']s their name\??:\s*([^\n]+)/i) ||
       surveyText.match(/Nombre[^:]*:\s*([^\n]+)/i) || [])[1] || '';
-  const firstName = nameRaw.trim().split(/\s+/)[0].toLowerCase();
+  const NAME_FIELD_FILLER_WORDS = new Set([
+    'mis', 'mi', 'su', 'sus', 'el', 'la', 'los', 'las', 'de', 'del',
+    'hijo', 'hija', 'hijos', 'hijas', 'y', 'and', 'e',
+  ]);
+  const firstNames = [
+    ...new Set(
+      nameFieldRaw
+        .replace(/[.,]/g, ' ')
+        .split(/\s+/)
+        .map((w) => w.toLowerCase())
+        .filter((w) => w.length > 1 && !NAME_FIELD_FILLER_WORDS.has(w))
+    ),
+  ];
 
-  if (firstName) {
+  if (firstNames.length > 0) {
     // ── B. Nombre como PRIMERA PALABRA en Chorus 1 y Chorus 2 ─────────────────
+    // (con varios destinatarios, cada chorus puede abrir con un nombre distinto)
     ['Chorus 1', 'Chorus 2'].forEach((sec) => {
       const lines = sections[sec] || [];
       if (lines.length > 0) {
         const firstWord = lines[0].split(/[\s,!¡]+/)[0].toLowerCase().replace(/[^a-záéíóúüñ]/gi, '');
         // El prompt permite re-escritura fonética del nombre para Suno (ej. "Frank" -> "Frankk"),
-        // así que solo exigimos que la primera letra coincida en vez de igualdad exacta.
-        const samePhoneticStart = firstWord.length > 0 && firstWord[0] === firstName[0];
-        if (firstWord !== firstName && !samePhoneticStart) {
-          failures.push(`[${sec}] primera palabra es "${firstWord}", debe ser "${firstName}" (o una variante fonética que empiece con la misma letra)`);
-        }
-        // Nombre solo una vez por chorus
-        const nameOccurrences = lines.join(' ').toLowerCase().split(firstName).length - 1;
-        if (nameOccurrences > 1) {
-          failures.push(`[${sec}] el nombre "${firstName}" aparece ${nameOccurrences} veces, debe ser exactamente 1`);
+        // así que solo exigimos que la primera letra coincida con ALGUNO de los nombres válidos,
+        // en vez de igualdad exacta con un único nombre.
+        const matchedName = firstNames.find(
+          (n) => firstWord === n || (firstWord.length > 0 && firstWord[0] === n[0])
+        );
+        if (!matchedName) {
+          failures.push(
+            `[${sec}] primera palabra es "${firstWord}", debe ser uno de: ${firstNames.join(', ')} (o una variante fonética que empiece con la misma letra)`
+          );
+        } else {
+          // Nombre solo una vez por chorus
+          const nameOccurrences = lines.join(' ').toLowerCase().split(matchedName).length - 1;
+          if (nameOccurrences > 1) {
+            failures.push(`[${sec}] el nombre "${matchedName}" aparece ${nameOccurrences} veces, debe ser exactamente 1`);
+          }
         }
       }
     });
 
-    // ── C. Nombre AUSENTE en Verse 1 ──────────────────────────────────────────
-    const verse1Lines = sections['Verse 1'] || [];
-    if (verse1Lines.join(' ').toLowerCase().includes(firstName)) {
-      failures.push(`[Verse 1] contiene el nombre "${firstName}" — debe estar ausente`);
+    // ── C. Nombre(s) AUSENTE(s) en Verse 1 ─────────────────────────────────────
+    const verse1Text = (sections['Verse 1'] || []).join(' ').toLowerCase();
+    const leakedName = firstNames.find((n) => verse1Text.includes(n));
+    if (leakedName) {
+      failures.push(`[Verse 1] contiene el nombre "${leakedName}" — debe estar ausente`);
     }
   }
 

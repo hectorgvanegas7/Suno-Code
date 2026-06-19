@@ -1,11 +1,8 @@
 const { chromium } = require('playwright');
+const { connectToSunoTab } = require('./lib/playwright-helpers');
 
 (async () => {
-  const browser = await chromium.connectOverCDP('http://localhost:9333');
-  const context = browser.contexts()[0];
-  const pages = context.pages();
-  const page = pages.find((p) => p.url().includes('suno.com')) || pages[0];
-  await page.bringToFront();
+  const { browser, page } = await connectToSunoTab(chromium);
 
   const createBtn = page.getByRole('button', { name: 'Create song' });
   await createBtn.click();

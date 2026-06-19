@@ -1,22 +1,29 @@
-const { chromium } = require('playwright');
+// Opens Chrome for a manual Suno login, ready to be picked up by suno-fill.js /
+// suno-create.js over CDP afterwards.
+//
+// IMPORTANT: launches Chrome as a plain OS process (spawn), NOT via Playwright's
+// launchPersistentContext. Playwright's automation flags (--enable-automation,
+// --remote-debugging-pipe) make Google's OAuth flow show a "this browser may not
+// be secure" block during login. A plain launch with a fixed --remote-debugging-port
+// avoids that entirely while still being attachable via chromium.connectOverCDP().
+// See LESSONS.md: "CDP lifecycle pattern".
+const { spawn } = require('child_process');
 
+const CHROME_PATH = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 const USER_DATA_DIR = 'C:\\Users\\hecto\\AppData\\Local\\ChromeAutomationProfile';
 const PROFILE_DIRECTORY = 'Profile 1';
+const DEBUG_PORT = 9333;
 
-(async () => {
-  const context = await chromium.launchPersistentContext(USER_DATA_DIR, {
-    channel: 'chrome',
-    headless: false,
-    args: [`--profile-directory=${PROFILE_DIRECTORY}`],
-    viewport: { width: 1440, height: 900 },
-  });
+spawn(
+  CHROME_PATH,
+  [
+    `--user-data-dir=${USER_DATA_DIR}`,
+    `--profile-directory=${PROFILE_DIRECTORY}`,
+    `--remote-debugging-port=${DEBUG_PORT}`,
+    'https://suno.com/create',
+  ],
+  { detached: true, stdio: 'ignore' }
+).unref();
 
-  const page = context.pages()[0] || (await context.newPage());
-  await page.goto('https://suno.com/create', { waitUntil: 'domcontentloaded' });
-  console.log('Browser open. Log in manually, then let Claude know.');
-  // Leave the browser open and the process running so the context stays alive.
-  await new Promise(() => {});
-})().catch((err) => {
-  console.error('Failed:', err);
-  process.exit(1);
-});
+console.log(`Chrome lanzado con debugging port ${DEBUG_PORT}. Iniciá sesión manualmente en la ventana.`);
+console.log('Una vez logueado, suno-fill.js y suno-create.js pueden conectarse a esta misma ventana.');
