@@ -1,0 +1,35 @@
+{
+  "sliders": [
+    {
+      "tag": "DIV",
+      "role": "slider",
+      "ariaLabel": "Weirdness",
+      "ariaValueNow": "50",
+      "ariaValueMin": "0",
+      "ariaValueMax": "100",
+      "className": "css-1d8szr1 e1clmb640",
+      "text": "Expected results"
+    },
+    {
+      "tag": "DIV",
+      "role": "slider",
+      "ariaLabel": "Style Influence",
+      "ariaValueNow": "50",
+      "ariaValueMin": "0",
+      "ariaValueMax": "100",
+      "className": "css-1d8szr1 e1clmb640",
+      "text": "Moderate"
+    },
+    {
+      "tag": "INPUT",
+      "role": null,
+      "ariaLabel": "Playback progress",
+      "ariaValueNow": null,
+      "ariaValueMin": null,
+      "ariaValueMax": null,
+      "className": "peer focus-visible:outline-none absolute inset-y-0 left-1/2 w-(--button-width) -translate-x-1/2 pointer-events-auto appe",
+      "text": null
+    }
+  ],
+  "context": []
+}
