@@ -403,7 +403,13 @@ async function generateSongWithClaude(surveyText) {
     body: JSON.stringify({
       model: 'claude-sonnet-4-6',
       max_tokens: 2000,
-      system: SYSTEM_PROMPT,
+      system: [
+        {
+          type: 'text',
+          text: SYSTEM_PROMPT,
+          cache_control: { type: 'ephemeral' },
+        },
+      ],
       messages: [{ role: 'user', content: surveyText }],
     }),
   });
@@ -413,6 +419,12 @@ async function generateSongWithClaude(surveyText) {
   }
 
   const data = await response.json();
+  if (data.usage) {
+    const u = data.usage;
+    console.log(
+      `  usage: input=${u.input_tokens} cache_creation=${u.cache_creation_input_tokens ?? 0} cache_read=${u.cache_read_input_tokens ?? 0} output=${u.output_tokens}`
+    );
+  }
   return data.content.map((block) => block.text || '').join('').trim();
 }
 
