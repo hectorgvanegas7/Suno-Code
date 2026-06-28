@@ -20,8 +20,6 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 const { clickByText } = require('./lib/playwright-helpers');
-const { enterFlowAndEnsureAssignment } = require('./lib/flow-helpers');
-const pipelineState = require('./lib/pipeline-state');
 
 const USER_DATA_DIR = 'C:\\Users\\hecto\\AppData\\Local\\ChromeAutomationProfile';
 const PROFILE_DIRECTORY = 'Profile 1';
@@ -391,43 +389,27 @@ async function readSurveyResponses(page) {
 }
 
 async function generateSongWithClaude(surveyText) {
-  if (!process.env.ANTHROPIC_API_KEY) {
-    throw new Error('ANTHROPIC_API_KEY no está configurada. Corré "setx ANTHROPIC_API_KEY <tu-key>" y abrí una terminal nueva.');
+  // ─── VERSIÓN GEMINI ─────────────────────────────────────────────────────────
+  // Misma firma, mismo system prompt, misma salida (string con el texto generado).
+  // Solo cambia el proveedor: en vez de la API de Anthropic, usa Gemini.
+  // Así el resto del pipeline (validación, REDO, song.txt) queda IDÉNTICO.
+  if (!process.env.GEMINI_API_KEY) {
+    throw new Error('GEMINI_API_KEY no está configurada. Corré "setx GEMINI_API_KEY <tu-key>" y abrí una terminal nueva.');
   }
 
-  const response = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'x-api-key': process.env.ANTHROPIC_API_KEY,
-      'anthropic-version': '2023-06-01',
-      'content-type': 'application/json',
+  const { GoogleGenerativeAI } = require('@google/generative-ai');
+  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+  const model = genAI.getGenerativeModel({
+    model: 'gemini-2.0-flash',
+    systemInstruction: SYSTEM_PROMPT,
+    generationConfig: {
+      maxOutputTokens: 2000,
+      temperature: 1.0,
     },
-    body: JSON.stringify({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 1500,
-      system: [
-        {
-          type: 'text',
-          text: SYSTEM_PROMPT,
-          cache_control: { type: 'ephemeral' },
-        },
-      ],
-      messages: [{ role: 'user', content: surveyText }],
-    }),
   });
 
-  if (!response.ok) {
-    throw new Error(`Anthropic API error ${response.status}: ${await response.text()}`);
-  }
-
-  const data = await response.json();
-  if (data.usage) {
-    const u = data.usage;
-    console.log(
-      `  usage: input=${u.input_tokens} cache_creation=${u.cache_creation_input_tokens ?? 0} cache_read=${u.cache_read_input_tokens ?? 0} output=${u.output_tokens}`
-    );
-  }
-  return data.content.map((block) => block.text || '').join('').trim();
+  const result = await model.generateContent(surveyText);
+  return result.response.text().trim();
 }
 
 // ─── VALIDACIÓN ESTRUCTURAL DURA (nueva capa) ─────────────────────────────────
@@ -616,10 +598,7 @@ function hardValidate(fullResponse, surveyText) {
     checklistBlock.split('\n').forEach((line) => {
       const trimmed = line.trim();
       if (!trimmed.startsWith('-')) return;
-      // Ítems marcados "(si aplica)" son condicionales: si no aplican (ej.
-      // un solo destinatario), "N/A" es una respuesta válida, no un fallo.
-      const isConditionalNA = /\(si aplica\)/i.test(trimmed) && /\bn\/a\b/i.test(trimmed);
-      if (trimmed.includes('✗') || (!trimmed.includes('✓') && !isConditionalNA && /[a-záéíóúñ]/i.test(trimmed))) {
+      if (trimmed.includes('✗') || (!trimmed.includes('✓') && /[a-záéíóúñ]/i.test(trimmed))) {
         failures.push(`Claude marcó fallo: ${trimmed}`);
       }
     });
@@ -762,7 +741,7 @@ process.on('uncaughtException', async (err) => {
   const context = await chromium.launchPersistentContext(USER_DATA_DIR, {
     channel: 'chrome',
     headless: false,
-    slowMo: 200,
+    slowMo: 300,
     args: CHROME_ARGS,
     viewport: { width: 1440, height: 900 },
   });
@@ -781,10 +760,23 @@ process.on('uncaughtException', async (err) => {
       await page.waitForLoadState('networkidle').catch(() => {});
     }
 
-    console.log('Entrando al Flow y asegurando asignación activa...');
-    const flowResult = await enterFlowAndEnsureAssignment(page, clickByText);
-    if (flowResult.assigned === 'newly-assigned') {
-      console.log('Se asignó la canción más urgente.');
+    console.log('Clicking "Enter Flow"...');
+    await clickByText(page, 'Enter Flow');
+    await page.waitForLoadState('networkidle').catch(() => {});
+    // El cliente tarda un instante en confirmar si ya hay una asignación activa
+    // (a veces muestra el botón "Assign Most Urgent Song" brevemente antes de
+    // reemplazarlo por la asignación ya existente) — esperamos a que se asiente
+    // antes de decidir qué rama tomar, para no clickear un botón que está a punto
+    // de desaparecer del DOM.
+    await page.waitForTimeout(2000);
+
+    const hasActiveAssignment = (await page.locator('#lyrics').count()) > 0;
+
+    if (!hasActiveAssignment) {
+      console.log('Clicking "Assign Most Urgent Song"...');
+      await clickByText(page, 'Assign Most Urgent Song');
+      await page.waitForTimeout(2000);
+      await page.waitForLoadState('networkidle').catch(() => {});
     } else {
       console.log('Ya hay una asignación activa en curso, continuando con ella...');
     }
@@ -860,16 +852,6 @@ process.on('uncaughtException', async (err) => {
 
     fs.writeFileSync(SONG_PATH, songContent, 'utf-8');
     console.log(`\nCanción guardada en ${SONG_PATH}`);
-
-    // Registrar el estado del pipeline para que los scripts siguientes
-    // (suno-fill, flow-submit, --done) sepan sobre qué canción están trabajando
-    // y puedan detectar si se cruzó con otra (ver lib/pipeline-state.js).
-    try {
-      const tituloForState = extractField(fullResponse, 'Título');
-      pipelineState.startNew({ songId, titulo: tituloForState, isRedo });
-    } catch (e) {
-      console.log('(No se pudo escribir state.json, no es crítico:', e.message, ')');
-    }
 
     console.log('\n--- Letra generada ---\n');
     console.log(fullResponse);

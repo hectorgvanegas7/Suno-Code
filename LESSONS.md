@@ -3,6 +3,135 @@
 Running log of real bugs hit while building this automation, so they don't get
 rediscovered from scratch. Newest first.
 
+## start-flow Paso 4/4 falló: lógica de "Enter Flow + Assign" duplicada y divergente (2026-06-28)
+
+`start-flow.js`'s `openFlowTab()` raised "No se encontró #lyrics en el Flow
+después de Enter Flow" on a run where there was already an active assignment.
+Root cause: there were TWO copies of the "enter the Flow and make sure an
+assignment is loaded" logic. `run.js` had the complete version (Enter Flow →
+wait → check `#lyrics` → if missing, click "Assign Most Urgent Song"), but
+`start-flow.js`'s `openFlowTab()` had an incomplete copy that clicked Enter
+Flow, checked `#lyrics` once, and gave up — it never clicked "Assign Most
+Urgent Song". So whenever the Flow tab had been left at the landing state
+(run.js closes its own Chrome at the end, shared profile), Paso 4 died.
+
+**Fix:** extracted the canonical logic into `lib/flow-helpers.js`
+(`enterFlowAndEnsureAssignment`) with retry/backoff, and made BOTH run.js and
+start-flow.js import it. Single source of truth — they can't diverge again.
+
+**Takeaway:** any piece of flow-navigation logic that lives in more than one
+script is a divergence bug waiting to happen. When run.js and start-flow.js
+(or any two scripts) need the same browser dance, it goes in `lib/`, not
+copy-pasted. Also added `lib/pipeline-state.js` (state.json) so later steps can
+detect if they're about to process a different song than the one generated.
+
+## Checklist validator rejected "N/A" on a conditional item, burning all 3 attempts (2026-06-20)
+
+The system prompt's checklist template has `Destinatarios múltiples
+balanceados (si aplica): ✓/✗` — the "(si aplica)" means the item is
+conditional, and for a single-recipient song (most of them) the only honest
+answer is "N/A", not "✓". `hardValidate()`'s checklist check only accepted
+lines containing a literal `✓`, so every single-recipient song got this
+item flagged as a self-reported failure and burned all 3 regeneration
+attempts before saving with the "no pasó la validación" warning banner —
+even though the lyrics were correct from attempt 1.
+
+**Fix:** lines containing `(si aplica)` are now also allowed to pass with
+`N/A` (case-insensitive), as long as they don't also contain `✗`. Other
+checklist lines still require a literal `✓`, unchanged.
+
+**Takeaway:** any checklist item phrased as conditional ("si aplica") needs
+its own pass condition in `hardValidate()` — don't assume every item reduces
+to the same ✓/✗ binary just because the template prints `✓/✗` for all of
+them.
+
+## REDO chain-of-thought preamble leaked into song.txt, checklist symbol mismatch hid a real flag (2026-06-19, "Harry jode" song)
+
+On a REDO with a structurally broken original (extra Pre-Coro/Puente sections),
+Claude's response opened with several paragraphs of visible reasoning ("I need
+to fully restructure this song because...") *before* the `**Título:**` block —
+violating the system prompt's "no extra text before or after" rule. Nothing in
+`hardValidate()` checked for this, so it passed on attempt 1 and the entire
+preamble got saved straight into `song.txt` (parseSections' regex only looks
+for `[Verse 1]` etc. so structural checks didn't notice; `suno-fill.js` also
+parses by regex so the Suno form itself came out fine — only the on-disk file
+was polluted).
+
+Separately, the same response flagged a verbatim-quote violation (rule 13:
+never quote survey dialogue directly — here a literal bathroom-singing chant)
+using `⚠️ REVISAR MANUALMENTE` instead of `✗` in its own QA checklist.
+`hardValidate()`'s checklist check only matched the literal `✗` character, so
+this self-reported issue silently passed instead of triggering a regen.
+
+**Fix:** `hardValidate()` now (a) fails if there's any non-empty text before
+`**Título:**`, and (b) treats any checklist line that isn't a clean `✓` as a
+failure, not just lines containing `✗`. `run.js` also now slices the saved
+content starting at `**Título:**` defensively, even if validation is
+exhausted and saved with a warning.
+
+**Takeaway:** don't assume Claude's self-grading uses only the two symbols
+shown in the prompt template (`✓`/`✗`) — validate by absence-of-pass, not
+presence-of-a-specific-fail-symbol. Also: structural regex checks that scan
+for markers anywhere in the text (by design, for robustness) can mask a
+"there's text where there shouldn't be" bug — that needs an explicit check of
+its own.
+
+## "Priority Delivery" banner false-positived as REDO (2026-06-19)
+
+`run.js`'s `isRedo` check tested for `div.bg-orange-50.border-orange-200` —
+but that's not a REDO-specific selector. The unrelated "Priority Delivery"
+banner (🚀 "This song was purchased with priority delivery") uses the exact
+same orange classes and has no feedback box inside it. A priority-delivery
+song with no REDO history hit the banner check, set `isRedo = true`, then
+crashed in `readRedoFeedback()` because there's nothing to read.
+
+**Fix:** call `readRedoFeedback()` first and derive `isRedo` from whether it
+actually found feedback text (`div.whitespace-pre-wrap` inside the banner),
+instead of from the banner's color classes alone.
+
+**Takeaway:** any orange/red/green "status banner" class names on this site
+are reused across unrelated states — never key detection logic off color
+classes alone, always require the specific content/structure that only the
+intended state has.
+
+## CDP gotcha confirmed in practice (2026-06-19): run.js killed an open Suno window
+
+The shared-profile risk documented below ("CDP lifecycle pattern") actually
+fired: a Suno fill was sitting open (post-Create, screenshots already taken)
+on port 9333 when `run.js` ran for the next song. `run.js`'s `finally` block
+unconditionally calls `activeContext.close()` on its `launchPersistentContext`
+— and since Chrome's singleton behavior makes that call attach to the
+*already-running* process (same `user-data-dir`), closing it tore down the
+whole shared browser, killing the debug port and the open Suno tab with it.
+
+**Recovery:** just re-run `suno-open-for-login.js` and `suno-fill.js` — login
+persists because session cookies live in the on-disk profile, not in the
+closed process.
+
+**Takeaway:** "Hector ya clickeó Create" does NOT make it safe to run `run.js`
+while that Chrome window is still open. The only safe sequencing is: close/let
+go of the Suno window first (or don't open it via `suno-open-for-login.js`
+until right before the fill step), *then* run `run.js`. Treat any live Suno
+tab as a hard blocker until it's done being used, not just "Create was already
+clicked."
+
+## "Mezcla de trato" validator false-positives inside longer words
+
+`hardValidate()`'s usted-mismatch check used `\bvení\b`, `\bdecí\b`, etc. — but
+JS regex `\w`/`\b` don't treat accented vowels (á é í ó ú ñ) as word
+characters. So `\b` fires right after the í in "ven**í**a" or "dec**í**rselo",
+making "vení"/"decí" match *inside* those completely correct, usted-consistent
+words. This burned all 3 regen attempts on a real run even though the lyrics
+had zero actual tú/vos mixing — the model kept "fixing" something that wasn't
+broken until it gave up and saved with a warning.
+
+**Fix:** replaced `\b` with explicit negative lookahead/lookbehind against the
+accented-letter class (`(?<![a-záéíóúñ])...(?![a-záéíóúñ])`) so the boundary
+check actually respects Spanish word characters.
+
+**Takeaway:** any regex-based Spanish text validator using `\b` is suspect —
+audit the others (estilo Suno checks, etc.) for the same accented-boundary gap.
+
 ## Multi-recipient surveys broke name validation entirely
 
 `hardValidate()`'s name check used to grab the survey's "What's their name?"

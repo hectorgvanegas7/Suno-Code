@@ -70,8 +70,16 @@ function parseSongFile(content) {
   await lyricsBox.fill(lyrics);
   await page.waitForTimeout(300);
 
-  // Fill Style (second textarea on the Advanced/Write panel)
-  const styleBox = page.locator('textarea').nth(1);
+  // Fill Style. El campo de estilo no siempre es textarea.nth(1) — si Suno
+  // reordena el DOM, ese índice llena el campo equivocado en silencio. Probamos
+  // primero selectores semánticos (placeholder/aria) y caemos a nth(1) sólo si
+  // ninguno aparece, para no romper si el DOM cambió.
+  let styleBox = page
+    .locator('textarea[placeholder*="style" i], textarea[aria-label*="style" i], textarea[placeholder*="estilo" i]')
+    .first();
+  if ((await styleBox.count()) === 0) {
+    styleBox = page.locator('textarea').nth(1);
+  }
   await styleBox.click();
   await styleBox.fill(estilo);
   await page.waitForTimeout(300);
