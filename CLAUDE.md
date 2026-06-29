@@ -64,9 +64,15 @@ Esta carpeta es un repo git (sin remoto). Hacé commit antes de cambios grandes.
 - `suno-open-for-login.js` — Chrome standalone para login
 - `flow-submit.js` — llenado de Título/Letra/Notas en el Flow (`#title`/`#lyrics`/`#notes`),
   nunca clickea Complete Song/Submit to QA
-- `start-flow.js` — orquestador único. `node start-flow.js` = flujo completo hasta el
-  checkpoint visual. `node start-flow.js --done` = cierre (registra en la hoja + marca
-  state.json como completado), se corre DESPUÉS de subir el MP3.
+- `start-flow.js` — orquestador único. Tres modos:
+  - `node start-flow.js` = flujo completo hasta el checkpoint visual.
+  - `node start-flow.js --done` = cierre (registra en la hoja + marca state.json como
+    completado), se corre DESPUÉS de subir el MP3.
+  - `node start-flow.js --poll [N]` = vigía de cola: abre Chrome en puerto 9334, verifica
+    cada N minutos (default 3; acepta "30s" para segundos). Al encontrar canción, cierra su
+    Chrome (espera señal concreta: puerto caído), luego arranca el flujo completo en el mismo
+    proceso. Detecta typos de `--done`/`--poll` escritos con espacio y aborta antes de hacer daño.
+  - `poll-flow.js` es ahora un redirect deprecated a `start-flow.js --poll`.
 - `sheets.js` — wrapper standalone de `lib/sheets-core.js` (registro en Google Sheet)
 - `lib/playwright-helpers.js` — helpers de Playwright (clickByText, setSliderValue,
   expandIfCollapsed, connectToSunoTab, isLoggedIn)

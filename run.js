@@ -375,6 +375,15 @@ async function readRedoFeedback(page) {
 }
 
 async function readSurveyResponses(page) {
+  // #lyrics renders from server HTML; survey data is fetched via async API call that
+  // completes slightly after. Wait for the concrete DOM signal instead of a blind timeout.
+  try {
+    await page.waitForSelector('div.bg-gray-50.border.rounded.p-3.text-sm.space-y-1 > div', {
+      timeout: 15000,
+    });
+  } catch {
+    return []; // let line 811 throw the descriptive error
+  }
   return page.evaluate(() => {
     const rows = Array.from(
       document.querySelectorAll('div.bg-gray-50.border.rounded.p-3.text-sm.space-y-1 > div')
@@ -894,5 +903,5 @@ process.on('uncaughtException', async (err) => {
   }
 })().catch((err) => {
   console.error('Automation failed:', err);
-  safeCloseContext().finally(() => process.exit(1));
+  safeCloseContext().finally(() => process.exit(err.noSong ? 2 : 1));
 });

@@ -3,6 +3,67 @@
 Running log of real bugs hit while building this automation, so they don't get
 rediscovered from scratch. Newest first.
 
+## "-- done" con espacio arrancó runFlow() en vez de runDone() (2026-06-29)
+
+`node start-flow.js -- done` (espacio entre `--` y `done`) fue parseado por Node.js
+como dos args separados: `['--', 'done']`. `process.argv.includes('--done')` busca
+la cadena literal `'--done'`, que no estaba, así que `isDone` fue `false` y arrancó
+`runFlow()`. El Paso 1/4 intentó `launchPersistentContext` con Chrome ya abierto (en el
+mismo perfil) y crasheó con "Opening in existing browser session".
+
+**Fix:** en la entrada de start-flow.js, `rawArgs.join('')` funde los args y detecta
+si el resultado es `'--done'` o `'--poll'` sin que ninguno de los dos esté como arg
+individual — en ese caso aborta con un mensaje claro antes de cualquier otra cosa.
+`['--', 'done'].join('')` = `'--done'`; `['-', '-done'].join('')` = `'--done'` — ambas
+variantes quedan cubiertas.
+
+**Takeaway:** cualquier flag crítico que, si falla, arranca el modo equivocado con
+Chrome ya abierto necesita su propio typo-guard en el entry point, no solo en la
+documentación. El parser de Node no normaliza `-- flag` a `--flag`.
+
+## Perfil compartido: poller cerró Chrome, pero run.js lo encontró todavía abierto (2026-06-29)
+
+El poller anterior (poll-flow.js) cerraba su Chrome con un `sleep(2000)` fijo antes
+de lanzar `start-flow.js` como subproceso. Un `sleep` fijo no garantiza que el proceso
+de Chrome haya muerto y liberado el `--user-data-dir` antes de que `run.js` lo necesite.
+Si el proceso tarda más de 2 segundos en morir (arranque lento, disco lento, proceso
+zombie), `launchPersistentContext` se encuentra el perfil bloqueado y tira
+"Opening in existing browser session".
+
+**Fix (integración):** al integrar el poller en start-flow.js, el cierre espera la señal
+concreta: `isPortUp(POLL_PORT)` pasa a `false` (el puerto cae cuando el proceso muere),
+verificado con retry cada 500ms hasta 20 intentos (10s máximo). Si el puerto sigue arriba
+al agotar los intentos, aborta con instrucción clara. Nunca un sleep fijo a ciegas.
+
+**Takeaway:** antes de cualquier `launchPersistentContext` en el pipeline, verificar que
+NINGÚN Chrome del perfil compartido esté vivo. "Mandé a cerrar" ≠ "está cerrado". Usar
+el puerto como proxy del estado del proceso (si el puerto cayó, el proceso murió).
+
+## readSurveyResponses devolvía 0 filas aunque la encuesta era visible (2026-06-29)
+
+`readSurveyResponses` tiraba "No se encontraron respuestas de la encuesta en la
+página" en todas las corridas. El selector `div.bg-gray-50.border.rounded.p-3.text-sm.space-y-1 > div`
+era correcto y funcionaba en scripts de inspección con espera explícita, pero run.js
+llamaba `page.evaluate()` inmediatamente después de que `enterFlowAndEnsureAssignment`
+retornaba.
+
+Root cause: `#lyrics` es un `<textarea>` presente en el HTML inicial (server-rendered),
+por eso `waitForLyrics` lo encuentra rápido. Pero las respuestas de la encuesta se
+cargan vía una API call asíncrona que React hace al montar el componente, y llegan
+un instante después. El `page.evaluate()` en `readSurveyResponses` corría antes de
+que esa carga terminara y encontraba 0 filas.
+
+**Fix:** `readSurveyResponses` ahora hace `waitForSelector` para la primera fila de
+la encuesta antes del `evaluate()`. Si el selector tarda > 15 segundos, devuelve `[]`
+y deja que el chequeo de la línea 811 tire el error descriptivo. Verificado con
+`node run.js` completo en la misma sesión.
+
+**Takeaway:** `waitForLyrics` (que detecta `#lyrics`) NO garantiza que las secciones
+de datos del Flow (Survey Responses, Song ID) estén cargadas — el textarea está en
+el HTML inicial pero los datos de la encuesta son async. Cualquier lectura de
+secciones dinámicas del Flow necesita su propio `waitForSelector` sobre el elemento
+que realmente necesita, no un timeout fijo ni confiar en que otro campo ya está listo.
+
 ## start-flow Paso 4/4 falló: lógica de "Enter Flow + Assign" duplicada y divergente (2026-06-28)
 
 `start-flow.js`'s `openFlowTab()` raised "No se encontró #lyrics en el Flow
