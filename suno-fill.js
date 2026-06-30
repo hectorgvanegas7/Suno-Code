@@ -1,7 +1,7 @@
 const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
-const { setSliderValue, expandIfCollapsed, connectToSunoTab } = require('./lib/playwright-helpers');
+const { setSliderValue, expandIfCollapsed, withReloadRetry, connectToSunoTab } = require('./lib/playwright-helpers');
 
 const SONG_PATH = path.join(__dirname, 'song.txt');
 
@@ -19,28 +19,10 @@ function parseSongFile(content) {
   return { titulo, voz, estilo, lyrics };
 }
 
-(async () => {
-  const songContent = fs.readFileSync(SONG_PATH, 'utf-8');
-  const { titulo, voz, estilo, lyrics } = parseSongFile(songContent);
-  if (!titulo || !voz || !estilo || !lyrics) {
-    throw new Error('No se pudo parsear song.txt completamente.');
-  }
-  const genderTarget = /femenin/i.test(voz) ? 'Female' : 'Male';
-  console.log('Parseado de song.txt:');
-  console.log('  Titulo:', titulo);
-  console.log('  Voz:', voz, '->', genderTarget);
-  console.log('  Estilo:', estilo);
-  console.log('  Lyrics length:', lyrics.length, 'chars');
-
-  const { browser, page } = await connectToSunoTab(chromium);
-  console.log('Connected to:', page.url());
-
-  if (!page.url().includes('/create')) {
-    await page.goto('https://suno.com/create', { waitUntil: 'domcontentloaded' });
-  }
-  await page.waitForLoadState('networkidle').catch(() => {});
-  await page.waitForTimeout(1000);
-
+// Fills every field of Suno's Advanced create form. All text-based selectors
+// live in here so that withReloadRetry can re-run this entire function from
+// scratch if any selector times out due to Suno rendering raw i18n keys.
+async function fillSunoForm(page, titulo, voz, estilo, lyrics, genderTarget) {
   // Reset form to a clean baseline
   const clearBtn = page.getByLabel('Clear all form inputs');
   if ((await clearBtn.count()) > 0) {
@@ -86,7 +68,9 @@ function parseSongFile(content) {
   await styleBox.fill(estilo);
   await page.waitForTimeout(300);
 
-  // Expand More Options (only if not already expanded — clicking it again would collapse it)
+  // Expand More Options (only if not already expanded — clicking it again would collapse it).
+  // expandIfCollapsed uses a 10s explicit waitFor so translation-key failures bubble up fast
+  // to withReloadRetry instead of hanging 30 seconds.
   const genderButton = page.getByRole('button', { name: genderTarget, exact: true }).first();
   await expandIfCollapsed(page, 'More Options', genderButton);
 
@@ -113,7 +97,39 @@ function parseSongFile(content) {
   await titleInput.click();
   await titleInput.fill(titulo);
   await page.waitForTimeout(500);
+}
 
+(async () => {
+  const songContent = fs.readFileSync(SONG_PATH, 'utf-8');
+  const { titulo, voz, estilo, lyrics } = parseSongFile(songContent);
+  if (!titulo || !voz || !estilo || !lyrics) {
+    throw new Error('No se pudo parsear song.txt completamente.');
+  }
+  const genderTarget = /femenin/i.test(voz) ? 'Female' : 'Male';
+  console.log('Parseado de song.txt:');
+  console.log('  Titulo:', titulo);
+  console.log('  Voz:', voz, '->', genderTarget);
+  console.log('  Estilo:', estilo);
+  console.log('  Lyrics length:', lyrics.length, 'chars');
+
+  const { browser, page } = await connectToSunoTab(chromium);
+  console.log('Connected to:', page.url());
+
+  if (!page.url().includes('/create')) {
+    await page.goto('https://suno.com/create', { waitUntil: 'domcontentloaded' });
+  }
+  await page.waitForLoadState('networkidle').catch(() => {});
+  await page.waitForTimeout(1000);
+
+  // Fill the form, retrying with page.reload() if any text-based selector times
+  // out (e.g. Suno rendered raw i18n keys instead of translated UI labels).
+  await withReloadRetry(
+    page,
+    () => fillSunoForm(page, titulo, voz, estilo, lyrics, genderTarget),
+    { maxAttempts: 3, description: 'formulario de Suno (Advanced mode)' }
+  );
+
+  // --- Verification screenshots ---
   await page.screenshot({ path: 'suno-verify-overview.png' });
 
   const expandBtn = page.getByLabel('Expand lyrics box');
@@ -124,6 +140,19 @@ function parseSongFile(content) {
     await expandBtn.click().catch(() => {});
     await page.waitForTimeout(300);
   }
+
+  // Re-acquire locators for verification (they were filled inside fillSunoForm)
+  const lyricsBox = page.locator('[data-testid="lyrics-textarea"]');
+  let styleBox = page
+    .locator('textarea[placeholder*="style" i], textarea[aria-label*="style" i], textarea[placeholder*="estilo" i]')
+    .first();
+  if ((await styleBox.count()) === 0) styleBox = page.locator('textarea').nth(1);
+  const titleInputs = page.locator('input[placeholder="Song Title (Optional)"]');
+  let titleInput = null;
+  for (let i = 0; i < await titleInputs.count(); i++) {
+    if (await titleInputs.nth(i).isVisible()) { titleInput = titleInputs.nth(i); break; }
+  }
+  if (!titleInput) titleInput = titleInputs.first();
 
   const lyricsValue = await lyricsBox.inputValue();
   const styleValue = await styleBox.inputValue();

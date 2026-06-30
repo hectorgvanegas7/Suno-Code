@@ -1,5 +1,40 @@
 # Lessons / gotchas
 
+## Suno no carga traducciones: selectores de texto fallan con i18n keys crudas (2026-06-30)
+
+A veces la página de Suno carga pero no resuelve las traducciones de la UI —
+los textos aparecen como claves crudas del sistema de i18n
+(ej: `"createForm.advancedOptionsCardMoreOptions"` en vez de `"More Options"`).
+Cualquier selector basado en texto (`getByText`, `getByRole`, `getByLabel`)
+falla con timeout porque el texto esperado no existe en el DOM.
+Lo que disparó el bug: `expandIfCollapsed` esperando `getByText('More Options')`
+colgó 30 segundos y tiró error, interrumpiendo el flujo.
+
+**Fix:**
+1. `expandIfCollapsed` ahora hace `toggle.waitFor({ state: 'visible', timeout: 10000 })`
+   antes de hacer click — falla rápido (10 s) en vez de colgar 30 s, lo que permite
+   que el mecanismo de retry externo reaccione a tiempo.
+2. Todo el llenado del formulario en `suno-fill.js` fue extraído a `fillSunoForm()`.
+3. `fillSunoForm` se llama dentro de `withReloadRetry(page, fn, { maxAttempts: 3 })`,
+   un nuevo helper en `lib/playwright-helpers.js`. Si cualquier selector dentro de
+   `fillSunoForm` falla (More Options, Advanced tab, Write radio, género, sliders,
+   title input), `withReloadRetry` hace `page.reload({ waitUntil: 'networkidle' })`
+   + 3 segundos de espera, y reintenta el llenado completo desde cero.
+4. Máximo 3 intentos totales. En el último, tira error descriptivo que apunta a un
+   problema temporal de Suno, no del script.
+5. Los logs muestran: `"[suno-fill] Selector no encontrado, recargando página (intento N/3)..."`.
+
+**Por qué reload completo (no retry del selector aislado):** si las traducciones
+no cargaron, es toda la página la que está en mal estado. Recargar resetea el
+formulario, así que el retry tiene que re-llenar todo. Envolver `fillSunoForm`
+entera es más limpio que re-llenar campos individualmente en cada retry.
+
+**Takeaway:** cualquier selector de texto de la UI de Suno (tab names, button
+labels, placeholders) puede aparecer como clave i18n sin traducir si la página
+cargó mal. El fix no es hacer los selectores más tolerantes — es detectar el fallo
+rápido y recargar. `withReloadRetry` en `lib/playwright-helpers.js` queda disponible
+para cualquier otra función del pipeline que necesite el mismo patrón.
+
 Running log of real bugs hit while building this automation, so they don't get
 rediscovered from scratch. Newest first.
 
