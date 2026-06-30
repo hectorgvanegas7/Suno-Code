@@ -13,7 +13,9 @@ function parseSongFile(content) {
   const advertenciasIndex = content.search(/\*\*Advertencias:\*\*/i);
   const notesIndex = content.search(/NOTES:/i);
   const endIndex = [advertenciasIndex, notesIndex].filter((i) => i !== -1).sort((a, b) => a - b)[0];
-  const lyrics = content.slice(verseIndex, endIndex === undefined ? undefined : endIndex).trim();
+  const lyrics = verseIndex !== -1
+    ? content.slice(verseIndex, endIndex === undefined ? undefined : endIndex).trim()
+    : null;
   return { titulo, voz, estilo, lyrics };
 }
 

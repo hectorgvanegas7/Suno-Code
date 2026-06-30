@@ -413,7 +413,7 @@ async function generateSongWithClaude(surveyText) {
     },
     body: JSON.stringify({
       model: 'claude-sonnet-4-6',
-      max_tokens: 1500,
+      max_tokens: 4000,
       system: [
         {
           type: 'text',
@@ -653,6 +653,29 @@ function hardValidate(fullResponse, surveyText) {
 }
 // ─── FIN VALIDACIÓN ESTRUCTURAL DURA ──────────────────────────────────────────
 
+// Verifica que el contenido a guardar tenga estructura mínima antes de escribir
+// song.txt. Última línea de defensa contra respuestas truncadas o con
+// chain-of-thought crudo en vez de la letra real (ver LESSONS.md).
+function validateContentForWrite(lyricsContent) {
+  const failures = [];
+
+  const tituloMatch = lyricsContent.match(/\*\*Título:\*\*\s*(.+)/i);
+  if (!tituloMatch || !tituloMatch[1].trim()) {
+    failures.push('Falta **Título:** o está vacío (posible truncación de respuesta)');
+  }
+
+  const REQUIRED_SECTIONS = ['Verse 1', 'Chorus 1', 'Verse 2', 'Chorus 2', 'Bridge', 'Outro'];
+  const { sections } = parseSections(lyricsContent);
+  for (const sec of REQUIRED_SECTIONS) {
+    const lines = sections[sec];
+    if (!lines || lines.length === 0) {
+      failures.push(`Sección [${sec}] ausente o sin contenido`);
+    }
+  }
+
+  return { ok: failures.length === 0, failures };
+}
+
 function extractField(fullResponse, label) {
   const match = fullResponse.match(new RegExp(`\\*\\*${label}:\\*\\*\\s*(.+)`, 'i'));
   return match ? match[1].trim() : null;
@@ -849,6 +872,30 @@ process.on('uncaughtException', async (err) => {
     const lyricsContent = (checklistIndex === -1 ? responseFromTitulo : responseFromTitulo.slice(0, checklistIndex))
       .replace(/-{3,}\s*$/, '')
       .trim();
+
+    // Validación obligatoria antes de escribir: si la respuesta no tiene título ni
+    // secciones, es truncación o chain-of-thought crudo — no guardar como song.txt
+    // válido ni seguir hacia suno-fill.
+    const writeCheck = validateContentForWrite(lyricsContent);
+    if (!writeCheck.ok) {
+      console.error('\n❌ VALIDACIÓN PRE-ESCRITURA FALLÓ — respuesta sin estructura mínima:');
+      writeCheck.failures.forEach((f) => console.error(`  • ${f}`));
+      console.error('   Pipeline detenido. Corré run.js de nuevo.');
+      const d = new Date();
+      const emergencyDate = `${d.getMonth() + 1}.${String(d.getDate()).padStart(2, '0')}.${d.getFullYear()}`;
+      fs.writeFileSync(
+        SONG_PATH,
+        [
+          '⚠️ ERROR CRÍTICO: la generación de letra falló. Corré run.js de nuevo.',
+          '',
+          `Causa: ${writeCheck.failures.join('; ')}`,
+          '',
+          `NOTES: ${emergencyDate}. Hector. PS0180. Letra + Suno. Song ID: ${songId}`,
+        ].join('\n'),
+        'utf-8'
+      );
+      throw new Error('Validación pre-escritura falló — respuesta corrupta o truncada.');
+    }
 
     // Advertencias es el último campo de la respuesta — puede tener varias líneas
     // (ej. varios bullets), así que capturamos hasta el final en vez de una sola línea.

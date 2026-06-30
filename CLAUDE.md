@@ -33,12 +33,14 @@ Esta carpeta es un repo git (sin remoto). Hacé commit antes de cambios grandes.
 5. **(manual)** Gabo escucha las 2 versiones de Suno, elige, descarga el MP3, lo sube
    al Flow (ya con título/letra/notas llenos) y hace Submit to QA / Complete Song.
 
-6. **`node start-flow.js --done`** (o `node sheets.js`) — Lee `song.txt`, extrae
+6. **(automático al final de `node start-flow.js`)** — Después de completar el
+   Paso 4/4, el proceso pausa y pregunta `¿Ya hiciste Submit to QA? (s/n)`. Al
+   responder `s`, corre automáticamente la lógica de cierre: lee `song.txt`, extrae
    Título + Song ID, elige el tab mensual más reciente del Google Sheet (ej.
-   "JULY 2026", no usa el mes del calendario), y llena la primera fila vacía con
-   Date/Total Songs=1/Title/Song ID. Tiene anti-duplicados (no reescribe un Song
-   ID ya presente) y solo toca las columnas A,B,E,F — nunca C ni D (tiempo). El
-   modo `--done` además marca state.json como completado. Deja vacío para Gabo:
+   "JULY 2026") y llena la primera fila vacía con Date/Total Songs=1/Title/Song ID.
+   Anti-duplicados, solo toca columnas A,B,E,F — nunca C ni D. Marca state.json
+   como completado. **`node start-flow.js --done`** (o `node sheets.js`) queda
+   como fallback si la sesión se cerró antes de responder. Deja vacío para Gabo:
    Total Time, Time, Remarks, Screenshot.
 
 7. **(manual)** Gabo llena Total Time + Time + Remarks + pega Flow Screenshot.
@@ -65,9 +67,11 @@ Esta carpeta es un repo git (sin remoto). Hacé commit antes de cambios grandes.
 - `flow-submit.js` — llenado de Título/Letra/Notas en el Flow (`#title`/`#lyrics`/`#notes`),
   nunca clickea Complete Song/Submit to QA
 - `start-flow.js` — orquestador único. Tres modos:
-  - `node start-flow.js` = flujo completo hasta el checkpoint visual.
-  - `node start-flow.js --done` = cierre (registra en la hoja + marca state.json como
-    completado), se corre DESPUÉS de subir el MP3.
+  - `node start-flow.js` = flujo completo: genera letra, llena Suno, llena el Flow,
+    luego pausa y pregunta `¿Ya hiciste Submit to QA? (s/n)`. Al responder `s`,
+    registra en la hoja automáticamente en el mismo proceso — sin abrir otra terminal.
+  - `node start-flow.js --done` = cierre manual (fallback si la sesión se cerró
+    antes de responder al prompt). Registra en la hoja + marca state.json.
   - `node start-flow.js --poll [N]` = vigía de cola: abre Chrome en puerto 9334, verifica
     cada N minutos (default 3; acepta "30s" para segundos). Al encontrar canción, cierra su
     Chrome (espera señal concreta: puerto caído), luego arranca el flujo completo en el mismo

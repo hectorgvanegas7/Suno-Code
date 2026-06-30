@@ -23,10 +23,19 @@ function parseSongFile(content) {
   const advertenciasIndex = content.search(/\*\*Advertencias:\*\*/i);
   const notesIndex = content.search(/NOTES:/i);
   const lyricsEndIndex = [advertenciasIndex, notesIndex].filter((i) => i !== -1).sort((a, b) => a - b)[0];
-  const lyrics = content.slice(verseIndex, lyricsEndIndex === undefined ? undefined : lyricsEndIndex).trim();
+  const lyrics = verseIndex !== -1
+    ? content.slice(verseIndex, lyricsEndIndex === undefined ? undefined : lyricsEndIndex).trim()
+    : null;
   const notesMatch = content.match(/NOTES:\s*([\s\S]+)/i);
   const notes = notesMatch ? notesMatch[1].trim() : null;
   return { titulo, lyrics, notes };
+}
+
+// Strips "Song ID: xxxx" when building the text for the Flow's Notes field.
+// The portal already has its own Song ID field — repeating it in Notes is redundant.
+// song.txt keeps the full NOTES line (with Song ID) for internal tracking.
+function buildFlowNotes(rawNotes) {
+  return rawNotes.replace(/\s*Song ID:\s*\S+/i, '').trim();
 }
 
 async function connectToFlowTab(debugPort = DEBUG_PORT) {
@@ -131,11 +140,12 @@ async function findNotesField(page) {
   const songContent = fs.readFileSync(SONG_PATH, 'utf-8');
   const { titulo, lyrics, notes } = parseSongFile(songContent);
   if (!titulo || !lyrics || !notes) {
-    throw new Error('No se pudo parsear título, letra o NOTES de song.txt completamente.');
+    throw new Error('No se pudo parsear título, letra o NOTES de song.txt — ¿archivo corrupto o truncado?');
   }
+  const flowNotes = buildFlowNotes(notes);
   console.log('  Título:', titulo);
   console.log('  Lyrics length:', lyrics.length, 'chars');
-  console.log('  Notes:', notes);
+  console.log('  Notes (para el Flow):', flowNotes);
 
   const { browser, page } = await connectToFlowTab();
   console.log('Conectado a:', page.url());
@@ -161,9 +171,9 @@ async function findNotesField(page) {
     // las nuevas se agregan abajo, no reemplazan lo existente.
     const existingNotes = (await notesLocator.inputValue()).trim();
     const combinedNotes =
-      existingNotes && !existingNotes.includes(notes.trim())
-        ? `${existingNotes}\n\n${notes}`
-        : existingNotes || notes;
+      existingNotes && !existingNotes.includes(flowNotes)
+        ? `${existingNotes}\n\n${flowNotes}`
+        : existingNotes || flowNotes;
     await fillReactField(page, notesLocator, combinedNotes, 'notes');
   } else {
     console.warn('  ⚠️ No se llenó el campo de notas — no se encontró con la heurística actual. Llenar a mano.');

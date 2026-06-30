@@ -39,6 +39,7 @@
 // "Perfil compartido: poller cerró Chrome, pero run.js lo encontró todavía abierto".
 
 const { spawn } = require('child_process');
+const readline = require('readline');
 const { chromium } = require('playwright');
 const { isLoggedIn, clickByText } = require('./lib/playwright-helpers');
 const { enterFlowAndEnsureAssignment, FLOW_URL } = require('./lib/flow-helpers');
@@ -230,6 +231,24 @@ async function runDone() {
   }
 }
 
+// Pregunta en la misma sesión de terminal si ya se completó el Submit to QA.
+// Retorna true si el usuario confirma con "s". En entornos no-interactivos (stdin
+// no es TTY) no bloquea — informa que --done sigue disponible como fallback.
+async function askDoneQuestion() {
+  if (!process.stdin.isTTY) {
+    console.log('\n(stdin no es terminal interactiva — no se puede pedir confirmación en línea.)');
+    console.log('Cuando termines, registrá con: node start-flow.js --done');
+    return false;
+  }
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise((resolve) => {
+    rl.question('\n¿Ya hiciste Submit to QA? (s/n): ', (answer) => {
+      rl.close();
+      resolve(answer.trim().toLowerCase() === 's');
+    });
+  });
+}
+
 // ─── MODO normal: flujo completo ──────────────────────────────────────────────
 async function runFlow() {
   console.log('=== Paso 0/4: preflight ===');
@@ -275,10 +294,18 @@ async function runFlow() {
   console.log(
     '\n✅ Flujo completo hasta el checkpoint visual.\n' +
       '   Revisá: suno-verify-overview.png, suno-verify-lyrics-expanded.png y flow-submit-verify.png.\n' +
-      '   Ahora a mano: tocá Create en Suno, escuchá las 2 versiones, elegí, descargá el MP3,\n' +
-      '   subilo al Flow y hacé Submit to QA.\n' +
-      '   Cuando termines, cerrá la canción con:  node start-flow.js --done'
+      '\n   Pasos manuales:\n' +
+      '     1. Clickeá Create en Suno\n' +
+      '     2. Escuchá las 2 versiones, elegí y descargá el MP3\n' +
+      '     3. Subilo al Flow y hacé Submit to QA\n' +
+      '\n   Cuando termines los pasos de arriba, volvé acá y respondé.'
   );
+  const confirmed = await askDoneQuestion();
+  if (confirmed) {
+    await runDone();
+  } else {
+    console.log('\n(No se registró en la hoja. Podés hacerlo después con: node start-flow.js --done)');
+  }
 }
 
 // ─── MODO --poll: vigía de cola ───────────────────────────────────────────────

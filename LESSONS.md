@@ -3,6 +3,32 @@
 Running log of real bugs hit while building this automation, so they don't get
 rediscovered from scratch. Newest first.
 
+## song.txt truncado: max_tokens insuficiente en REDO complejo (2026-06-29, "Mi Mayor Orgullo")
+
+En un REDO con 5 destinatarios + Spoken Intro, la respuesta de Claude se truncó
+antes de llegar a `**Título:**` porque `max_tokens: 1500` no alcanzó para el
+razonamiento visible + salida estructurada completa. `hardValidate()` detectó la
+ausencia de `**Título:**` (check L) pero el mecanismo de guardado usaba `fullResponse`
+como fallback cuando `tituloIndex === -1`, así que el chain-of-thought crudo terminó
+en `song.txt` en vez de la letra real.
+
+**Fix:**
+1. `max_tokens` subido de 1500 a 4000 en `generateSongWithClaude()` — aplica a
+   todos los casos, no solo REDOs.
+2. Nueva función `validateContentForWrite(lyricsContent)` en `run.js`: antes de
+   escribir `song.txt`, verifica que `**Título:**` exista y no esté vacío y que las
+   6 secciones ([Verse 1]…[Outro]) tengan contenido real.
+3. Si esa validación falla después de agotar los 3 intentos: se escribe un
+   `song.txt` mínimo de emergencia (solo advertencia + Song ID), se loguean los
+   fallos y se tira una excepción → `start-flow.js` captura el exit code ≠ 0 y
+   no pasa a suno-fill con datos corruptos.
+
+**Takeaway:** para REDOs complejos (múltiples destinatarios, instrucciones largas)
+1500 tokens de output no alcanzan. El fallback "si no hay título, guardar fullResponse"
+convirtió un error de truncación en un archivo confuso sin señal clara de error.
+La validación pre-escritura cierra esa brecha: si el contenido no tiene estructura
+mínima, no se escribe como si fuera válido.
+
 ## "-- done" con espacio arrancó runFlow() en vez de runDone() (2026-06-29)
 
 `node start-flow.js -- done` (espacio entre `--` y `done`) fue parseado por Node.js
