@@ -35,20 +35,25 @@ Esta carpeta es un repo git (sin remoto). Hacé commit antes de cambios grandes.
 
 6. **(automático al final de `node start-flow.js`)** — Después de completar el
    Paso 4/4, el proceso pausa y pregunta `¿Ya hiciste Submit to QA? (s/n)`. Al
-   responder `s`, corre automáticamente la lógica de cierre: lee `song.txt`, extrae
-   Título + Song ID, elige el tab mensual más reciente del Google Sheet (ej.
-   "JULY 2026") y llena la primera fila vacía con Date/Total Songs=1/Title/Song ID.
-   Anti-duplicados, solo toca columnas A,B,E,F — nunca C ni D. Marca state.json
-   como completado. **`node start-flow.js --done`** (o `node sheets.js`) queda
-   como fallback si la sesión se cerró antes de responder. Deja vacío para Gabo:
-   Total Time, Time, Remarks, Screenshot.
+   responder `s`, corre automáticamente la lógica de cierre: conecta al Chrome del
+   puerto 9333, navega a `/artists/flow/create`, lee la primera card de "Recent
+   completions", verifica que el título coincida con state.json, extrae el tiempo de
+   sesión (ej. "26 min session" → Time="00:26", Total Time=0.43) y toma un screenshot
+   recortado de la card (→ `screenshots/YYYY-MM-DD_slug.png`). Luego lee `song.txt`,
+   elige el tab mensual más reciente del Google Sheet (ej. "JULY 2026") y llena la
+   primera fila vacía con Date(A)/Total Songs=1(B)/Total Time(C)/Time(D)/Title(E)/
+   Song ID(F). Si la extracción de tiempo falla (Chrome cerrado, título no coincide,
+   etc.) se loguea un aviso y se continúa sin C ni D — anti-duplicados siempre activo.
+   Marca state.json como completado. **`node start-flow.js --done`** (o `node sheets.js`)
+   queda como fallback si la sesión se cerró antes de responder.
 
-7. **(manual)** Gabo llena Total Time + Time + Remarks + pega Flow Screenshot.
+7. **(manual)** Gabo llena Remarks + pega Flow Screenshot. Si el tiempo no se pudo
+   auto-detectar (aviso en consola), también llena Total Time y Time a mano.
 
 ## Reglas importantes
 
-- **El tiempo lo llena Gabo siempre, a mano.** Se paga por hora, el tiempo en el
-  Flow incluye margen (~20-25 min mínimo por canción). El script nunca lo toca.
+- **El tiempo se extrae automáticamente de "Recent completions"** cuando Chrome está
+  abierto y el título coincide. Si falla, queda vacío para que Gabo lo llene a mano.
 - **La verificación visual antes de Create NO es opcional** — ya atrapó defectos
   reales (ej. el bloque "Advertencias" colándose dentro de la letra). Nunca saltearla.
 - **No correr run.js mientras una sesión de Suno está abierta** — comparten el

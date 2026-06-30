@@ -39,6 +39,8 @@
 // "Perfil compartido: poller cerró Chrome, pero run.js lo encontró todavía abierto".
 
 const { spawn } = require('child_process');
+const fs = require('fs');
+const path = require('path');
 const readline = require('readline');
 const { chromium } = require('playwright');
 const { isLoggedIn, clickByText } = require('./lib/playwright-helpers');
@@ -48,6 +50,8 @@ const state = require('./lib/pipeline-state');
 
 const DEBUG_PORT = 9333;   // Chrome de Suno (ya corriendo para suno-fill y flow-submit)
 const POLL_PORT  = 9334;   // Chrome propio del modo --poll (se abre y cierra dentro del modo)
+const FLOW_CREATE_URL = 'https://cancioneterna.com/artists/flow/create';
+const SCREENSHOTS_DIR = path.join(__dirname, 'screenshots');
 const CHROME_PATH = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 const USER_DATA_DIR = 'C:\\Users\\hecto\\AppData\\Local\\ChromeAutomationProfile';
 const PROFILE_DIRECTORY = 'Profile 1';
@@ -199,13 +203,171 @@ async function pollOnce(log) {
   }
 }
 
+// ─── Extracción de tiempo desde "Recent completions" ─────────────────────────
+
+// Parsea "26 min session", "1h 5min session", "26min", etc.
+// Devuelve { timeHHMM, totalTimeDecimal } o null si el formato no se reconoce.
+function parseSessionTime(text) {
+  if (!text) return null;
+  const hourMin = text.match(/(\d+)\s*h\s*(\d+)\s*min/i);
+  if (hourMin) {
+    const h = parseInt(hourMin[1], 10);
+    const m = parseInt(hourMin[2], 10);
+    const totalMin = h * 60 + m;
+    return {
+      timeHHMM: `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`,
+      totalTimeDecimal: Math.round((totalMin / 60) * 100) / 100,
+    };
+  }
+  const minOnly = text.match(/(\d+)\s*min/i);
+  if (minOnly) {
+    const totalMin = parseInt(minOnly[1], 10);
+    const h = Math.floor(totalMin / 60);
+    const m = totalMin % 60;
+    return {
+      timeHHMM: `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`,
+      totalTimeDecimal: Math.round((totalMin / 60) * 100) / 100,
+    };
+  }
+  return null;
+}
+
+// Conecta al Chrome del puerto de debug, navega a /artists/flow/create y extrae
+// la primera card de "Recent completions": título, texto de sesión, time y screenshot.
+// Lanza si no puede conectar, si el DOM no tiene la sección, si el título no
+// coincide con expectedTitulo (cuando se pasa), o si el tiempo no se puede parsear.
+// El screenshot falla sin lanzar (error logueado, screenshotPath queda null).
+async function readRecentCompletion(expectedTitulo) {
+  if (!(await isPortUp(DEBUG_PORT))) {
+    throw new Error(`Chrome no está en el puerto ${DEBUG_PORT}`);
+  }
+
+  return withCdp(async (browser) => {
+    const context = browser.contexts()[0];
+
+    let page = context.pages().find((p) => p.url().includes('cancioneterna.com'));
+    const openedNew = !page;
+    if (!page) page = await context.newPage();
+
+    // Navegar / refrescar a /create (la vista que muestra "Recent completions")
+    if (!page.url().includes('/artists/flow/create')) {
+      await page.goto(FLOW_CREATE_URL, { waitUntil: 'domcontentloaded' });
+    } else {
+      await page.reload({ waitUntil: 'domcontentloaded' });
+    }
+    await page.waitForLoadState('networkidle').catch(() => {});
+    await page.waitForSelector('h3:has-text("Recent completions")', { timeout: 15000 });
+    await page.waitForTimeout(500);
+
+    // Extraer título, texto de sesión e índice global de la primera card
+    const cardData = await page.evaluate(() => {
+      const heading = Array.from(document.querySelectorAll('h3')).find(
+        (el) => /recent completions/i.test(el.textContent)
+      );
+      if (!heading) return { error: 'heading h3 not found' };
+
+      // Subir hasta encontrar el panel que contiene las cards
+      let panel = heading.parentElement;
+      for (let i = 0; i < 6; i++) {
+        if (!panel) return { error: 'panel not found' };
+        if (panel.querySelectorAll('.rounded-xl').length >= 2) break;
+        panel = panel.parentElement;
+      }
+
+      const firstCard = panel.querySelector('.rounded-xl.border.border-slate-100');
+      if (!firstCard) return { error: 'first card not found inside panel' };
+
+      const titleEl = firstCard.querySelector('.font-medium.text-slate-900');
+      const metaDiv = firstCard.querySelector('.text-xs.text-slate-500');
+      const spans = metaDiv ? Array.from(metaDiv.querySelectorAll('span')) : [];
+      const sessionSpan = spans.find((s) => /\d+\s*(h\s*\d*\s*min|min)/i.test(s.textContent));
+
+      // Índice global para usarlo como nth() en Playwright
+      const allCards = Array.from(document.querySelectorAll('.rounded-xl.border.border-slate-100'));
+      const cardIndex = allCards.indexOf(firstCard);
+
+      return {
+        title: titleEl?.textContent.trim() ?? null,
+        sessionText: sessionSpan?.textContent.trim() ?? null,
+        cardIndex,
+      };
+    });
+
+    if (cardData.error) throw new Error(`DOM: ${cardData.error}`);
+    if (!cardData.title) throw new Error('No se encontró el título en la primera card');
+    if (!cardData.sessionText) throw new Error('No se encontró texto de sesión en la primera card');
+
+    // Verificar que el título coincide con el state.json actual
+    const normalize = (s) =>
+      s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ').trim();
+
+    if (expectedTitulo) {
+      if (normalize(cardData.title) !== normalize(expectedTitulo)) {
+        throw new Error(
+          `Título de la card ("${cardData.title}") no coincide con state.json ("${expectedTitulo}"). ` +
+          '¿Se completó otra canción antes de registrar esta?'
+        );
+      }
+    } else {
+      console.log(`  ⚠️ state.json no tiene título — primera card sin verificar: "${cardData.title}"`);
+    }
+
+    // Parsear el tiempo de sesión
+    const parsed = parseSessionTime(cardData.sessionText);
+    if (!parsed) throw new Error(`No se pudo parsear tiempo: "${cardData.sessionText}"`);
+
+    // Screenshot de la card (fallo no es crítico)
+    let screenshotPath = null;
+    try {
+      fs.mkdirSync(SCREENSHOTS_DIR, { recursive: true });
+
+      const cardLocator = page.locator('.rounded-xl.border.border-slate-100').nth(cardData.cardIndex);
+      await cardLocator.scrollIntoViewIfNeeded();
+      await page.waitForTimeout(250);
+      await page.mouse.move(0, 0);
+      await page.waitForTimeout(50);
+
+      const box = await cardLocator.boundingBox();
+      const imgBuffer = await cardLocator.screenshot();
+
+      const slug = cardData.title
+        .toLowerCase()
+        .normalize('NFD').replace(/[̀-ͯ]/g, '')
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+      const d = new Date();
+      const datePrefix = [
+        d.getFullYear(),
+        String(d.getMonth() + 1).padStart(2, '0'),
+        String(d.getDate()).padStart(2, '0'),
+      ].join('-');
+      screenshotPath = path.join(SCREENSHOTS_DIR, `${datePrefix}_${slug}.png`);
+      fs.writeFileSync(screenshotPath, imgBuffer);
+
+      const w = box ? Math.round(box.width) : '?';
+      const h = box ? Math.round(box.height) : '?';
+      console.log(`  Screenshot: ${screenshotPath} (${w}×${h}px)`);
+    } catch (e) {
+      console.log(`  ⚠️ Screenshot fallido (no es crítico): ${e.message}`);
+    }
+
+    if (openedNew) await page.close().catch(() => {});
+
+    return {
+      title: cardData.title,
+      sessionText: cardData.sessionText,
+      screenshotPath,
+      ...parsed,
+    };
+  });
+}
+
 // ─── MODO --done: cierre del flujo ────────────────────────────────────────────
 async function runDone() {
   const { logSongToSheet } = require('./lib/sheets-core');
 
   console.log('=== Cierre (--done): registrando en la hoja ===\n');
 
-  // Validar que la canción en song.txt es la misma que generamos en esta sesión.
   const current = state.read();
   if (current) {
     console.log(`Canción activa según state.json: "${current.titulo}" (${current.songId}), etapa: ${current.stage}`);
@@ -213,10 +375,23 @@ async function runDone() {
     console.log('⚠️ No hay state.json. Registrando lo que haya en song.txt de todas formas.');
   }
 
-  const result = await logSongToSheet();
+  // Intentar leer tiempo de sesión y screenshot desde "Recent completions"
+  let timeHHMM = null;
+  let totalTimeDecimal = null;
+  console.log('\nLeyendo tiempo de sesión desde Recent completions...');
+  try {
+    const completion = await readRecentCompletion(current?.titulo ?? null);
+    timeHHMM = completion.timeHHMM;
+    totalTimeDecimal = completion.totalTimeDecimal;
+    console.log(`  ✅ ${completion.sessionText} → ${timeHHMM} (${totalTimeDecimal} decimal)`);
+  } catch (e) {
+    console.log(`  ⚠️ ${e.message}`);
+    console.log('  Total Time y Time quedan vacíos — llenálos a mano en la hoja.');
+  }
+
+  const result = await logSongToSheet({ timeHHMM, totalTimeDecimal });
 
   if (result.written) {
-    // Validar coherencia con el estado, sólo para avisar (no abortar).
     if (current && current.songId !== result.songId) {
       console.log(
         `\n⚠️ OJO: registré "${result.songId}" pero state.json tenía "${current.songId}". ` +
@@ -225,7 +400,9 @@ async function runDone() {
     }
     state.write({ songId: result.songId, titulo: result.titulo, stage: state.STAGES.COMPLETED });
     console.log('\n✅ Canción registrada y marcada como completada.');
-    console.log('⏱️  Te queda a mano en la hoja: Total Time, Time, Remarks y Flow Screenshot.');
+    const pending = ['Remarks', 'Flow Screenshot'];
+    if (!timeHHMM) pending.unshift('Total Time', 'Time');
+    console.log(`⏱️  Te queda a mano en la hoja: ${pending.join(', ')}.`);
   } else if (result.reason === 'duplicate') {
     console.log('\n(No se registró de nuevo — ya estaba en la hoja.)');
   }
