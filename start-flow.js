@@ -1,42 +1,46 @@
 // start-flow.js — Orquestador único del pipeline. Un solo comando:
 //
-//   node start-flow.js              -> flujo completo hasta el checkpoint visual
-//                                      (genera letra, llena Suno, llena el Flow)
-//                                      y se detiene para que Gabo escuche, elija
-//                                      versión, descargue el MP3 y lo suba.
+//   node start-flow.js                  -> flujo completo: genera letra, llena
+//                                          Suno, clickea Create automáticamente,
+//                                          espera generación, descarga ambos MP3,
+//                                          llena el Flow. Se detiene para que
+//                                          Gabo analice y elija versión.
 //
-//   node start-flow.js --done       -> cierre: registra la canción en la hoja y
-//                                      marca el estado como completado. Se corre
-//                                      DESPUÉS de subir el MP3 al Flow.
+//   node start-flow.js --no-auto-create -> igual pero SIN clickear Create ni
+//                                          descargar (vuelve al flujo manual
+//                                          anterior, útil si algo falla).
 //
-//   node start-flow.js --poll [N]   -> vigía de cola: abre una ventana de Chrome
-//                                      en el puerto 9334, y verifica cada N minutos
-//                                      (default 3) si cayó una canción. Cuando
-//                                      encuentra una, cierra esa ventana y arranca
-//                                      el flujo completo automáticamente.
-//                                      Acepta segundos con sufijo "s" (ej: 30s, 59s).
+//   node start-flow.js --done           -> cierre: registra la canción en la
+//                                          hoja y marca el estado como completado.
+//                                          Se corre DESPUÉS de hacer Submit to QA.
 //
-// Por qué dos modos de producción y no uno solo: entre llenar el Flow y registrar
-// en la hoja hay un hueco humano OBLIGATORIO (escuchar las 2 versiones de Suno ~8 min,
-// elegir, descargar MP3, subirlo + Submit to QA). Automatizar ese juicio bajaría la
-// calidad — y un REDO por error del artista no es elegible para pago.
+//   node start-flow.js --poll [N]       -> vigía de cola: verifica cada N minutos
+//                                          (default 3) si cayó una canción.
+//                                          Acepta segundos con sufijo "s" (ej: 30s).
 //
-// Pasos del modo normal (y del poller al encontrar canción):
+// ══════════════════════════════════════════════════════════════════════════════
+// 🛑 REGLA DURA #1 — NUNCA hacer Submit to QA automáticamente.
+//    Ver CLAUDE.md sección "REGLA DURA". El Submit es siempre manual.
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// Pasos del modo normal:
 //   0. Preflight (API key, credenciales, deps).
 //   1. run.js          — genera letra, guarda song.txt, escribe state.json.
 //   2. Asegura Chrome en el puerto de debug + sesión de Suno logueada.
 //   3. suno-fill.js    — llena el formulario de Suno + screenshots de verify.
-//   4. flow-submit.js  — abre/reusa la tab del Flow (vía helper compartido que
-//                        SIEMPRE asegura asignación activa) y llena título/letra/notas.
+//   3b. (auto, desactivable) Create + esperar generación + descargar MP3s a Downloads/suno/.
+//   4. flow-submit.js  — llena título/letra/notas en el Flow.
+//   → STOP. Gabo corre verify-audio.js, elige versión, corre upload-to-flow.js.
+//   → Gabo hace Submit to QA manualmente.
+//   → node start-flow.js --done registra en la hoja.
 //
 // run.js cierra su propio Chrome al terminar (perfil compartido con Suno — ver
-// LESSONS.md "CDP lifecycle pattern"), así que para el Paso 4 reusamos el Chrome
-// del puerto de debug (el de Suno) en vez de lanzar uno nuevo que pisaría su sesión.
+// LESSONS.md "CDP lifecycle pattern"), así que para los Pasos 3b y 4 reusamos el
+// Chrome del puerto de debug (el de Suno) en vez de lanzar uno nuevo.
 //
 // El modo --poll usa el puerto 9334 (distinto del de Suno, 9333). Antes de lanzar
 // el flujo, cierra su Chrome y espera a que el puerto caiga — señal concreta de que
-// el proceso murió y el perfil quedó libre. Nunca un sleep fijo. Ver LESSONS.md
-// "Perfil compartido: poller cerró Chrome, pero run.js lo encontró todavía abierto".
+// el proceso murió y el perfil quedó libre. Nunca un sleep fijo. Ver LESSONS.md.
 
 const { spawn } = require('child_process');
 const fs = require('fs');
@@ -46,6 +50,7 @@ const { chromium } = require('playwright');
 const { isLoggedIn, clickByText } = require('./lib/playwright-helpers');
 const { enterFlowAndEnsureAssignment, FLOW_URL } = require('./lib/flow-helpers');
 const { runPreflight } = require('./lib/preflight');
+const { notify } = require('./lib/ntfy');
 const state = require('./lib/pipeline-state');
 
 const DEBUG_PORT = 9333;   // Chrome de Suno (ya corriendo para suno-fill y flow-submit)
@@ -444,11 +449,13 @@ async function runDone() {
   // Intentar leer tiempo de sesión y screenshot desde "Recent completions"
   let timeHHMM = null;
   let totalTimeDecimal = null;
+  let screenshotPath = null;
   console.log('\nLeyendo tiempo de sesión desde Recent completions...');
   try {
     const completion = await readRecentCompletion(current?.titulo ?? null);
     timeHHMM = completion.timeHHMM;
     totalTimeDecimal = completion.totalTimeDecimal;
+    screenshotPath = completion.screenshotPath;
     console.log(`  ✅ ${completion.sessionText} → ${timeHHMM} (${totalTimeDecimal} decimal)`);
   } catch (e) {
     console.log(`  ⚠️ ${e.message}`);
@@ -466,11 +473,96 @@ async function runDone() {
     }
     state.write({ songId: result.songId, titulo: result.titulo, stage: state.STAGES.COMPLETED });
     console.log('\n✅ Canción registrada y marcada como completada.');
+
+    // ── Pieza 8: screenshot → Drive (intento; fallback a aviso manual) ──────
+    if (screenshotPath) {
+      await tryDriveScreenshot(screenshotPath, result.row, result.tabName).catch(() => {});
+    }
+
     const pending = ['Remarks', 'Flow Screenshot'];
     if (!timeHHMM) pending.unshift('Total Time', 'Time');
+    if (screenshotPath) {
+      console.log(`📸 Screenshot local: ${screenshotPath}`);
+    }
     console.log(`⏱️  Te queda a mano en la hoja: ${pending.join(', ')}.`);
+
+    // ── Pieza 9: remark draft (solo muestra, no escribe) ────────────────────
+    const remarkDraft = buildRemarkDraft();
+    console.log('\n📝 Borrador de Remarks (no se escribe solo — copialo si querés usarlo):');
+    console.log(`   "${remarkDraft}"`);
+
   } else if (result.reason === 'duplicate') {
     console.log('\n(No se registró de nuevo — ya estaba en la hoja.)');
+  }
+}
+
+// Genera un borrador de remark leyendo las advertencias de song.txt.
+function buildRemarkDraft() {
+  try {
+    if (!fs.existsSync(path.join(__dirname, 'song.txt'))) return 'Sin novedades.';
+    const content = fs.readFileSync(path.join(__dirname, 'song.txt'), 'utf-8');
+    const advertMatch = content.match(/\*\*Advertencias:\*\*\s*([\s\S]+?)(?=NOTES:|$)/i);
+    if (!advertMatch) return 'Sin novedades.';
+    const advert = advertMatch[1].trim().replace(/\s+/g, ' ');
+    if (!advert) return 'Sin novedades.';
+    // Recortar a máximo 200 chars para que quepa en una celda de la hoja
+    return advert.length > 200 ? advert.substring(0, 197) + '...' : advert;
+  } catch {
+    return 'Sin novedades.';
+  }
+}
+
+// Intenta subir el screenshot a Google Drive y poner =IMAGE(url) en col H.
+// Si el service account no tiene Drive scope, falla silenciosamente.
+async function tryDriveScreenshot(localPngPath, sheetRow, tabName) {
+  const { google } = require('googleapis');
+  const credPath = path.join(__dirname, 'google-credentials.json');
+  if (!fs.existsSync(credPath) || !fs.existsSync(localPngPath)) return;
+
+  try {
+    const credentials = JSON.parse(fs.readFileSync(credPath, 'utf-8'));
+    const auth = new google.auth.GoogleAuth({
+      credentials,
+      scopes: [
+        'https://www.googleapis.com/auth/spreadsheets',
+        'https://www.googleapis.com/auth/drive.file',
+      ],
+    });
+    const drive = google.drive({ version: 'v3', auth });
+    const sheets = google.sheets({ version: 'v4', auth });
+    const { SPREADSHEET_ID } = require('./lib/sheets-core');
+
+    console.log('\n📸 Intentando subir screenshot a Drive...');
+    const uploadRes = await drive.files.create({
+      requestBody: {
+        name: path.basename(localPngPath),
+        mimeType: 'image/png',
+        parents: [], // root del Drive del service account
+      },
+      media: {
+        mimeType: 'image/png',
+        body: fs.createReadStream(localPngPath),
+      },
+      fields: 'id, webViewLink, webContentLink',
+    });
+
+    const fileId = uploadRes.data.id;
+    // Hacer el archivo públicamente legible para que =IMAGE() funcione
+    await drive.permissions.create({
+      fileId,
+      requestBody: { role: 'reader', type: 'anyone' },
+    });
+
+    const imageUrl = `https://drive.google.com/uc?id=${fileId}`;
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${tabName}!H${sheetRow}`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: { values: [[`=IMAGE("${imageUrl}")`]] },
+    });
+    console.log(`  ✅ Screenshot subido a Drive y puesto en col H, fila ${sheetRow}.`);
+  } catch (e) {
+    console.log(`  ⚠️ Drive upload no disponible (${e.message.substring(0, 80)}). Pegá el screenshot manualmente en col H.`);
   }
 }
 
@@ -529,20 +621,62 @@ async function runFlow() {
   await runScript('suno-fill.js');
   state.write({ stage: state.STAGES.SUNO_FILLED });
 
+  // Paso 3b: Create automático + esperar generación + descargar MP3s.
+  // Se puede saltar con --no-auto-create para volver al flujo manual.
+  const noAutoCreate = process.argv.includes('--no-auto-create');
+  let mp3sDescargados = false;
+  if (!noAutoCreate) {
+    console.log('\n=== Paso 3b/4: Create + generación + descarga (suno-create-dl.js) ===');
+    console.log('  (Pasá --no-auto-create para saltar este paso y hacer Create a mano)\n');
+    try {
+      const { createAndDownload } = require('./lib/suno-create-dl');
+      const { versionA, versionB } = await createAndDownload();
+      mp3sDescargados = true;
+      await notify(
+        `MP3s listos: "${state.read()?.titulo || 'canción'}".\nVersiones A y B en Downloads/suno/.\nCorré: node verify-audio.js`,
+        { title: 'Suno: generación completa', priority: 'high', tags: 'musical_note' }
+      );
+      console.log('\n  ✅ Generación y descarga completas.');
+      if (versionA) console.log(`     Versión A: ${versionA.path || versionA.label}`);
+      if (versionB) console.log(`     Versión B: ${versionB.path || versionB.label}`);
+    } catch (e) {
+      console.log(`\n  ⚠️ Create/descarga automático falló: ${e.message}`);
+      console.log('  Continuando con el resto del pipeline. Create manual disponible con:');
+      console.log('    node suno-create.js   (clickea Create)');
+      console.log('    node verify-audio.js  (analiza después de descargar)');
+    }
+  }
+
   console.log('\n=== Paso 4/4: llenando título/letra/notas en el Flow (flow-submit.js) ===');
   await openFlowTabAndEnsureAssignment();
   await runScript('flow-submit.js');
   state.write({ stage: state.STAGES.FLOW_FILLED });
 
-  console.log(
-    '\n✅ Flujo completo hasta el checkpoint visual.\n' +
-      '   Revisá: suno-verify-overview.png, suno-verify-lyrics-expanded.png y flow-submit-verify.png.\n' +
-      '\n   Pasos manuales:\n' +
-      '     1. Clickeá Create en Suno\n' +
-      '     2. Escuchá las 2 versiones, elegí y descargá el MP3\n' +
-      '     3. Subilo al Flow y hacé Submit to QA\n' +
-      '\n   Cuando termines los pasos de arriba, volvé acá y respondé.'
-  );
+  if (mp3sDescargados) {
+    console.log(
+      '\n✅ Flujo completo. MP3s descargados en Downloads/suno/.\n' +
+        '   Revisá: suno-verify-overview.png, suno-verify-lyrics-expanded.png y flow-submit-verify.png.\n' +
+        '\n   Próximos pasos:\n' +
+        '     1. node verify-audio.js       → analiza las 2 versiones (duración + Whisper)\n' +
+        '     2. Escuchá y elegí la versión\n' +
+        '     3. node upload-to-flow.js --version A|B  → sube el MP3 al Flow\n' +
+        '     4. Hacé Submit to QA manualmente en el Flow\n' +
+        '     5. node start-flow.js --done  → registra en la hoja\n' +
+        '\n   Cuando termines, volvé acá y respondé.'
+    );
+  } else {
+    console.log(
+      '\n✅ Flujo completo hasta el checkpoint visual.\n' +
+        '   Revisá: suno-verify-overview.png, suno-verify-lyrics-expanded.png y flow-submit-verify.png.\n' +
+        '\n   Pasos manuales:\n' +
+        '     1. Clickeá Create en Suno (o: node suno-create.js)\n' +
+        '     2. Descargá los 2 MP3 a Downloads/suno/\n' +
+        '     3. node verify-audio.js     → analiza duración y letra\n' +
+        '     4. node upload-to-flow.js --version A|B  → sube el MP3 elegido\n' +
+        '     5. Hacé Submit to QA manualmente\n' +
+        '\n   Cuando termines los pasos de arriba, volvé acá y respondé.'
+    );
+  }
   const confirmed = await askDoneQuestion();
   if (confirmed) {
     await runDone();

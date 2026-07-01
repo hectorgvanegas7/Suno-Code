@@ -1,5 +1,17 @@
 # Canción Eterna — Pipeline de producción de canciones
 
+## ════════════════════════════════════════════════════════════════════
+## 🛑 REGLA DURA #1 — NUNCA hacer "Submit to QA" — NO NEGOCIABLE
+## ════════════════════════════════════════════════════════════════════
+## El código JAMÁS hace click en "Submit to QA" o "Complete Song".
+## - upload-to-flow.js sube el MP3 y SE DETIENE. Punto.
+## - El Submit es siempre manual. Siempre. Sin excepciones.
+## - No es un flag configurable. No hay default que lo active.
+## - Motivo: un submit automático cuesta un redo sin pago si el
+##   artista cambia de opinión después de escuchar.
+## - Si alguien en el futuro quiere agregar el submit automático: NO.
+## ════════════════════════════════════════════════════════════════════
+
 Pipeline para crear canciones cristianas personalizadas (negocio tipo SongFinch).
 Esta carpeta es un repo git (sin remoto). Hacé commit antes de cambios grandes.
 
@@ -15,23 +27,24 @@ Esta carpeta es un repo git (sin remoto). Hacé commit antes de cambios grandes.
 
 2. **(manual)** Gabo revisa/edita `song.txt`.
 
-3. **Suno** — `suno-fill.js` conecta por CDP a un Chrome en el puerto 9333, llena
-   suno.com/create (modo Advanced) con título/letra/estilo desde `song.txt`,
-   setea Vocal Gender según "Voz:", sliders Weirdness/Style Influence a 55%, y
-   toma screenshots para verificación visual. `suno-create.js` clickea Create dos
-   veces (solo DESPUÉS de que Gabo confirme los screenshots). `suno-open-for-login.js`
-   abre Chrome standalone con el puerto de debug para logins manuales.
-   `start-flow.js` (o `npm run flow`) encadena run.js + login check + suno-fill.js +
-   flow-submit.js.
+3. **Suno** — `suno-fill.js` llena el formulario (título/letra/estilo/sliders).
+   `start-flow.js` luego corre `lib/suno-create-dl.js` automáticamente: verifica
+   el formulario, clickea Create × 2, espera la generación (~2-4 min) y descarga
+   ambos MP3 a `Downloads/suno/`. Con `--no-auto-create` se saltea este paso y
+   Create + descarga quedan manuales. Notifica vía ntfy cuando los MP3 están listos.
 
-4. **`flow-submit.js`** — conecta por CDP al mismo Chrome (puerto 9333), abre/reabre
-   la tab del Flow si hace falta, y llena Título/Letra/Notas del Flow desde `song.txt`
-   (campos `#title`, `#lyrics`, `#notes`). Toma `flow-submit-verify.png` y se detiene.
-   Nunca clickea "Complete Song"/Submit to QA, nunca cierra Chrome. `start-flow.js` lo
-   corre como paso 4/4, después de `suno-fill.js`.
+4. **`flow-submit.js`** — llena Título/Letra/Notas en el Flow. Toma screenshot.
+   Nunca clickea Submit to QA (ver Regla Dura #1).
 
-5. **(manual)** Gabo escucha las 2 versiones de Suno, elige, descarga el MP3, lo sube
-   al Flow (ya con título/letra/notas llenos) y hace Submit to QA / Complete Song.
+5. **`node verify-audio.js`** — analiza los 2 MP3 (duración + Whisper). INFORMA,
+   no decide. Necesita `node setup-whisper.js` corrido una vez antes.
+
+6. **(manual)** Gabo escucha las 2 versiones, elige.
+
+7. **`node upload-to-flow.js --version A|B`** — sube el MP3 elegido al Flow.
+   SE DETIENE (Regla Dura #1). Nunca hace Submit to QA.
+
+8. **(manual)** Gabo hace Submit to QA en el Flow.
 
 6. **(automático al final de `node start-flow.js`)** — Después de completar el
    Paso 4/4, el proceso pausa y pregunta `¿Ya hiciste Submit to QA? (s/n)`. Al
@@ -67,21 +80,27 @@ Esta carpeta es un repo git (sin remoto). Hacé commit antes de cambios grandes.
 - `run.js` — generación de letra (~850 líneas, validación estructural dura adentro).
   Usa `lib/flow-helpers.js` para entrar al Flow y escribe `state.json` al terminar.
 - `suno-fill.js` — llenado de Suno (canónico; suno-fill2.js fue fusionado y borrado)
-- `suno-create.js` — clickea Create (después de verificación visual)
+- `suno-create.js` — clickea Create manualmente (standalone; start-flow.js usa suno-create-dl.js)
 - `suno-open-for-login.js` — Chrome standalone para login
 - `flow-submit.js` — llenado de Título/Letra/Notas en el Flow (`#title`/`#lyrics`/`#notes`),
   nunca clickea Complete Song/Submit to QA
-- `start-flow.js` — orquestador único. Tres modos:
-  - `node start-flow.js` = flujo completo: genera letra, llena Suno, llena el Flow,
-    luego pausa y pregunta `¿Ya hiciste Submit to QA? (s/n)`. Al responder `s`,
-    registra en la hoja automáticamente en el mismo proceso — sin abrir otra terminal.
-  - `node start-flow.js --done` = cierre manual (fallback si la sesión se cerró
-    antes de responder al prompt). Registra en la hoja + marca state.json.
-  - `node start-flow.js --poll [N]` = vigía de cola: abre Chrome en puerto 9334, verifica
-    cada N minutos (default 3; acepta "30s" para segundos). Al encontrar canción, cierra su
-    Chrome (espera señal concreta: puerto caído), luego arranca el flujo completo en el mismo
-    proceso. Detecta typos de `--done`/`--poll` escritos con espacio y aborta antes de hacer daño.
+- `setup-whisper.js` — instala/verifica Python, faster-whisper, ffmpeg. Correr una vez.
+- `verify-audio.js` — analiza los 2 MP3 (duración + Whisper + comparación letra). INFORMA,
+  no decide, no sube nada. Requiere setup-whisper.js previo.
+- `upload-to-flow.js` — sube el MP3 elegido al Flow. SE DETIENE sin Submit to QA (Regla Dura #1).
+  Uso: `node upload-to-flow.js --version A|B` o `--file "ruta.mp3"`.
+- `start-flow.js` — orquestador único. Cuatro modos:
+  - `node start-flow.js` = flujo completo (genera, llena Suno, Create, descarga MP3, llena Flow).
+    Después: verify-audio.js → upload-to-flow.js → Submit manual → start-flow.js --done.
+  - `node start-flow.js --no-auto-create` = igual pero sin Create/descarga automáticos.
+  - `node start-flow.js --done` = cierre: registra en la hoja + marca state.json.
+  - `node start-flow.js --poll [N]` = vigía de cola (cada N min, default 3; acepta "30s").
   - `poll-flow.js` es ahora un redirect deprecated a `start-flow.js --poll`.
+- `lib/suno-create-dl.js` — Create × 2 + espera generación + descarga ambos MP3 a Downloads/suno/.
+- `lib/audio-match.js` — encuentra los 2 MP3 por título + recencia en Downloads/suno/.
+- `lib/audio-analysis.js` — ffprobe (duración) + Whisper (transcripción) + comparación letra.
+- `lib/transcribe.py` — script Python que usa faster-whisper para transcribir.
+- `lib/ntfy.js` — notificaciones push vía ntfy.sh (tópico cancioneterna-gabo-2026).
 - `sheets.js` — wrapper standalone de `lib/sheets-core.js` (registro en Google Sheet)
 - `lib/playwright-helpers.js` — helpers de Playwright (clickByText, setSliderValue,
   expandIfCollapsed, connectToSunoTab, isLoggedIn)
