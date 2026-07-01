@@ -751,18 +751,15 @@ process.on('uncaughtException', async (err) => {
     const page = context.pages()[0] || (await context.newPage());
 
     await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded' });
-    await page.waitForLoadState('networkidle').catch(() => {});
 
     if (page.url().includes('/sign-in')) {
       console.log('\nNo hay sesión activa. Iniciá sesión manualmente en la ventana que se abrió (esperando hasta 5 minutos)...\n');
       await page.waitForURL((url) => !url.toString().includes('/sign-in'), { timeout: 300000 });
       await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded' });
-      await page.waitForLoadState('networkidle').catch(() => {});
     }
 
     console.log('Clicking "Enter Flow"...');
     await clickByText(page, 'Enter Flow');
-    await page.waitForLoadState('networkidle').catch(() => {});
     // El cliente tarda un instante en confirmar si ya hay una asignación activa
     // (a veces muestra el botón "Assign Most Urgent Song" brevemente antes de
     // reemplazarlo por la asignación ya existente) — esperamos a que se asiente
@@ -776,7 +773,6 @@ process.on('uncaughtException', async (err) => {
       console.log('Clicking "Assign Most Urgent Song"...');
       await clickByText(page, 'Assign Most Urgent Song');
       await page.waitForTimeout(2000);
-      await page.waitForLoadState('networkidle').catch(() => {});
     } else {
       console.log('Ya hay una asignación activa en curso, continuando con ella...');
     }

@@ -1,5 +1,77 @@
 # Lessons / gotchas
 
+## `networkidle` siempre da TimeoutError en Suno y el Flow (2026-06-30)
+
+`waitUntil: 'networkidle'` y `waitForLoadState('networkidle')` fallaban
+consistentemente en `start-flow.js` (y en cualquier script que toque Suno o
+cancioneterna.com): la red nunca queda idle porque Suno tiene websockets +
+polling de queue activos permanentemente, y el Flow tiene sus propias
+conexiones persistentes. Playwright agotaba los 30s y tiraba `TimeoutError`
+en cada reload/goto.
+
+**Fix:** eliminados TODOS los usos de `networkidle` del repo (`grep -rn networkidle`).
+Reemplazados por:
+- `waitUntil: 'domcontentloaded'` con `timeout: 60000` en todo `reload` y `goto`.
+- Espera de selector concreto del DOM (`waitForSelector`, `waitForFunction`)
+  como señal real de que la página cargó, en vez del estado de la red.
+
+**Takeaway:** `networkidle` está deprecado por Playwright por este motivo exacto —
+es inviable en cualquier SPA con conexiones persistentes. El reemplazo correcto
+es siempre un selector estructural estable (`data-testid`, `id`, texto de botón)
+que solo aparece cuando el estado de la página es el esperado. Nunca usar estado
+de red como proxy de "página lista".
+
+## `enterFlowAndEnsureAssignment` fallaba si React no había renderizado aún (2026-06-30)
+
+La función verificaba `#lyrics`, `Enter Flow` y `Assign Most Urgent Song` con
+`.count()` inmediato — si React todavía no había pintado ninguno de los tres
+(lo cual es normal, el contenido llega async después de `domcontentloaded`),
+los tres conteos devolvían 0 y el código caía directo al error genérico
+"No se encontró #lyrics, ni Enter Flow, ni Assign Most Urgent Song" sin haber
+esperado nada.
+
+**Fix:** la función ahora hace `page.waitForFunction()` con timeout 30s que
+hace un race entre los cuatro estados posibles del DOM: `'lyrics'` (#lyrics
+presente), `'enter-flow'` (botón Enter Flow visible), `'assign'` (botón Assign
+visible), o `'login'` (formulario de email/password visible). Solo cuando uno
+de ellos aparece, actúa. Si ninguno aparece en 30s, tira error descriptivo con
+la URL actual. Si detecta login (por URL o por formulario), da un error claro
+"Sesión no logueada en el Flow" en vez del timeout genérico.
+
+**Takeaway:** nunca usar `.count()` inmediato para detectar el estado de una
+SPA después de una navegación. React renderiza async: el DOM puede estar vacío
+un instante después de `domcontentloaded`. El patrón correcto es `waitForFunction`
+o `waitForSelector` con timeout real, que esperan a que el contenido aparezca.
+
+## Paso 2/4: falso "no hay sesión" por página de Suno cargando lento (2026-06-30)
+
+`checkSunoLoginOnce()` llama a `isLoggedIn()`, que detecta login buscando el botón
+"Create" con `getByRole('button', { name: /create/i })`. Si la página está en estado
+intermedio — pantalla negra, skeleton loading, o i18n keys sin resolver (ej.
+`"createForm.createButton"` en vez de `"Create"`) — ese selector devuelve 0 aunque
+el usuario sí esté logueado. La función devuelve `false` inmediatamente, disparando
+un wait manual de 5 minutos que no era necesario.
+
+**Fix:** nueva función `checkSunoSessionReady(maxAttempts=3)` en `start-flow.js`:
+1. Navega a `suno.com/create` si no está ahí.
+2. Espera hasta 10 s a que aparezca un indicador definitivo: ya sea
+   `[data-testid="lyrics-textarea"]` (formulario presente = logueado) o un
+   elemento con texto exacto "Sign in" (no logueado). El `data-testid` no depende
+   de traducciones, así que es estable aunque los labels muestren claves i18n crudas.
+3. Si ninguno aparece en 10 s → la página no cargó bien → `page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 })`
+   + 3 s de espera → reintento.
+4. Máximo 3 intentos. Si se agotan sin estado definitivo, devuelve `false` y entra
+   en el wait de login manual (comportamiento anterior), logueando el motivo.
+5. `runFlow()` ahora llama `checkSunoSessionReady()` en vez de `checkSunoLoginOnce()`.
+
+`checkSunoLoginOnce()` y `waitUntilSunoLoggedIn()` siguen iguales — se usan en el
+bucle de poll durante el wait manual, donde la página ya está en un estado conocido.
+
+**Takeaway:** para detectar estado de sesión no hay que buscar texto UI traducible
+— hay que esperar un elemento estructural estable (`data-testid`, `id`, selector
+de atributo) que aparezca solo cuando la página está realmente cargada. Usar texto
+visible como proxy del estado de carga es frágil ante i18n keys y skeleton screens.
+
 ## Suno no carga traducciones: selectores de texto fallan con i18n keys crudas (2026-06-30)
 
 A veces la página de Suno carga pero no resuelve las traducciones de la UI —
@@ -18,7 +90,7 @@ colgó 30 segundos y tiró error, interrumpiendo el flujo.
 3. `fillSunoForm` se llama dentro de `withReloadRetry(page, fn, { maxAttempts: 3 })`,
    un nuevo helper en `lib/playwright-helpers.js`. Si cualquier selector dentro de
    `fillSunoForm` falla (More Options, Advanced tab, Write radio, género, sliders,
-   title input), `withReloadRetry` hace `page.reload({ waitUntil: 'networkidle' })`
+   title input), `withReloadRetry` hace `page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 })`
    + 3 segundos de espera, y reintenta el llenado completo desde cero.
 4. Máximo 3 intentos totales. En el último, tira error descriptivo que apunta a un
    problema temporal de Suno, no del script.

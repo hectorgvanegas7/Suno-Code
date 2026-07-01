@@ -149,7 +149,6 @@ async function findNotesField(page) {
 
   const { browser, page } = await connectToFlowTab();
   console.log('Conectado a:', page.url());
-  await page.waitForLoadState('networkidle').catch(() => {});
 
   const titleLocator = page.locator('#title');
   const lyricsLocator = page.locator('#lyrics');

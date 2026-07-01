@@ -108,6 +108,73 @@ async function waitUntilSunoLoggedIn() {
   throw new Error('Tiempo agotado esperando el login manual de Suno (5 minutos).');
 }
 
+// Verifica si la sesión de Suno está activa, con retry+reload para el caso en
+// que la página cargue mal (pantalla negra, skeleton, o i18n keys sin resolver).
+//
+// Espera un indicador definitivo: [data-testid="lyrics-textarea"] (formulario
+// presente = logueado) o un enlace/botón con texto "Sign in" (no logueado).
+// Si ninguno aparece en 10 segundos → la página no cargó bien → reload y reintento.
+// Máximo maxAttempts en total; si se agotan sin estado definitivo devuelve false
+// para que el caller entre en el wait de login manual.
+//
+// Usa [data-testid="lyrics-textarea"] como sentinel en vez del botón "Create"
+// porque data-testid no depende de traducciones — es estable aunque Suno
+// renderice i18n keys crudas (ej: "createForm.createButton") en el texto visible.
+async function checkSunoSessionReady(maxAttempts = 3) {
+  return withCdp(async (browser) => {
+    const context = browser.contexts()[0];
+    const pages = context.pages();
+    let page = pages.find((p) => p.url().includes('suno.com')) || pages[0];
+    await page.bringToFront();
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      // Asegurar que estamos en /create — la única vista que muestra el formulario
+      // o el sign-in de forma inequívoca.
+      if (!page.url().includes('suno.com/create')) {
+        await page.goto('https://suno.com/create', { waitUntil: 'domcontentloaded' });
+        await page.waitForTimeout(1000);
+      }
+
+      // Esperar hasta 10s a que aparezca un elemento definitivo.
+      // Si se agota el timeout la página no cargó bien → reload y reintento.
+      let definitive = true;
+      try {
+        await page.waitForFunction(
+          () =>
+            !!document.querySelector('[data-testid="lyrics-textarea"]') ||
+            Array.from(document.querySelectorAll('a, button')).some((el) =>
+              /^sign in$/i.test(el.textContent.trim())
+            ),
+          { timeout: 10000 }
+        );
+      } catch {
+        definitive = false;
+      }
+
+      if (definitive) {
+        // Estado definitivo alcanzado — determinar cuál ganó.
+        const hasForm = (await page.locator('[data-testid="lyrics-textarea"]').count()) > 0;
+        return hasForm; // true = logueado, false = no logueado
+      }
+
+      // Página no cargó bien — reload y reintento.
+      if (attempt < maxAttempts) {
+        console.log(
+          `[Paso 2/4] Suno no cargó bien, recargando página (intento ${attempt}/${maxAttempts})...`
+        );
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
+        await page.waitForTimeout(3000);
+      } else {
+        console.log(
+          '[Paso 2/4] Suno no respondió después de varios reloads — asumiendo que puede necesitar login.'
+        );
+      }
+    }
+
+    return false; // fallback: entrar en wait de login manual
+  });
+}
+
 // Reusa el Chrome del puerto de debug, ubica/abre la tab del Flow, y usa el
 // helper compartido para garantizar que haya una asignación activa (#lyrics).
 async function openFlowTabAndEnsureAssignment() {
@@ -255,7 +322,6 @@ async function readRecentCompletion(expectedTitulo) {
     } else {
       await page.reload({ waitUntil: 'domcontentloaded' });
     }
-    await page.waitForLoadState('networkidle').catch(() => {});
     await page.waitForSelector('h3:has-text("Recent completions")', { timeout: 15000 });
     await page.waitForTimeout(500);
 
@@ -451,8 +517,8 @@ async function runFlow() {
     }
   }
 
-  if (await checkSunoLoginOnce()) {
-    console.log('Sesión de Suno confirmada (sin "Sign in", botón Create presente).');
+  if (await checkSunoSessionReady()) {
+    console.log('Sesión de Suno confirmada.');
   } else {
     console.log('No hay sesión activa en Suno. Iniciá sesión manualmente en la ventana de Chrome (esperando hasta 5 minutos)...');
     await waitUntilSunoLoggedIn();

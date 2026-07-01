@@ -804,13 +804,11 @@ process.on('uncaughtException', async (err) => {
     const page = context.pages()[0] || (await context.newPage());
 
     await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded' });
-    await page.waitForLoadState('networkidle').catch(() => {});
 
     if (page.url().includes('/sign-in')) {
       console.log('\nNo hay sesión activa. Iniciá sesión manualmente en la ventana que se abrió (esperando hasta 5 minutos)...\n');
       await page.waitForURL((url) => !url.toString().includes('/sign-in'), { timeout: 300000 });
       await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded' });
-      await page.waitForLoadState('networkidle').catch(() => {});
     }
 
     console.log('Entrando al Flow y asegurando asignación activa...');

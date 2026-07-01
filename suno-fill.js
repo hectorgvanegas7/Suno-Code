@@ -118,7 +118,6 @@ async function fillSunoForm(page, titulo, voz, estilo, lyrics, genderTarget) {
   if (!page.url().includes('/create')) {
     await page.goto('https://suno.com/create', { waitUntil: 'domcontentloaded' });
   }
-  await page.waitForLoadState('networkidle').catch(() => {});
   await page.waitForTimeout(1000);
 
   // Fill the form, retrying with page.reload() if any text-based selector times
