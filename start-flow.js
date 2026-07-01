@@ -10,6 +10,15 @@
 //                                          descargar (vuelve al flujo manual
 //                                          anterior, útil si algo falla).
 //
+//   node start-flow.js --no-auto-verify -> igual pero SIN lanzar verify-audio.js
+//                                          automático en background tras los MP3
+//                                          (Gabo lo corre a mano cuando quiera).
+//
+//   node start-flow.js --fast-verify    -> el auto-verify (si no se saltea)
+//                                          fuerza el modo rápido (Whisper
+//                                          small/CPU) en vez de --demucs, que
+//                                          es el default.
+//
 //   node start-flow.js --done           -> cierre: registra la canción en la
 //                                          hoja y marca el estado como completado.
 //                                          Se corre DESPUÉS de hacer Submit to QA.
@@ -29,8 +38,11 @@
 //   2. Asegura Chrome en el puerto de debug + sesión de Suno logueada.
 //   3. suno-fill.js    — llena el formulario de Suno + screenshots de verify.
 //   3b. (auto, desactivable) Create + esperar generación + descargar MP3s a Downloads/suno/.
+//   3c. (auto, desactivable) verify-audio.js en background (--demucs por default,
+//       no bloquea el Paso 4/4; log en logs/verify-audio-auto-*.log).
 //   4. flow-submit.js  — llena título/letra/notas en el Flow.
-//   → STOP. Gabo corre verify-audio.js, elige versión, corre upload-to-flow.js.
+//   → STOP. Gabo revisa el resultado de verify-audio.js (o lo corre a mano si
+//     se saltéo), elige versión, corre upload-to-flow.js.
 //   → Gabo hace Submit to QA manualmente.
 //   → node start-flow.js --done registra en la hoja.
 //
@@ -61,6 +73,52 @@ const CHROME_PATH = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
 const USER_DATA_DIR = 'C:\\Users\\hecto\\AppData\\Local\\ChromeAutomationProfile';
 const PROFILE_DIRECTORY = 'Profile 1';
 const LOGIN_WAIT_TIMEOUT_MS = 5 * 60 * 1000;
+const AUTO_VERIFY_LOG_DIR = path.join(__dirname, 'logs');
+
+// Lanza verify-audio.js como proceso hijo DESACOPLADO (detached + unref) apenas
+// los 2 MP3 terminan de aterrizar — start-flow.js NO espera a que termine, sigue
+// de inmediato con el Paso 4/4. Por defecto corre en modo --demucs (htdemucs_ft +
+// Whisper large-v3 CUDA en la RTX 4070): como no bloquea, el tiempo extra no
+// importa. --fast-verify fuerza el modo rápido (Whisper small/CPU) si hace falta.
+// Si el proceso hijo falla, NUNCA rompe el pipeline principal — solo se loguea
+// a un archivo y se manda un aviso por ntfy (best-effort, no se espera).
+function launchAutoVerify({ fast = false } = {}) {
+  try {
+    fs.mkdirSync(AUTO_VERIFY_LOG_DIR, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const logPath = path.join(AUTO_VERIFY_LOG_DIR, `verify-audio-auto-${stamp}.log`);
+    const logFd = fs.openSync(logPath, 'a');
+
+    const modeLabel = fast ? 'modo rápido (Whisper small/CPU)' : '--demucs (htdemucs_ft + Whisper large-v3 CUDA)';
+    console.log(`\n=== Paso 3c/4: verify-audio.js automático en background — ${modeLabel} ===`);
+    console.log(`  Log: ${logPath}`);
+    console.log('  (Pasá --no-auto-verify para saltear este paso, --fast-verify para forzar el modo rápido)');
+
+    const args = fast ? ['verify-audio.js'] : ['verify-audio.js', '--demucs'];
+    const child = spawn('node', args, {
+      cwd: __dirname,
+      detached: true,
+      stdio: ['ignore', logFd, logFd],
+    });
+    child.unref();
+
+    child.on('error', (e) => {
+      console.log(`  ⚠️ No se pudo lanzar verify-audio.js automático: ${e.message}`);
+      notify(`⚠️ Auto-verify no arrancó: ${e.message}`, { title: 'verify-audio automático falló', priority: 'default', tags: 'warning' }).catch(() => {});
+    });
+    child.on('exit', (code) => {
+      if (code !== 0) {
+        notify(
+          `⚠️ verify-audio.js automático terminó con error (código ${code}). Revisá: ${logPath}`,
+          { title: 'Auto-verify falló', priority: 'default', tags: 'warning' }
+        ).catch(() => {});
+      }
+    });
+  } catch (e) {
+    // Nunca debe romper el pipeline principal por esto.
+    console.log(`  ⚠️ No se pudo iniciar verify-audio.js automático: ${e.message}`);
+  }
+}
 
 function runScript(scriptName) {
   return new Promise((resolve, reject) => {
@@ -639,6 +697,14 @@ async function runFlow() {
       console.log('\n  ✅ Generación y descarga completas.');
       if (versionA) console.log(`     Versión A: ${versionA.path || versionA.label}`);
       if (versionB) console.log(`     Versión B: ${versionB.path || versionB.label}`);
+
+      // Paso 3c: verify-audio.js automático en background (no bloquea).
+      // --no-auto-verify lo saltea; --fast-verify fuerza el modo rápido en vez de --demucs.
+      if (!process.argv.includes('--no-auto-verify')) {
+        launchAutoVerify({ fast: process.argv.includes('--fast-verify') });
+      } else {
+        console.log('\n  (--no-auto-verify: saltando el análisis automático — corré node verify-audio.js a mano)');
+      }
     } catch (e) {
       console.log(`\n  ⚠️ Create/descarga automático falló: ${e.message}`);
       console.log('  Continuando con el resto del pipeline. Create manual disponible con:');

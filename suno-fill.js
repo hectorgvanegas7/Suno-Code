@@ -1,7 +1,7 @@
 const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
-const { setSliderValue, expandIfCollapsed, withReloadRetry, connectToSunoTab } = require('./lib/playwright-helpers');
+const { safeClick, setSliderValue, expandIfCollapsed, withReloadRetry, connectToSunoTab } = require('./lib/playwright-helpers');
 
 const SONG_PATH = path.join(__dirname, 'song.txt');
 
@@ -75,7 +75,7 @@ async function fillSunoForm(page, titulo, voz, estilo, lyrics, genderTarget) {
   await expandIfCollapsed(page, 'More Options', genderButton);
 
   // Vocal Gender
-  await genderButton.click();
+  await safeClick(page, genderButton, { label: `Vocal Gender (${genderTarget})`, maxAttempts: 3 });
   await page.waitForTimeout(300);
 
   // Sliders

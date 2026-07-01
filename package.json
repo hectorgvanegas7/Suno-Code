@@ -17,6 +17,7 @@
   "type": "commonjs",
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
+    "fastest-levenshtein": "^1.0.16",
     "googleapis": "^173.0.0",
     "playwright": "^1.61.0"
   }

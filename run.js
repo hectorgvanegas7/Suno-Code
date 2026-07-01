@@ -258,30 +258,8 @@ Pick the template below that matches the survey's real energy (not everything is
 
 ### AUTO-QA CHECKLIST — RUN BEFORE DELIVERING
 
-Verify every item internally before showing the result. If any item fails, regenerate. Maximum 3 attempts.
+Verify every item internally before showing the result — go line by line through the **QA Checklist** block defined in the RESPONSE FORMAT section below and confirm each one is a real ✓ against the lyrics you just wrote, not assumed. If any item fails, regenerate. Maximum 3 attempts.
 If still failing after 3 attempts, deliver with: ⚠️ REVISAR MANUALMENTE: [list of failed items]
-
-- [ ] Exactly 6 sections in correct order?
-- [ ] Every section exactly 4 lines?
-- [ ] Person's name (or "[Name], mamá/papá" for parent surveys) is the FIRST WORD of line 1 in Chorus 1 and Chorus 2?
-- [ ] Person's name appears ONLY ONCE per chorus?
-- [ ] Person's name is ABSENT from Verse 1?
-- [ ] Chorus 1 and Chorus 2 are structurally and emotionally different?
-- [ ] Verse 2 has a concrete scene (zero quality lists)?
-- [ ] Bridge uses the most specific and vulnerable detail from the survey?
-- [ ] Zero invented details not in the survey?
-- [ ] Address form (tú/usted/vos) is consistent in EVERY line including the Outro?
-- [ ] All numbers, months and acronyms written in full?
-- [ ] Title cannot be sung as an opening line?
-- [ ] No em dashes, semicolons, or colons anywhere in the lyrics?
-- [ ] No consecutive lines starting with the same word?
-- [ ] Every single line makes logical sense in context?
-- [ ] Suno style prompt is written entirely in English and ends with "Latin American Spanish, neutral accent, seseo"?
-- [ ] No verbatim quoted dialogue from the survey — transformed into imagery instead?
-- [ ] If multiple recipients: each one gets balanced, separate lyrical space, never all names in one line?
-- [ ] Single consistent point of view throughout (or full "voice of God" for self-dedicated songs)?
-- [ ] No name spelled out acrostic-style?
-- [ ] Any phonetic re-spelling used is flagged in Advertencias?
 
 ### RESPONSE FORMAT
 
@@ -412,13 +390,13 @@ async function generateSongWithClaude(surveyText) {
       'content-type': 'application/json',
     },
     body: JSON.stringify({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 4000,
+      model: 'claude-sonnet-5',
+      max_tokens: 7000,
       system: [
         {
           type: 'text',
           text: SYSTEM_PROMPT,
-          cache_control: { type: 'ephemeral' },
+          cache_control: { type: 'ephemeral', ttl: '1h' },
         },
       ],
       messages: [{ role: 'user', content: surveyText }],

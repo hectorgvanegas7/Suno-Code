@@ -7,7 +7,7 @@ Esta carpeta es un repo git (sin remoto). Hacé commit antes de cambios grandes.
 
 1. **`node run.js`** — Abre el Artist Flow de cancioneterna.com, entra al Flow,
    resuelve la asignación activa (o asigna la más urgente). Lee la encuesta,
-   genera letra + estilo Suno + título via API de Anthropic (Sonnet 4.6, system
+   genera letra + estilo Suno + título via API de Anthropic (Sonnet 5, system
    prompt y checklist QA están dentro de run.js). Guarda en `song.txt` y lo abre
    en Notepad. Maneja REDO automáticamente: si hay banner naranja de QC, lee el
    feedback + letra actual y pide a Gemini el fix preciso + una pasada de mejora

@@ -5,20 +5,30 @@
 //   node verify-audio.js --title "El amor"  → título manual
 //   node verify-audio.js --dir "C:\ruta"    → directorio alternativo
 //   node verify-audio.js --minutes 30       → ventana de recencia (default 20)
+//   node verify-audio.js --demucs           → pipeline avanzado (ver abajo)
 //
 // Qué hace:
 //   1. Encuentra los 2 MP3 que coinciden con el título en Downloads/suno/
-//   2. Verifica duración con ffprobe (2:45–3:30 = OK)
-//   3. Transcribe con Whisper y compara contra song.txt
+//   2. Verifica duración con ffprobe (2:45–3:30 = OK, en paralelo para A y B)
+//      + corte abrupto + clipping
+//   3. Transcribe con Whisper y compara contra song.txt (Levenshtein) +
+//      chequeo de tags de estructura cantados
 //   4. Imprime reporte orientativo (NUNCA elige versión)
 //   5. Notifica por ntfy cuando termina
+//
+// Con --demucs: separa voz con demucs (htdemucs_ft) antes de transcribir,
+//   usa Whisper large-v3 en CUDA (RTX 4070, con fallback automático a CPU si
+//   CUDA no está disponible) y agrega el chequeo de "instrumental accidental".
+//   Requiere: pip install demucs (ver lib/audio-analysis.js). Si demucs no
+//   está instalado, avisa y sigue transcribiendo el MP3 completo.
+// Sin --demucs: comportamiento idéntico al de siempre (Whisper small en CPU).
 //
 // NUNCA sube nada, NUNCA elige versión, NUNCA toca el Flow.
 
 const fs = require('fs');
 const path = require('path');
 const { findSunoMp3s, SUNO_DIR } = require('./lib/audio-match');
-const { analyzeAudio, printReport, parseLyricsFromSongFile, parseTituloFromSongFile, SONG_PATH } = require('./lib/audio-analysis');
+const { analyzeAudio, printReport, parseLyricsFromSongFile, parseTituloFromSongFile, getDurationAsync, formatDuration, formatElapsed, SONG_PATH } = require('./lib/audio-analysis');
 const { notify } = require('./lib/ntfy');
 
 function parseArgs(argv) {
@@ -27,11 +37,13 @@ function parseArgs(argv) {
     if (argv[i] === '--title' && argv[i + 1]) { args.title = argv[++i]; }
     else if (argv[i] === '--dir' && argv[i + 1]) { args.dir = argv[++i]; }
     else if (argv[i] === '--minutes' && argv[i + 1]) { args.minutes = parseInt(argv[++i], 10); }
+    else if (argv[i] === '--demucs') { args.demucs = true; }
   }
   return args;
 }
 
 (async () => {
+  const overallStart = Date.now();
   const args = parseArgs(process.argv.slice(2));
 
   // Leer título y letra de song.txt (o arg manual)
@@ -77,12 +89,25 @@ function parseArgs(argv) {
     console.log('⚠️  No se encontró song.txt — solo se analizará duración.\n');
   }
 
+  if (args.demucs) {
+    console.log('🎚️  --demucs activo: separación de voz (htdemucs_ft) + Whisper large-v3 CUDA.\n');
+  }
+
+  // Duración de A y B en paralelo (no hace falta esperar a una para la otra)
+  const [durationA, durationB] = await Promise.all([
+    getDurationAsync(versionA.path),
+    versionB ? getDurationAsync(versionB.path) : Promise.resolve(null),
+  ]);
+  console.log(`⏱️  Duración — A: ${formatDuration(durationA)}${versionB ? `, B: ${formatDuration(durationB)}` : ''}\n`);
+
   // Analizar cada versión
   console.log('⏳ Analizando Versión A... (puede tardar 1-3 minutos si Whisper necesita transcribir)');
   const reportA = await analyzeAudio(versionA.path, {
     label: 'Versión A',
     titulo,
     lyricsText,
+    useDemucs: !!args.demucs,
+    duration: durationA,
   });
 
   let reportB = null;
@@ -92,11 +117,16 @@ function parseArgs(argv) {
       label: 'Versión B',
       titulo,
       lyricsText,
+      useDemucs: !!args.demucs,
+      duration: durationB,
     });
   }
 
   // Imprimir reporte completo
   printReport(titulo, reportA, reportB);
+
+  const overallElapsedMs = Date.now() - overallStart;
+  console.log(`⏱️  verify-audio.js completo en ${formatElapsed(overallElapsedMs)}.\n`);
 
   // Próximos pasos
   console.log('Próximos pasos:');
@@ -107,9 +137,19 @@ function parseArgs(argv) {
   console.log('');
 
   // Notificación
+  function extraFlags(report) {
+    const parts = [];
+    if (report.levenshteinScore !== null) parts.push(`letra ${Math.round(report.levenshteinScore * 100)}%`);
+    if (report.clippingFlag) parts.push(`clipping ${report.clippingCount}`);
+    if (report.abruptCutoff === true) parts.push('final abrupto');
+    if (report.tagLeaking.length > 0) parts.push('tags cantados');
+    if (report.demucs.used && report.demucs.vocalPresence === true) parts.push('sin voz');
+    return parts.length ? ` (${parts.join(', ')})` : '';
+  }
+
   const notifyMsg = versionB
-    ? `Análisis listo: "${titulo}"\nA=${reportA.durationFormatted}, B=${reportB.durationFormatted}.\nElegí versión y corrí upload-to-flow.js`
-    : `Análisis listo (1 versión): "${titulo}" - ${reportA.durationFormatted}`;
+    ? `Análisis listo (${formatElapsed(overallElapsedMs)}): "${titulo}"\nA=${reportA.durationFormatted}${extraFlags(reportA)}, B=${reportB.durationFormatted}${extraFlags(reportB)}.\nElegí versión y corrí upload-to-flow.js`
+    : `Análisis listo (${formatElapsed(overallElapsedMs)}, 1 versión): "${titulo}" - ${reportA.durationFormatted}${extraFlags(reportA)}`;
   await notify(notifyMsg, { title: 'Análisis de audio listo', priority: 'high', tags: 'headphones' });
 })().catch((err) => {
   console.error('verify-audio.js falló:', err.message);

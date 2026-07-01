@@ -19,7 +19,7 @@ Esta carpeta es un repo git (sin remoto). Hacé commit antes de cambios grandes.
 
 1. **`node run.js`** — Abre el Artist Flow de cancioneterna.com, entra al Flow,
    resuelve la asignación activa (o asigna la más urgente). Lee la encuesta,
-   genera letra + estilo Suno + título via API de Anthropic (Sonnet 4.6, system
+   genera letra + estilo Suno + título via API de Anthropic (Sonnet 5, system
    prompt y checklist QA están dentro de run.js). Guarda en `song.txt` y lo abre
    en Notepad. Maneja REDO automáticamente: si hay banner naranja de QC, lee el
    feedback + letra actual y pide a Claude el fix preciso + una pasada de mejora
@@ -32,12 +32,18 @@ Esta carpeta es un repo git (sin remoto). Hacé commit antes de cambios grandes.
    el formulario, clickea Create × 2, espera la generación (~2-4 min) y descarga
    ambos MP3 a `Downloads/suno/`. Con `--no-auto-create` se saltea este paso y
    Create + descarga quedan manuales. Notifica vía ntfy cuando los MP3 están listos.
+   Apenas aterrizan los MP3, lanza `verify-audio.js` automáticamente en background
+   (`--demucs` por default, no bloquea el resto del pipeline; log en
+   `logs/verify-audio-auto-*.log`). `--no-auto-verify` saltea este paso;
+   `--fast-verify` fuerza el modo rápido (Whisper small/CPU) en vez de `--demucs`.
 
 4. **`flow-submit.js`** — llena Título/Letra/Notas en el Flow. Toma screenshot.
    Nunca clickea Submit to QA (ver Regla Dura #1).
 
 5. **`node verify-audio.js`** — analiza los 2 MP3 (duración + Whisper). INFORMA,
-   no decide. Necesita `node setup-whisper.js` corrido una vez antes.
+   no decide. Necesita `node setup-whisper.js` corrido una vez antes. Ya corrió
+   automático en background al final del Paso 3 (salvo `--no-auto-verify`) —
+   revisá su resultado antes de correrlo de nuevo a mano.
 
 6. **(manual)** Gabo escucha las 2 versiones, elige.
 
@@ -86,13 +92,20 @@ Esta carpeta es un repo git (sin remoto). Hacé commit antes de cambios grandes.
   nunca clickea Complete Song/Submit to QA
 - `setup-whisper.js` — instala/verifica Python, faster-whisper, ffmpeg. Correr una vez.
 - `verify-audio.js` — analiza los 2 MP3 (duración + Whisper + comparación letra). INFORMA,
-  no decide, no sube nada. Requiere setup-whisper.js previo.
+  no decide, no sube nada. Requiere setup-whisper.js previo. Con `--demucs`: separa
+  voz (htdemucs_ft) + Whisper large-v3 en CUDA (fallback a CPU automático), agrega
+  chequeos de corte abrupto/clipping/tags cantados/instrumental accidental y
+  comparación por Levenshtein. Sin el flag, comportamiento idéntico al de siempre
+  (Whisper small en CPU). Ver LESSONS.md para instalación (torch CUDA, demucs).
 - `upload-to-flow.js` — sube el MP3 elegido al Flow. SE DETIENE sin Submit to QA (Regla Dura #1).
   Uso: `node upload-to-flow.js --version A|B` o `--file "ruta.mp3"`.
 - `start-flow.js` — orquestador único. Cuatro modos:
-  - `node start-flow.js` = flujo completo (genera, llena Suno, Create, descarga MP3, llena Flow).
-    Después: verify-audio.js → upload-to-flow.js → Submit manual → start-flow.js --done.
+  - `node start-flow.js` = flujo completo (genera, llena Suno, Create, descarga MP3,
+    lanza verify-audio.js automático en background con `--demucs`, llena Flow).
+    Después: revisar verify-audio.js → upload-to-flow.js → Submit manual → start-flow.js --done.
   - `node start-flow.js --no-auto-create` = igual pero sin Create/descarga automáticos.
+  - `node start-flow.js --no-auto-verify` = igual pero sin lanzar verify-audio.js automático.
+  - `node start-flow.js --fast-verify` = el auto-verify (si corre) usa Whisper small/CPU en vez de `--demucs`.
   - `node start-flow.js --done` = cierre: registra en la hoja + marca state.json.
   - `node start-flow.js --poll [N]` = vigía de cola (cada N min, default 3; acepta "30s").
   - `poll-flow.js` es ahora un redirect deprecated a `start-flow.js --poll`.

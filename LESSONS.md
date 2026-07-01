@@ -1,5 +1,439 @@
 # Lessons / gotchas
 
+## Sonnet 5 truncaba song.txt con el mismo max_tokens que andaba bien en Sonnet 4.6 (2026-07-02)
+
+Al migrar `run.js` de `claude-sonnet-4-6` a `claude-sonnet-5` (mismo llamado, mismo
+`cache_control: { type: "ephemeral" }`), `max_tokens: 4000` — que ya se había subido
+una vez antes desde 1500 por el mismo síntoma (ver la entrada de 2026-06-29 "song.txt
+truncado" más abajo) — volvió a quedarse corto. Confirmado con 2 llamadas de prueba
+reales (mismo `SYSTEM_PROMPT` real extraído de `run.js`, misma encuesta de muestra):
+ambas volvieron con `stop_reason: "max_tokens"`, es decir, la letra se cortaba a mitad
+de generación en vez de terminar sola.
+
+**Causa:** Sonnet 5 usa un tokenizer distinto al de Sonnet 4.6 (el mismo que Opus
+4.7/4.8) que produce ~30% más tokens para el mismo contenido/razonamiento. Un
+presupuesto de salida que alcanzaba de sobra en 4.6 pasa a quedar justo — o corto —
+en 5, sin que cambie nada del contenido que se le pide generar.
+
+**Fix:** `max_tokens` subido de 4000 a 7000 en la llamada de `generateSongWithClaude`.
+Re-verificado con las mismas 2 llamadas de prueba: ambas terminaron con
+`stop_reason: "end_turn"` (output real de 4189 y 5195 tokens, bajo el nuevo techo de
+7000), con `**Título:**` y `[Outro]` presentes en la respuesta — estructura completa,
+sin cortes.
+
+**Takeaway:** cualquier migración de modelo que cambie de familia de tokenizer
+(Sonnet 4.6/Fable-anterior → Opus 4.7+/Sonnet 5) necesita revisar `max_tokens` como
+parte de la migración, no asumir que el valor viejo sigue siendo válido — aunque el
+prompt y la lógica no cambien en absoluto. Verificar con `stop_reason`, no solo con
+que la llamada no tire error (una respuesta cortada a mitad de la letra devuelve
+HTTP 200 igual).
+
+**De paso, cache de prompt subido de 5 minutos a 1 hora.** Con la migración a
+Sonnet 5 se aprovechó para revisar si convenía pasar el `cache_control` de
+`{ type: "ephemeral" }` (TTL de 5 min) a `{ type: "ephemeral", ttl: "1h" }`. El
+`run.js` no usa el SDK de Anthropic (hace `fetch()` crudo), así que se verificó
+directo contra la API: **la variante `ttl: "1h"` no pide ningún beta header** — es
+GA, se probó con y sin `anthropic-beta: extended-cache-ttl-2025-04-11` y ambas
+funcionaron igual. Confirmado con una escritura fresca que el uso viene etiquetado
+`cache_creation.ephemeral_1h_input_tokens` (no como `ephemeral_5m`), y con una
+prueba real de más de 5 minutos de pausa (324s) que el cache seguía sirviendo
+`cache_read_input_tokens` en vez de recrearse — algo que con el TTL viejo de 5 min
+ya habría expirado.
+
+Matemática de conveniencia (con el system prompt real de ~5922 tokens): 1h sale
+más barato en cuanto evita más de ~60% de los "cache miss" que el TTL de 5 min
+hubiera sufrido (la escritura de 1h cuesta 2× vs 1.25× de la de 5 min, pero ambas
+leen igual de barato a 0.1×). Dado que `run.js` corre en un poller de cola con
+pausas irregulares entre canciones (llegada de pedidos, no un cron fijo), es
+esperable que la mayoría de los huecos entre llamadas caigan en el rango
+"5-60 minutos" — exactamente lo que el TTL de 1h convierte de escritura cara a
+lectura barata — y que solo 1-3 veces por día el hueco real supere la hora
+(arranque del día, algún corte largo). Bajo ese patrón típico, 1h TTL gana.
+Cambio de una sola palabra (`ttl: "1h"` en el `cache_control` de `generateSongWithClaude`),
+no toca lógica de negocio.
+
+**Auditoría de grasa en el system prompt (medida, no aplicada):** con
+`count_tokens` real se identificaron ~1000-1050 tokens (~17-18% de los 5922
+totales) potencialmente recortables sin tocar las reglas de QA ni la validación
+estructural: (1) el checklist de QA está duplicado — una vez en inglés como
+instrucción interna ("AUTO-QA CHECKLIST", 717 tokens, con el mandato "verificá y
+regenerá hasta 3 veces") y otra vez en español como parte del formato de salida
+obligatorio que se pega en `song.txt` (481 tokens) — son ~1200 tokens de contenido
+semánticamente igual en dos idiomas; (2) las 8 plantillas de estilo Suno (Balada,
+Norteño, Salsa, Bachata, Reggaetón, Worship, Mariachi, Pop cristiano — 1067 tokens)
+repiten el sufijo obligatorio de 6 palabras 8 veces y comparten vocabulario. No se
+tocó nada de esto — comprimir el checklist es de bajo riesgo (es duplicación real,
+pero hay que preservar en algún lado el mandato "regenerá si falla, máx 3
+intentos" que hoy solo vive en el bloque en inglés); comprimir las plantillas de
+estilo es de mayor riesgo porque esas frases exactas probablemente fueron
+afinadas a mano para que Suno interprete bien el género — ameritan pruebas de
+audio antes de tocarlas, no solo revisión de texto.
+
+## Checklist de QA duplicado (inglés + español) comprimido en el system prompt — PENDIENTE DE VALIDAR CON PRUEBA REAL (2026-07-02)
+
+Siguiendo la auditoría de arriba, se comprimió el bloque "AUTO-QA CHECKLIST"
+en inglés (259-284 de `run.js`, 21 ítems + el mandato de regeneración) para que
+en vez de repetir los 20 ítems ya presentes en el `**QA Checklist:**` en
+español (el que se pega literal en `song.txt` y que `hardValidate()` parsea
+línea por línea buscando `✓`/`✗`/`(si aplica)` — ver sección K de
+`hardValidate` en `run.js`), apunte a ese mismo bloque como fuente de verdad:
+"verificá internamente, ítem por ítem, cada línea del **QA Checklist** definido
+en RESPONSE FORMAT" en vez de repetir la lista completa en inglés.
+
+**Se preservó explícitamente, palabra por palabra:** "If any item fails,
+regenerate. Maximum 3 attempts. If still failing after 3 attempts, deliver
+with: ⚠️ REVISAR MANUALMENTE: [list of failed items]" — el mandato de
+regeneración no se tocó.
+
+**No se tocó:** el bloque `**QA Checklist:**` en español (RESPONSE FORMAT,
+sigue con los mismos 20 ítems, mismo formato `✓/✗`, mismo `(si aplica)` para
+destinatarios múltiples — exactamente lo que `hardValidate()` espera parsear),
+ninguna de las reglas de contenido (RULES BY SECTION, GENERAL RULES 1-18,
+MULTIPLE RECIPIENTS, PHONETIC RE-SPELLING), las 8 plantillas de estilo Suno,
+`max_tokens`, ni el bloque `cache_control`.
+
+**Tokens: 5922 → 5367 (−555 tokens, ~9.4%)**, medido con `count_tokens` real
+contra `claude-sonnet-5` (no se corrió ninguna generación real ni llamada de
+prueba — solo medición de tokens, a pedido explícito).
+
+**⚠️ PENDIENTE DE VALIDAR CON PRUEBA REAL** — falta correr al menos una
+generación completa (encuesta real o de prueba) y confirmar que: (a) Claude
+sigue produciendo el bloque `**QA Checklist:**` completo y en el formato
+esperado por `hardValidate()`, (b) el comportamiento de auto-verificación +
+regeneración ante fallos sigue funcionando igual que antes de comprimir, (c)
+no bajó la calidad de la letra por tener el checklist de verificación interna
+menos explícito en inglés. No usar en producción hasta validar.
+
+## `start-flow.js` no disparaba `verify-audio.js` automáticamente — quedaba 100% manual (2026-07-01)
+
+El pipeline solo imprimía "Corré: node verify-audio.js" como instrucción para
+Gabo después de que los MP3 aterrizaban — nada lo lanzaba. Se pidió agregar
+un disparo automático que no bloquee el resto del pipeline (Paso 4/4 sigue
+inmediatamente) y que nunca rompa `start-flow.js` si `verify-audio.js` falla.
+
+**Fix:** nueva `launchAutoVerify({ fast })` en `start-flow.js`, llamada justo
+después de que `createAndDownload()` confirma los 2 MP3 (dentro del mismo
+`try` que ya mandaba la notificación "MP3s listos"):
+1. `spawn('node', ['verify-audio.js', ...args], { detached: true, stdio: [...] })`
+   + `child.unref()` — proceso hijo desacoplado. `start-flow.js` sigue de
+   inmediato con el Paso 4/4, no espera (confirmado: `launchAutoVerify`
+   retorna en ~13ms en la prueba, el análisis real sigue corriendo aparte).
+2. stdout/stderr del hijo van a un archivo en `logs/verify-audio-auto-<timestamp>.log`
+   (no a la terminal — el proceso padre puede terminar antes de que el hijo
+   termine, así que hace falta un log persistente para revisar después).
+3. `child.on('error', ...)` y `child.on('exit', code !== 0)` mandan un aviso
+   por ntfy si el spawn falla o si `verify-audio.js` termina con error —
+   nunca lanzan ni relanzan una excepción hacia `runFlow()`.
+4. Flags: `--no-auto-verify` saltea este paso por completo (vuelve al flujo
+   100% manual). `--fast-verify` fuerza el modo rápido (Whisper small/CPU,
+   sin argumentos extra) en vez de `--demucs`, que es el default — decisión
+   explícita de Hector: como corre en background, el tiempo extra de
+   `--demucs` (demucs + Whisper large-v3 CUDA) no bloquea nada.
+
+**Gotcha de diseño (documentado, no arreglado — no hace falta):** si
+`start-flow.js` termina y el proceso Node del padre muere ANTES de que el
+hijo desacoplado termine, el listener `child.on('exit', ...)` de ESE padre
+nunca dispara (proceso ya no existe) — el aviso por ntfy de fallo se pierde,
+aunque el proceso hijo (que sigue vivo, detached) sí completa y el log queda
+igual. En la práctica esto no pasa: después del Paso 3c, `runFlow()` sigue
+con el Paso 4/4 y después `askDoneQuestion()` (espera input interactivo de
+Gabo, que tarda minutos) — tiempo de sobra para que el análisis (incluso en
+`--demucs`, ~1-4 min) termine y dispare su propio listener antes de que el
+padre se cierre. Si algún día `start-flow.js` termina mucho más rápido que
+hoy, revisar el log en `logs/` sigue siendo el fallback confiable.
+
+**Verificado con un test aislado (no con el pipeline real):** confirmado que
+`launchAutoVerify` retorna sin bloquear, que el log captura toda la salida de
+un `verify-audio.js` de prueba corriendo hasta el final, y que un
+`verify-audio.js` que falla (título sin MP3 → `process.exit(1)`) no
+interrumpe ni lanza una excepción en el proceso que lo lanzó.
+
+## Medición de tiempos en `verify-audio.js` (demucs / Whisper / total) (2026-07-01)
+
+Antes de decidir si el auto-verify (ver arriba) debía usar `--demucs` siempre,
+hacía falta ver tiempos reales en la RTX 4070. Se agregó tracking de tiempos
+en `lib/audio-analysis.js`:
+
+- `report.timing = { demucsMs, whisperMs, totalMs }` por versión, calculado
+  con `Date.now()` alrededor del bloque de `runDemucsSeparate` (dentro del
+  `finally` interno, así se registra el tiempo del intento aunque falle) y
+  alrededor del `spawnSync` de `transcribe.py` (capturado tanto en el path de
+  éxito como en el `catch`, para que un fallo de Whisper igual muestre cuánto
+  tardó en fallar).
+- `printReport` imprime una línea `⏱️ Tiempo: demucs Xs + whisper Ys → total Zs`
+  por versión, más un total combinado (A + B) al final del reporte.
+- `verify-audio.js` mide el tiempo total del script completo (desde el primer
+  `Date.now()` hasta después de `printReport`) y lo muestra en consola y en el
+  mensaje de ntfy (`"Análisis listo (Xm Ys): ..."`).
+- Nuevo helper `formatElapsed(ms)` en `lib/audio-analysis.js`, exportado para
+  reuso en `verify-audio.js`.
+
+**Verificado con un MP3 sintético de prueba:** el reporte mostró
+`whisper 7s → total 7s` por versión y `verify-audio.js completo en 8s` al pie
+— la estructura del breakeven funciona; los tiempos reales con `--demucs` en
+canciones de 3 minutos van a ser mayores (demucs + Whisper large-v3 sobre
+audio real, no un tono sintético de 6s), hace falta correrlo con una canción
+real para tener el número que motivó este pedido.
+
+**Takeaway:** cualquier decisión de "qué modo usar por default" basada en
+tiempo necesita instrumentación real, no una estimación — por eso se pidió
+esto antes de fijar `--demucs` como default del auto-verify.
+
+## Panel de Lyrics/Inspo expandido tapa Create — distinto del mini-player (2026-07-01)
+
+`safeClick` venía reportando el bloqueador `div.card-popout-boundary` con texto
+"AudioVoiceNewInspoLyrics[Verse 1]..." al clickear Create. Parecía el mismo
+bug del mini-player (misma familia: overlay flotante con z-index alto tapando
+Create) pero es un elemento distinto — el panel expandido de Lyrics/Inspo de
+Suno, no el reproductor. `dismissMiniPlayerIfPresent` no lo detecta porque sus
+selectores son específicos del player (`aria-label="Close player"` etc.), así
+que `lib/suno-create-dl.js` reintentaba `safeClick` 5 veces sin cerrar nunca
+el panel real, fallando siempre igual.
+
+**Pista clave para el fix:** `suno-fill.js` ya abre y cierra este mismo panel
+en cada corrida (toggle `page.getByLabel('Expand lyrics box')`, usado para el
+screenshot de verificación y luego re-clickeado para colapsarlo antes de
+terminar). Ese selector ya está probado en producción — no hizo falta abrir
+una sesión de Suno en vivo para descubrirlo, ya estaba demostrado funcionando
+en un script hermano del mismo repo.
+
+**Fix:** nueva `dismissLyricsPopoutIfPresent(page)` en `lib/suno-create-dl.js`,
+en el orden pedido:
+1. Click en área neutral (esquina superior izquierda) — puede cerrar el panel
+   solo, como un dropdown estándar.
+2. El toggle `Expand lyrics box` (mecanismo primario, ya probado en
+   `suno-fill.js`) y, si no aparece, una lista de selectores genéricos de
+   cerrar/collapse dentro del propio `div.card-popout-boundary`.
+3. `Escape` como último intento antes de que el caller recurra a
+   `jsClickCreate` (bypass total de z-index, ya existente).
+
+Nueva `ensureCreateClickable(page, createBtn, label)` envuelve esto: cierra
+mini-player + panel de Lyrics, espera 500ms, y verifica con
+`isClickable()` (nuevo helper en `lib/playwright-helpers.js`, usa
+`elementFromPoint` igual que `identifyBlocker` pero devuelve boolean) que
+Create no está tapado — si sigue tapado, reintenta el cierre una vez más y
+loguea una advertencia explícita en vez de seguir en silencio. Se llama antes
+de AMBOS clicks de Create (el panel puede reabrirse entre el primer y el
+segundo click).
+
+**Nota de honestidad:** este fix se implementó sin abrir una sesión real de
+Suno para probarlo en vivo — no había ninguna corriendo al momento del fix, y
+levantar una nueva session solo para el test tocaría la cuenta real de Gabo.
+Se armó con evidencia concreta del propio repo (el toggle ya demostrado en
+`suno-fill.js`) en vez de selectores inventados a ciegas. Si en la próxima
+corrida real el bloqueador persiste, revisar el log `[lyrics-popout]` — dirá
+exactamente cuál de los 3 mecanismos (o ninguno) cerró el panel.
+
+## Timeout de 90s esperando MP3 era demasiado corto para generación real (2026-07-01)
+
+`downloadVia3DotMenu` llamaba `watchForNewMp3(watchDirs, destPath, 90000)`
+con el timeout hardcodeado en el call site (no el default de la función, que
+tampoco importaba porque el call site lo pisaba). Suno tarda 2-4 minutos en
+generar la canción completa MÁS el tiempo de que la descarga aterrice en el
+filesystem — 90 segundos no alcanzaba ni para la generación sola, y el script
+tiraba `Timeout 90000ms esperando MP3 en Downloads/suno/` en corridas
+completamente normales.
+
+**Fix:**
+1. Nueva constante `DOWNLOAD_WAIT_TIMEOUT_MS = 8 * 60 * 1000` (mismo valor que
+   `GENERATION_TIMEOUT_MS`, que ya era 8 min — era el valor de diseño
+   original). El call site en `downloadVia3DotMenu` ahora la usa en vez del
+   `90000` hardcodeado.
+2. Verificado que `watchForNewMp3` sigue vigilando `sunoDir` Y
+   `Downloads` general en paralelo (ambos entran a `watchDirs`, cada uno con
+   su propio `fs.watch` + el poll timer compartido de 3s sobre todos) — no se
+   había perdido en ningún refactor.
+3. Verificado que el watcher arranca ANTES de disparar la descarga: en
+   `downloadVia3DotMenu`, `watchForNewMp3(...)` se crea al principio de la
+   función, antes de clickear ⋯ → Download → MP3 Audio — ya estaba bien, no
+   hizo falta reordenar nada.
+4. Nuevo log de progreso cada 30s (`PROGRESS_LOG_INTERVAL_MS`) dentro de
+   `watchForNewMp3`: `"⏳ Esperando MP3... Xmin Xs transcurridos"`, para que
+   quede claro que el script sigue vivo durante la espera larga.
+
+**Takeaway:** cualquier timeout que dependa de un proceso externo lento
+(generación de IA, uploads, etc.) necesita margen real, no un valor
+"razonable" a ojo — y si el margen es largo (minutos), sumar logs de
+progreso para que no parezca colgado.
+
+
+## `verify-audio.js` — pipeline avanzado con `--demucs` (CUDA RTX 4070) (2026-06-30)
+
+Se agregó un modo opcional (`node verify-audio.js --demucs`) que separa la voz
+con demucs y transcribe con Whisper large-v3 en CUDA. **Sin el flag, el
+comportamiento es exactamente el de siempre** (Whisper small en CPU) — el
+flag es la única puerta de entrada a todo lo pesado.
+
+**Instalación (una sola vez, en este orden):**
+```
+npm install fastest-levenshtein
+pip install faster-whisper
+pip install torch --index-url https://download.pytorch.org/whl/cu124
+pip install torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+pip install soundfile
+pip install demucs
+```
+
+**Gotcha #1 — torchaudio de PyPI rompe el backend de audio en Windows.**
+`pip install demucs` trae `torchaudio` como dependencia, pero si se instala
+desde PyPI (index por defecto) baja una build CPU-only cuyo extension nativo
+NO matchea el torch+cu124 ya instalado → `OSError: [WinError 127] The
+specified procedure could not be found` al importar. Fix: reinstalar
+`torchaudio==2.6.0` explícitamente desde el índice de PyTorch
+(`--index-url https://download.pytorch.org/whl/cu124 --force-reinstall --no-deps`)
+DESPUÉS de instalar demucs, no antes (demucs lo pisa si va antes).
+
+**Gotcha #2 — torchaudio 2.6 sin backend de guardado.** Sin el paquete
+`soundfile` instalado, `torchaudio.save()` tira `RuntimeError: Couldn't find
+appropriate backend to handle uri ... .wav`. demucs necesita `soundfile` para
+poder escribir `vocals.wav`/`no_vocals.wav` en Windows.
+
+**Verificación de que el CUDA real funciona (no asumir):**
+```
+python -c "import torch; print(torch.cuda.is_available())"   # debe dar True
+demucs -n htdemucs_ft --two-stems vocals -o out cancion.mp3    # demucs detecta cuda solo
+```
+demucs elige `cuda` automáticamente si está disponible (no hace falta pasarle
+`-d cuda`); `lib/transcribe.py` sí necesita el flag explícito `--device cuda`
+porque decide qué compute_type usar (`float16` vs `int8`).
+
+**Diseño del fallback CUDA→CPU:** vive enteramente en `lib/transcribe.py`
+(`load_model()`): intenta `device="cuda", compute_type="float16"`, y si
+`WhisperModel(...)` tira excepción (CUDA no disponible, VRAM insuficiente,
+etc.) reintenta con `device="cpu", compute_type="int8"` y loguea el warning a
+stderr — nunca a stdout, para no ensuciar el JSON que lee Node.
+
+**Diseño de "sin demucs instalado":** `lib/audio-analysis.js` intenta
+`spawnSync('demucs', ...)`; si el error es `ENOENT` (comando no encontrado)
+o el proceso falla, loguea warning y sigue transcribiendo el MP3 completo con
+el mismo modelo/CUDA (no vuelve a Whisper small) — el usuario pidió `--demucs`,
+así que la mejora de transcripción se mantiene aunque la separación de voz no.
+
+**Cleanup:** cada corrida con `--demucs` crea su propia carpeta temporal
+(`os.tmpdir()/cancioneterna-demucs-<timestamp>-<random>`) y se borra en un
+`finally` sin importar si la transcripción falló — nunca queda basura en disco.
+
+## `lib/suno-create-dl.js` identificaba cards por posición/`<audio>` global — descargaba la canción vieja (2026-06-30)
+
+Root cause único detrás de 4 síntomas (Create parecía no clickearse, descargaba
+la canción equivocada, no esperaba la generación real, nombraba mal el archivo):
+el código contaba `<audio>` GLOBALMENTE en el DOM y usaba `cardIndex` fijo (0,1)
+para el botón ⋯. Pero Suno deja las canciones viejas en la lista con su audio ya
+cargado (aunque `<audio>` NO está en el DOM hasta que tocás play — confirmado
+inspeccionando el DOM en vivo: `hasAudio: 0` en TODAS las cards, viejas y
+nuevas). Con canciones viejas ya "completas" en la lista, el conteo daba
+falsos positivos de "generación terminada" antes de que Create siquiera hubiera
+arrancado, y las "primeras N cards" por índice eran las viejas, no la nueva.
+
+**Fix:** cada card (`[data-testid="clip-row"]`) tiene un link `<a class="hover:underline">`
+con `href="/song/<uuid>"` — un ID único y estable que no cambia aunque la lista
+se reordene. Ancla nueva:
+1. Antes de Create, snapshot de todos los hrefs existentes (`existingHrefs`).
+2. Tras cada click en Create, confirmar que apareció al menos 1 href NUEVO
+   (`waitForCreateStarted`) antes de asumir que la generación arrancó — si no
+   aparece ninguno en 15s ni con click ni con JS click, tirar error claro en
+   vez de seguir a ciegas.
+3. "Lista para descargar" (`ready`) = la card tiene una duración tipo "3:22"
+   renderizada (`/^\d+:\d{2}$/` en un div hoja) y no tiene spinner/progressbar
+   — NUNCA por conteo de `<audio>`.
+4. `waitForGeneration` sólo mira cards cuyo href está en el set de "nuevas" Y
+   cuyo título normalizado coincide con el título verificado antes de Create.
+   Si una card nueva queda lista con un título distinto al esperado, frena con
+   error — nunca descarga a ciegas (cubre el caso REDO con el mismo título:
+   las cards viejas comparten título pero tienen otro href, así que nunca
+   entran al set de "nuevas").
+5. La descarga (`downloadVia3DotMenu`) localiza la card por href
+   (`page.locator('[data-testid="clip-row"]').filter({ has: locator('a[href="..."]') })`)
+   y busca el botón `[aria-label="More options"]` DENTRO de esa card específica,
+   nunca por índice global entre todos los botones ⋯ de la página.
+
+**Takeaway:** en Suno, nunca identificar una card por posición ni contar
+elementos globalmente en el DOM — buscar un identificador único y estable
+(el `href` del link del título) y anclar toda la lógica (arranque, espera,
+descarga, nombre de archivo) a ese ID + al título verificado.
+
+## Mini-player de Suno tapa el botón Create con z-index (2026-06-30)
+
+Suno muestra un mini-player fijo en la parte inferior de la pantalla cuando
+hay una canción reproduciéndose. Ese elemento tiene z-index mayor que el botón
+Create, por lo que Playwright reporta `"element is not visible"` o `"subtree
+intercepts pointer events"` — el botón existe en el DOM pero está físicamente
+tapado por el player.
+
+**Fix:** antes de cada Create, llamar `dismissMiniPlayerIfPresent(page)` que
+prueba selectores conocidos de close-button del player y, si no los encuentra,
+hace `Escape`. Si `safeClick` igualmente falla después (z-index persistente),
+cae a `jsClickCreate(page)` = `element.click()` via `page.evaluate()`, que
+bypasea completamente los checks de pointer-events de Playwright.
+
+**Takeaway:** en Suno, nunca clickear directamente sin primero descartar el
+mini-player. El JS click directo es el último recurso válido cuando Playwright
+no puede sintetizar el pointer event por z-index.
+
+## Flujo de descarga de Suno no tiene botón directo — es ⋯ → Download → MP3 Audio (2026-06-30)
+
+La implementación anterior intentaba descargar via `fetch()` con la URL del CDN
+de los elementos `<audio>` del DOM. Esto falla porque:
+1. La URL CDN puede requerir auth que fetch no propaga correctamente.
+2. Suno no tiene botón de descarga directo — el flujo real es el menú contextual.
+
+El flujo real en la UI es:
+  Botón ⋯ (More options) en la card de la canción
+  → opción "Download" en el menú
+  → opción "MP3 Audio" en el submenú (NUNCA WAV, NUNCA Pro)
+
+**Fix:** `downloadVia3DotMenu(page, cardIndex, sunoDir, destPath)` en
+`lib/suno-create-dl.js` implementa este flujo con `safeClick` en cada paso y
+menú-texto para identificar las opciones (no class-names dinámicas).
+
+**Takeaway:** cuando el DOM tiene un elemento de audio con src CDN, eso NO
+significa que puedas descargarlo con fetch. Siempre usar el flujo de UI real
+de la aplicación para descargas.
+
+## Downloads de Suno van a Downloads general, no a sunoDir (2026-06-30)
+
+`Browser.setDownloadBehavior` vía CDP (intentado con `browser.newBrowserCDPSession()`)
+no siempre redirige correctamente en Chrome conectado via `connectOverCDP` — el
+comando se aplica a la sesión CDP, no al perfil completo, así que Chrome sigue
+usando su propia configuración de descarga.
+
+**Fix:** `watchForNewMp3(watchDirs, destPath, timeoutMs)` en `suno-create-dl.js`
+usa `fs.watch` + polling cada 3s sobre AMBAS carpetas (`sunoDir` Y `Downloads`
+general) en paralelo. En cuanto aparece un .mp3 nuevo (>50KB = completo) en
+cualquiera de ellas, lo mueve a `destPath` vía rename/copy. CDP redirect se
+mantiene como best-effort (si funciona, mejor; si no, el watcher lo maneja).
+
+**Takeaway:** para automatizar descargas en Chrome externo via CDP, siempre
+agregar un watcher de filesystem como fallback. No confiar en que CDP redirige
+correctamente.
+
+## "subtree intercepts pointer events" en click de Create de Suno (2026-06-30)
+
+`page.click()` o `locator.click()` sobre el botón Create de Suno fallaba con
+`"Error: subtree intercepts pointer events"` — un elemento hijo o superpuesto
+capturaba el evento de puntero en lugar del botón. El overlay era transitorio
+(posiblemente un tooltip, un spinner de estado, o un banner de "generando").
+
+**Fix:** se creó `safeClick(page, locator, opts)` en `lib/playwright-helpers.js`.
+El helper:
+1. Hace scroll del botón al viewport.
+2. Intenta `click({ trial: true })` — si no lanza, el botón está libre y se clickea.
+3. Si trial lanza, usa `document.elementFromPoint(cx, cy)` en el centro del botón
+   para identificar exactamente qué elemento está encima (tag, id, class, texto).
+4. Loguea el bloqueador con coordenadas para diagnóstico.
+5. Espera `waitMs * attempt` ms y reintenta (hasta `maxAttempts`, default 5).
+6. En el último intento usa `force: true` como último recurso.
+7. Si sigue fallando, lanza con el nombre exacto del bloqueador en el mensaje.
+8. Si `screenshotPrefix` se pasa, guarda screenshots antes de cada intento
+   para diagnóstico visual.
+
+Se aplicó a: Create × 2 en `lib/suno-create-dl.js`, `expandIfCollapsed` en
+`lib/playwright-helpers.js`, y `genderButton` en `suno-fill.js`.
+
+**Takeaway:** nunca clickear directamente en Suno con `.click()` desnudo — usar
+`safeClick`. Si el error persiste en algún botón nuevo, agregar el selector del
+bloqueador identificado acá para que `safeClick` lo reconozca y espere.
+
 ## `networkidle` siempre da TimeoutError en Suno y el Flow (2026-06-30)
 
 `waitUntil: 'networkidle'` y `waitForLoadState('networkidle')` fallaban
