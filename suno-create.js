@@ -20,10 +20,11 @@ const { connectToSunoTab } = require('./lib/playwright-helpers');
     await createBtn.first().waitFor({ state: 'visible', timeout: 8000 });
     await page.waitForFunction(
       () => {
-        const btn = [...document.querySelectorAll('button')].find((b) =>
-          /create song/i.test(b.textContent || '')
-        );
-        return btn && !btn.disabled;
+        const btn = document.querySelector('button[aria-label="Create song"]') ||
+                    [...document.querySelectorAll('button')].find((b) =>
+                      /create song/i.test(b.getAttribute('aria-label') || '')
+                    );
+        return btn && !btn.disabled && !btn.hasAttribute('data-disabled');
       },
       { timeout: 8000 }
     ).catch(() => {});
