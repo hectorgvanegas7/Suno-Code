@@ -526,8 +526,27 @@ async function readRecentCompletion(expectedTitulo) {
       await page.mouse.move(0, 0);
       await page.waitForTimeout(50);
 
-      const box = await cardLocator.boundingBox();
-      const imgBuffer = await cardLocator.screenshot();
+      const cardHandle = await cardLocator.elementHandle();
+      const rect = await cardHandle.evaluate(el => {
+        const origStyle = el.getAttribute('style') || '';
+        el.style.position = 'fixed';
+        el.style.top = '0';
+        el.style.left = '0';
+        el.style.zIndex = '999999';
+        el.style.margin = '0';
+        return { width: el.offsetWidth, height: el.offsetHeight, origStyle };
+      });
+
+      await page.waitForTimeout(200);
+
+      // Timeout corto (5s) por si la ventana está minimizada y Chrome suspende el render
+      const imgBuffer = await page.screenshot({
+        animations: 'disabled',
+        timeout: 5000,
+        clip: { x: 0, y: 0, width: rect.width, height: rect.height }
+      });
+
+      await cardHandle.evaluate((el, orig) => el.setAttribute('style', orig), rect.origStyle);
 
       const slug = cardData.title
         .toLowerCase()
@@ -543,8 +562,8 @@ async function readRecentCompletion(expectedTitulo) {
       screenshotPath = path.join(SCREENSHOTS_DIR, `${datePrefix}_${slug}.png`);
       fs.writeFileSync(screenshotPath, imgBuffer);
 
-      const w = box ? Math.round(box.width) : '?';
-      const h = box ? Math.round(box.height) : '?';
+      const w = Math.round(rect.width);
+      const h = Math.round(rect.height);
       console.log(`  Screenshot: ${screenshotPath} (${w}×${h}px)`);
     } catch (e) {
       console.log(`  ⚠️ Screenshot fallido (no es crítico): ${e.message}`);
@@ -643,29 +662,30 @@ function buildRemarkDraft() {
 // Intenta subir el screenshot a Google Drive y poner =IMAGE(url) en col H.
 // Si el service account no tiene Drive scope, falla silenciosamente.
 async function tryDriveScreenshot(localPngPath, sheetRow, tabName) {
+  if (!fs.existsSync(localPngPath)) return;
   const { google } = require('googleapis');
-  const credPath = path.join(__dirname, 'google-credentials.json');
-  if (!fs.existsSync(credPath) || !fs.existsSync(localPngPath)) return;
+  const CRED_PATH = path.join(__dirname, 'oauth-credentials.json');
+  const TOKEN_PATH = path.join(__dirname, 'token.json');
+
+  if (!fs.existsSync(CRED_PATH) || !fs.existsSync(TOKEN_PATH)) return;
 
   try {
-    const credentials = JSON.parse(fs.readFileSync(credPath, 'utf-8'));
-    const auth = new google.auth.GoogleAuth({
-      credentials,
-      scopes: [
-        'https://www.googleapis.com/auth/spreadsheets',
-        'https://www.googleapis.com/auth/drive.file',
-      ],
-    });
+    const creds = JSON.parse(fs.readFileSync(CRED_PATH, 'utf-8'));
+    const { client_secret, client_id, redirect_uris } = creds.installed;
+    const auth = new google.auth.OAuth2(client_id, client_secret, redirect_uris[0] || 'http://localhost');
+    const token = JSON.parse(fs.readFileSync(TOKEN_PATH, 'utf-8'));
+    auth.setCredentials(token);
+
     const drive = google.drive({ version: 'v3', auth });
     const sheets = google.sheets({ version: 'v4', auth });
     const { SPREADSHEET_ID } = require('./lib/sheets-core');
 
-    console.log('\n📸 Intentando subir screenshot a Drive...');
+    console.log('\n📸 Subiendo screenshot a tu Google Drive personal...');
     const uploadRes = await drive.files.create({
       requestBody: {
         name: path.basename(localPngPath),
         mimeType: 'image/png',
-        parents: [], // root del Drive del service account
+        parents: ['1SDAJlJyXUQG_6sYbWNRDR_PH-Ol5iW4a'] // "Screenshots Flow" compartida
       },
       media: {
         mimeType: 'image/png',
@@ -675,22 +695,15 @@ async function tryDriveScreenshot(localPngPath, sheetRow, tabName) {
     });
 
     const fileId = uploadRes.data.id;
-    // Hacer el archivo públicamente legible para que =IMAGE() funcione
+    // Hacer el archivo públicamente legible
     await drive.permissions.create({
       fileId,
       requestBody: { role: 'reader', type: 'anyone' },
     });
 
-    const imageUrl = `https://drive.google.com/uc?id=${fileId}`;
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: SPREADSHEET_ID,
-      range: `${tabName}!H${sheetRow}`,
-      valueInputOption: 'USER_ENTERED',
-      requestBody: { values: [[`=IMAGE("${imageUrl}")`]] },
-    });
-    console.log(`  ✅ Screenshot subido a Drive y puesto en col H, fila ${sheetRow}.`);
+    console.log(`  ✅ Screenshot subido a tu Drive (Screenshots Flow). Puedes insertarlo manualmente sobre las celdas en tu hoja.`);
   } catch (e) {
-    console.log(`  ⚠️ Drive upload no disponible (${e.message.substring(0, 80)}). Pegá el screenshot manualmente en col H.`);
+    console.log(`  ⚠️ Upload fallido (${e.message.substring(0, 80)}). Pega el screenshot manualmente en col H.`);
   }
 }
 
@@ -735,7 +748,7 @@ async function runFlow({ resume = false } = {}) {
   }
   const skipGenerate = resumeStage !== null;
   const skipSunoFill = resumeStage === state.STAGES.SUNO_FILLED || resumeStage === state.STAGES.FLOW_FILLED;
-  const skipFlowFill = resumeStage === state.STAGES.FLOW_FILLED;
+  const skipFlowFill = false; // Siempre abrir y asegurar que esté lleno el Flow para revisión manual
 
   console.log(`📝 Log de esta corrida: ${RUN_LOG_PATH}`);
   console.log('=== Paso 0/4: preflight ===');
@@ -762,29 +775,35 @@ async function runFlow({ resume = false } = {}) {
     console.log(`  song.txt OK: "${songTitulo || stTitulo}"`);
   } else {
     console.log('\n=== Paso 1/4: generando letra (run.js) ===\n');
-    await runScript('run.js');
+    const providerArg = process.argv.find((a) => a.startsWith('--provider='));
+    const providerFlag = providerArg ? ` ${providerArg}` : '';
+    await runScript(`run.js${providerFlag}`);
   }
 
-  console.log('\n=== Paso 2/4: verificando sesión de Suno ===');
-  if (await isPortUp(DEBUG_PORT)) {
-    console.log('Chrome ya está corriendo en el puerto de debug.');
-  } else {
-    console.log('Chrome no está en el puerto de debug. Lanzando suno-open-for-login.js...');
-    await runScript('suno-open-for-login.js');
-    for (let i = 0; i < 20 && !(await isPortUp(DEBUG_PORT)); i++) {
-      await new Promise((r) => setTimeout(r, 500));
-    }
-    if (!(await isPortUp(DEBUG_PORT))) {
-      throw new Error('Chrome no levantó el puerto de debug a tiempo.');
+  if (!skipSunoFill || !skipFlowFill) {
+    if (await isPortUp(DEBUG_PORT)) {
+      console.log('Chrome ya está corriendo en el puerto de debug.');
+    } else {
+      console.log('Chrome no está en el puerto de debug. Lanzando suno-open-for-login.js...');
+      await runScript('suno-open-for-login.js');
+      for (let i = 0; i < 20 && !(await isPortUp(DEBUG_PORT)); i++) {
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      if (!(await isPortUp(DEBUG_PORT))) {
+        throw new Error('Chrome no levantó el puerto de debug a tiempo.');
+      }
     }
   }
 
-  if (await checkSunoSessionReady()) {
-    console.log('Sesión de Suno confirmada.');
-  } else {
-    console.log('No hay sesión activa en Suno. Iniciá sesión manualmente en la ventana de Chrome (esperando hasta 5 minutos)...');
-    await waitUntilSunoLoggedIn();
-    console.log('Login detectado.');
+  if (!skipSunoFill) {
+    console.log('\n=== Paso 2/4: verificando sesión de Suno ===');
+    if (await checkSunoSessionReady()) {
+      console.log('Sesión de Suno confirmada.');
+    } else {
+      console.log('No hay sesión activa en Suno. Iniciá sesión manualmente en la ventana de Chrome (esperando hasta 5 minutos)...');
+      await waitUntilSunoLoggedIn();
+      console.log('Login detectado.');
+    }
   }
 
   if (skipSunoFill) {
@@ -903,6 +922,14 @@ async function runFlow({ resume = false } = {}) {
       console.log('══════════════════════════════════════════════════════');
       console.log('\n👉 Escuchá ambas versiones antes de decidir. La recomendación es ORIENTATIVA.');
 
+      console.log('\n👉 Iniciando el QA Dashboard de lectura (puerto 3000)...');
+      const dashboardProcess = spawn('node', ['qa-dashboard.js'], { stdio: 'inherit' });
+      
+      // Abrir el navegador automáticamente apuntando al dashboard de audio
+      setTimeout(() => {
+        spawn('powershell', ['-NoProfile', '-Command', 'Start-Process http://localhost:3000'], { stdio: 'ignore' }).unref();
+      }, 1500);
+
       const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
       const versionChoice = await new Promise((resolve) => {
         rl.question(`\n¿Subir Versión ${rec.recommended} al Flow? (s = sí, n = no subir, A/B = subir la otra): `, (answer) => {
@@ -910,6 +937,9 @@ async function runFlow({ resume = false } = {}) {
           resolve(answer.trim().toUpperCase());
         });
       });
+
+      // Detener el servidor del dashboard de inmediato para liberar recursos
+      dashboardProcess.kill();
 
       let versionToUpload = null;
       if (versionChoice === 'S' || versionChoice === 'SI' || versionChoice === 'SÍ' || versionChoice === 'Y') {
