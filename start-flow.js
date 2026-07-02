@@ -678,6 +678,7 @@ async function runFlow() {
   const noAutoCreate = process.argv.includes('--no-auto-create');
   let mp3sDescargados = false;
   let verifyOk = false;
+  let verifyPromise = null; // corre en paralelo con el Paso 4; se espera después
   if (!noAutoCreate) {
     console.log('\n=== Paso 3b/4: Create + generación + descarga (suno-create-dl.js) ===');
     console.log('  (Pasá --no-auto-create para saltar este paso y hacer Create a mano)\n');
@@ -693,12 +694,14 @@ async function runFlow() {
       if (versionA) console.log(`     Versión A: ${versionA.path || versionA.label}`);
       if (versionB) console.log(`     Versión B: ${versionB.path || versionB.label}`);
 
-      // Paso 3c: verify-audio.js — ahora se ESPERA para leer el resultado
-      // y recomendar la mejor versión al usuario.
+      // Paso 3c: verify-audio.js — se LANZA acá pero se espera DESPUÉS del
+      // Paso 4: el análisis (GPU/CPU + filesystem) y flow-submit (navegador)
+      // son independientes, así que correrlos en paralelo ahorra 1-4 min.
+      // El resultado se lee antes de la recomendación de versión (Paso 5).
       // --no-auto-verify lo saltea; --fast-verify fuerza el modo rápido.
       if (!process.argv.includes('--no-auto-verify')) {
-        console.log('\n  ⏳ Esperando análisis de audio (Whisper + demucs)...');
-        verifyOk = await runVerifyAudio({ fast: process.argv.includes('--fast-verify') });
+        console.log('\n  ⏳ Análisis de audio lanzado en paralelo con el Paso 4 (Whisper + demucs)...');
+        verifyPromise = runVerifyAudio({ fast: process.argv.includes('--fast-verify') });
       } else {
         console.log('\n  (--no-auto-verify: saltando el análisis automático — corré node verify-audio.js a mano)');
       }
@@ -714,6 +717,13 @@ async function runFlow() {
   await openFlowTabAndEnsureAssignment();
   await runScript('flow-submit.js');
   state.write({ stage: state.STAGES.FLOW_FILLED });
+
+  // Esperar el análisis que quedó corriendo en paralelo (Paso 3c) antes de
+  // recomendar versión. runVerifyAudio nunca rechaza — resuelve false si falló.
+  if (verifyPromise) {
+    console.log('\n⏳ Esperando a que termine el análisis de audio (corre desde el Paso 3c)...');
+    verifyOk = await verifyPromise;
+  }
 
   // ── Paso 5: Recomendación + Upload automático ──────────────────────────────
   // verifyOk + chequeo de título: verify-report.json puede quedar con datos de
