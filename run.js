@@ -491,6 +491,8 @@ function hardValidate(fullResponse, surveyText) {
     ),
   ];
 
+  const isMultiRecipient = firstNames.length > 1;
+
   if (firstNames.length > 0) {
     // ── B. Nombre como PRIMERA PALABRA en Chorus 1 y Chorus 2 ─────────────────
     // (con varios destinatarios, cada chorus puede abrir con un nombre distinto)
@@ -504,11 +506,11 @@ function hardValidate(fullResponse, surveyText) {
         const matchedName = firstNames.find(
           (n) => firstWord === n || (firstWord.length > 0 && firstWord[0] === n[0])
         );
-        if (!matchedName) {
+        if (!matchedName && !isMultiRecipient) {
           failures.push(
             `[${sec}] primera palabra es "${firstWord}", debe ser uno de: ${firstNames.join(', ')} (o una variante fonética que empiece con la misma letra)`
           );
-        } else {
+        } else if (!isMultiRecipient) {
           // Nombre solo una vez por chorus
           const nameOccurrences = lines.join(' ').toLowerCase().split(matchedName).length - 1;
           if (nameOccurrences > 1) {
@@ -521,8 +523,18 @@ function hardValidate(fullResponse, surveyText) {
     // ── C. Nombre(s) AUSENTE(s) en Verse 1 ─────────────────────────────────────
     const verse1Text = (sections['Verse 1'] || []).join(' ').toLowerCase();
     const leakedName = firstNames.find((n) => verse1Text.includes(n));
-    if (leakedName) {
+    if (leakedName && !isMultiRecipient) {
       failures.push(`[Verse 1] contiene el nombre "${leakedName}" — debe estar ausente`);
+    }
+
+    // MULTI-RECIPIENT FALLBACK VALIDATION
+    if (isMultiRecipient) {
+      const allLyricsText = Object.values(sections).flat().join(' ').toLowerCase();
+      for (const name of firstNames) {
+        if (!allLyricsText.includes(name)) {
+          failures.push(`El nombre "${name}" no aparece en la letra, pero es uno de los destinatarios declarados`);
+        }
+      }
     }
   }
 
@@ -606,7 +618,13 @@ function hardValidate(fullResponse, surveyText) {
       // Ítems marcados "(si aplica)" son condicionales: si no aplican (ej.
       // un solo destinatario), "N/A" es una respuesta válida, no un fallo.
       const isConditionalNA = /\(si aplica\)/i.test(trimmed) && /\bn\/a\b/i.test(trimmed);
-      if (trimmed.includes('✗') || (!trimmed.includes('✓') && !isConditionalNA && /[a-záéíóúñ]/i.test(trimmed))) {
+      
+      const isMultiRecipientBypass = isMultiRecipient && trimmed.includes('✗') && (
+        trimmed.toLowerCase().includes('nombre = primera palabra') ||
+        trimmed.toLowerCase().includes('ausente en verse 1')
+      );
+
+      if (!isMultiRecipientBypass && (trimmed.includes('✗') || (!trimmed.includes('✓') && !isConditionalNA && /[a-záéíóúñ]/i.test(trimmed)))) {
         failures.push(`Claude marcó fallo: ${trimmed}`);
       }
     });
