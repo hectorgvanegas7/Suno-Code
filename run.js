@@ -391,7 +391,7 @@ async function generateSongWithClaude(surveyText) {
     },
     body: JSON.stringify({
       model: 'claude-sonnet-5',
-      max_tokens: 7000,
+      max_tokens: 8192,
       system: [
         {
           type: 'text',
