@@ -669,9 +669,7 @@ function buildRemarkDraft() {
 }
 
 // Intenta subir el screenshot a Google Drive y poner =IMAGE(url) en col H.
-// Falla silenciosamente (solo loguea) si faltan credenciales OAuth2 o el
-// upload falla — el screenshot local y el registro en la hoja ya se hicieron
-// antes de llegar acá, así que un fallo de Drive nunca debe frenar el flujo.
+// Si el service account no tiene Drive scope, falla silenciosamente.
 async function tryDriveScreenshot(localPngPath, sheetRow, tabName) {
   if (!fs.existsSync(localPngPath)) return;
   const { google } = require('googleapis');
@@ -706,20 +704,13 @@ async function tryDriveScreenshot(localPngPath, sheetRow, tabName) {
     });
 
     const fileId = uploadRes.data.id;
-    // Hacer el archivo públicamente legible para que =IMAGE() funcione
+    // Hacer el archivo públicamente legible
     await drive.permissions.create({
       fileId,
       requestBody: { role: 'reader', type: 'anyone' },
     });
 
-    const imageUrl = `https://drive.google.com/uc?id=${fileId}`;
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: SPREADSHEET_ID,
-      range: `${tabName}!H${sheetRow}`,
-      valueInputOption: 'USER_ENTERED',
-      requestBody: { values: [[`=IMAGE("${imageUrl}")`]] },
-    });
-    console.log(`  ✅ Screenshot subido a tu Drive y puesto en col H, fila ${sheetRow}.`);
+    console.log(`  ✅ Screenshot subido a tu Drive (Screenshots Flow). Puedes insertarlo manualmente sobre las celdas en tu hoja.`);
   } catch (e) {
     console.log(`  ⚠️ Upload fallido (${e.message.substring(0, 80)}). Pega el screenshot manualmente en col H.`);
   }
