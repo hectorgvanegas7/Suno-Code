@@ -4,3 +4,19 @@ song.txt
 survey.txt
 logs/
 .cache/
+
+# Secretos — NUNCA commitear (clave privada del service account)
+google-credentials.json
+
+# Efímeros del pipeline (se pisan en cada corrida)
+state.json
+verify-report.json
+title.txt
+chrome_log.txt
+
+# Perfil de Chrome creado por accidente (bug de backslashes) — tiene cookies/sesiones
+UsershectoAppDataLocalChromeAutomationProfile/
+
+# Salidas locales
+mp3/
+debug/
