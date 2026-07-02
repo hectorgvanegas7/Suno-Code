@@ -677,6 +677,7 @@ async function runFlow() {
   // Se puede saltar con --no-auto-create para volver al flujo manual.
   const noAutoCreate = process.argv.includes('--no-auto-create');
   let mp3sDescargados = false;
+  let verifyOk = false;
   if (!noAutoCreate) {
     console.log('\n=== Paso 3b/4: Create + generación + descarga (suno-create-dl.js) ===');
     console.log('  (Pasá --no-auto-create para saltar este paso y hacer Create a mano)\n');
@@ -695,7 +696,6 @@ async function runFlow() {
       // Paso 3c: verify-audio.js — ahora se ESPERA para leer el resultado
       // y recomendar la mejor versión al usuario.
       // --no-auto-verify lo saltea; --fast-verify fuerza el modo rápido.
-      let verifyOk = false;
       if (!process.argv.includes('--no-auto-verify')) {
         console.log('\n  ⏳ Esperando análisis de audio (Whisper + demucs)...');
         verifyOk = await runVerifyAudio({ fast: process.argv.includes('--fast-verify') });
