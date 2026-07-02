@@ -944,16 +944,10 @@ async function runPoll(rawArgs) {
     if (pollResult.found) {
       log('✅ ¡Canción encontrada y asignada!');
 
-      try {
-        const body = pollResult.title
-          ? `Canción asignada: "${pollResult.title}"`
-          : 'Canción asignada y lista para procesar.';
-        await fetch('https://ntfy.sh/cancioneterna-gabo-2026', {
-          method: 'POST',
-          headers: { Title: 'Cancion Eterna', Priority: 'high', Tags: 'musical_note' },
-          body,
-        });
-      } catch {}
+      const body = pollResult.title
+        ? `Canción asignada: "${pollResult.title}"`
+        : 'Canción asignada y lista para procesar.';
+      await notify(body, { title: 'Cancion Eterna', priority: 'high', tags: 'musical_note' });
 
       // Segundo chequeo de Suno: puede haberse abierto mientras polleábamos.
       if (await isSunoSessionLive()) {
