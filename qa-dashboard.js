@@ -15,6 +15,31 @@ const SUNO_DIR = path.join(require('os').homedir(), 'Downloads', 'suno');
 // Serve MP3 files
 app.use('/audio', express.static(SUNO_DIR));
 
+// Arma la tarjeta de una versión (A o B) — misma estructura para ambas,
+// solo cambian los datos que recibe.
+function renderVersionCard({ label, versionReport, score, filename, fileExists, isRecommended }) {
+  const letraMatch = versionReport ? Math.round((versionReport.levenshteinScore || 0) * 100) : 0;
+  const audioTag = fileExists
+    ? `<audio controls src="/audio/${filename}"></audio>`
+    : '<p style="color:red; font-size: 12px; margin: 0.75rem 0 0 0;">MP3 no encontrado</p>';
+
+  return `
+    <div class="version-card ${isRecommended ? 'recommended' : ''}">
+      <div style="display: flex; justify-content: space-between; align-items: center;">
+        <h3 style="margin:0; font-size: 1.1rem;">Versión ${label}</h3>
+        <span style="font-weight:bold; font-size: 1.1rem; color: var(--primary);">${score ?? 'N/A'} pts</span>
+      </div>
+      <div style="margin-top: 0.5rem; display: flex; flex-wrap: wrap; gap: 0.25rem;">
+        <span class="badge ${versionReport?.durationOk ? 'badge-success' : 'badge-warning'}">Duración: ${versionReport?.durationFormatted || 'N/A'}</span>
+        <span class="badge ${versionReport?.abruptCutoff ? 'badge-warning' : 'badge-success'}">${versionReport?.abruptCutoff ? 'Corte Abrupto' : 'Fade Out Ok'}</span>
+        <span class="badge ${versionReport?.clippingFlag ? 'badge-warning' : 'badge-success'}">${versionReport?.clippingFlag ? 'Clipping' : 'Sin Clipping'}</span>
+        <span class="badge badge-success">Letra: ${letraMatch}% match</span>
+      </div>
+      ${audioTag}
+    </div>
+  `;
+}
+
 app.get('/', (req, res) => {
   let report = null;
   let songText = '';
@@ -217,35 +242,22 @@ app.get('/', (req, res) => {
         </p>
 
         <div style="overflow-y: auto; flex: 1; padding-right: 0.25rem;">
-          <!-- VERSION A -->
-          <div class="version-card ${recommendation.recommended === 'A' ? 'recommended' : ''}">
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-              <h3 style="margin:0; font-size: 1.1rem;">Versión A</h3>
-              <span style="font-weight:bold; font-size: 1.1rem; color: var(--primary);">${recommendation.scoreA ?? 'N/A'} pts</span>
-            </div>
-            <div style="margin-top: 0.5rem; display: flex; flex-wrap: wrap; gap: 0.25rem;">
-              <span class="badge ${report.reportA?.durationOk ? 'badge-success' : 'badge-warning'}">Duración: ${report.reportA?.durationFormatted || 'N/A'}</span>
-              <span class="badge ${report.reportA?.abruptCutoff ? 'badge-warning' : 'badge-success'}">${report.reportA?.abruptCutoff ? 'Corte Abrupto' : 'Fade Out Ok'}</span>
-              <span class="badge ${report.reportA?.clippingFlag ? 'badge-warning' : 'badge-success'}">${report.reportA?.clippingFlag ? 'Clipping' : 'Sin Clipping'}</span>
-              <span class="badge badge-success">Letra: ${report.reportA ? Math.round((report.reportA.levenshteinScore || 0) * 100) : 0}% match</span>
-            </div>
-            ${versionAExists ? `<audio controls src="/audio/${versionA}"></audio>` : '<p style="color:red; font-size: 12px; margin: 0.75rem 0 0 0;">MP3 no encontrado</p>'}
-          </div>
-
-          <!-- VERSION B -->
-          <div class="version-card ${recommendation.recommended === 'B' ? 'recommended' : ''}">
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-              <h3 style="margin:0; font-size: 1.1rem;">Versión B</h3>
-              <span style="font-weight:bold; font-size: 1.1rem; color: var(--primary);">${recommendation.scoreB ?? 'N/A'} pts</span>
-            </div>
-            <div style="margin-top: 0.5rem; display: flex; flex-wrap: wrap; gap: 0.25rem;">
-              <span class="badge ${report.reportB?.durationOk ? 'badge-success' : 'badge-warning'}">Duración: ${report.reportB?.durationFormatted || 'N/A'}</span>
-              <span class="badge ${report.reportB?.abruptCutoff ? 'badge-warning' : 'badge-success'}">${report.reportB?.abruptCutoff ? 'Corte Abrupto' : 'Fade Out Ok'}</span>
-              <span class="badge ${report.reportB?.clippingFlag ? 'badge-warning' : 'badge-success'}">${report.reportB?.clippingFlag ? 'Clipping' : 'Sin Clipping'}</span>
-              <span class="badge badge-success">Letra: ${report.reportB ? Math.round((report.reportB.levenshteinScore || 0) * 100) : 0}% match</span>
-            </div>
-            ${versionBExists ? `<audio controls src="/audio/${versionB}"></audio>` : '<p style="color:red; font-size: 12px; margin: 0.75rem 0 0 0;">MP3 no encontrado</p>'}
-          </div>
+          ${renderVersionCard({
+            label: 'A',
+            versionReport: report.reportA,
+            score: recommendation.scoreA,
+            filename: versionA,
+            fileExists: versionAExists,
+            isRecommended: recommendation.recommended === 'A',
+          })}
+          ${renderVersionCard({
+            label: 'B',
+            versionReport: report.reportB,
+            score: recommendation.scoreB,
+            filename: versionB,
+            fileExists: versionBExists,
+            isRecommended: recommendation.recommended === 'B',
+          })}
         </div>
 
         <div class="alert-box">
