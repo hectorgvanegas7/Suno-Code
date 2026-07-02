@@ -49,6 +49,17 @@ app.get('/', (req, res) => {
   const versionAExists = versionA && fs.existsSync(path.join(SUNO_DIR, versionA));
   const versionBExists = versionB && fs.existsSync(path.join(SUNO_DIR, versionB));
 
+  // report.recommendation puede faltar si verify-audio.js analizó solo 1
+  // version o terminó antes de tiempo. Sin este fallback, leer .recommended
+  // más abajo tira una excepción no capturada y el dashboard responde un
+  // 500 sin mensaje útil.
+  const recommendation = report.recommendation || {
+    recommended: null,
+    reason: 'Recomendación no disponible (análisis incompleto).',
+    scoreA: null,
+    scoreB: null,
+  };
+
   const html = `
 <!DOCTYPE html>
 <html lang="es">
@@ -201,16 +212,16 @@ app.get('/', (req, res) => {
       <div class="card" style="height: auto; max-height: calc(100vh - 5rem);">
         <div class="card-title">Auditoría de Audio</div>
         <p style="color: var(--text-muted); margin-top: 0; margin-bottom: 1.2rem; font-size: 13.5px;">
-          Recomendación: <strong style="color: var(--success);">Versión ${report.recommendation.recommended}</strong><br>
-          <small>${report.recommendation.reason}</small>
+          Recomendación: <strong style="color: var(--success);">${recommendation.recommended ? `Versión ${recommendation.recommended}` : 'N/A'}</strong><br>
+          <small>${recommendation.reason}</small>
         </p>
 
         <div style="overflow-y: auto; flex: 1; padding-right: 0.25rem;">
           <!-- VERSION A -->
-          <div class="version-card ${report.recommendation.recommended === 'A' ? 'recommended' : ''}">
+          <div class="version-card ${recommendation.recommended === 'A' ? 'recommended' : ''}">
             <div style="display: flex; justify-content: space-between; align-items: center;">
               <h3 style="margin:0; font-size: 1.1rem;">Versión A</h3>
-              <span style="font-weight:bold; font-size: 1.1rem; color: var(--primary);">${report.recommendation.scoreA} pts</span>
+              <span style="font-weight:bold; font-size: 1.1rem; color: var(--primary);">${recommendation.scoreA ?? 'N/A'} pts</span>
             </div>
             <div style="margin-top: 0.5rem; display: flex; flex-wrap: wrap; gap: 0.25rem;">
               <span class="badge ${report.reportA?.durationOk ? 'badge-success' : 'badge-warning'}">Duración: ${report.reportA?.durationFormatted || 'N/A'}</span>
@@ -222,10 +233,10 @@ app.get('/', (req, res) => {
           </div>
 
           <!-- VERSION B -->
-          <div class="version-card ${report.recommendation.recommended === 'B' ? 'recommended' : ''}">
+          <div class="version-card ${recommendation.recommended === 'B' ? 'recommended' : ''}">
             <div style="display: flex; justify-content: space-between; align-items: center;">
               <h3 style="margin:0; font-size: 1.1rem;">Versión B</h3>
-              <span style="font-weight:bold; font-size: 1.1rem; color: var(--primary);">${report.recommendation.scoreB} pts</span>
+              <span style="font-weight:bold; font-size: 1.1rem; color: var(--primary);">${recommendation.scoreB ?? 'N/A'} pts</span>
             </div>
             <div style="margin-top: 0.5rem; display: flex; flex-wrap: wrap; gap: 0.25rem;">
               <span class="badge ${report.reportB?.durationOk ? 'badge-success' : 'badge-warning'}">Duración: ${report.reportB?.durationFormatted || 'N/A'}</span>
