@@ -108,6 +108,8 @@ body {
 }
 .badge-success { background: var(--success); color: white; }
 .badge-warning { background: var(--warning); color: black; }
+.badge-danger { background: #ef4444; color: white; }
+.badge-muted { background: #334155; color: var(--text-muted); }
 audio { width: 100%; margin-top: 0.75rem; }
 .audio-controls {
   display: flex;
@@ -177,7 +179,56 @@ audio { width: 100%; margin-top: 0.75rem; }
   font-size: 12.5px;
   line-height: 1.5;
 }
-.alert-box {
+.session-timer {
+  max-width: 1600px;
+  margin: 0 auto 1rem auto;
+  padding: 0.5rem 1rem;
+  background: var(--surface);
+  border-radius: 0.5rem;
+  font-size: 13.5px;
+  font-weight: bold;
+  text-align: center;
+  color: var(--text-muted);
+  border: 1px solid #334155;
+}
+.session-timer.timer-warning {
+  color: var(--warning);
+  border-color: var(--warning);
+}
+.session-timer.timer-urgent {
+  color: white;
+  background: #7f1d1d;
+  border-color: #ef4444;
+  animation: pulse-urgent 1.5s infinite;
+}
+@keyframes pulse-urgent {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+.approve-btn {
+  display: block;
+  width: 100%;
+  margin-top: 0.9rem;
+  padding: 0.85rem;
+  background: var(--success);
+  color: white;
+  border: none;
+  border-radius: 0.5rem;
+  font-size: 15px;
+  font-weight: bold;
+  cursor: pointer;
+}
+.approve-btn:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+.approve-btn:disabled {
+  background: #334155;
+  color: var(--text-muted);
+  cursor: not-allowed;
+}
+
+.decision-panel {
   background: rgba(59, 130, 246, 0.1);
   border: 1px solid var(--primary);
   color: var(--text);
@@ -186,4 +237,34 @@ audio { width: 100%; margin-top: 0.75rem; }
   font-size: 14px;
   text-align: center;
   margin-top: auto;
+}
+.reject-btn {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid #334155;
+  border-radius: 0.375rem;
+  padding: 0.5rem 1rem;
+  font-size: 13px;
+  cursor: pointer;
+}
+.reject-btn:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--text-muted);
+}
+.reject-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.decision-busy {
+  font-weight: bold;
+  color: var(--primary);
+}
+.decision-done {
+  font-weight: bold;
+}
+.decision-done.decision-ok {
+  color: var(--success);
+}
+.decision-done.decision-error {
+  color: var(--warning);
 }

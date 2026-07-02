@@ -11,15 +11,18 @@
 // basura ni procesos colgados:
 //   1. Flags de Chrome más livianos (menos escritura a disco, menos pings).
 //   2. Caché del perfil con tope de tamaño + limpieza automática al terminar
-//      (solo borra caché HTTP/GPU, NUNCA cookies ni sesión — el login se mantiene).
-//   3. Cierre garantizado del navegador ante Ctrl+C, crash o señal del SO,
-//      para que nunca quede un chrome.exe huérfano comiendo RAM.
+//      (solo borra caché HTTP/GPU, NUNCA cookies ni sesión — el login se mantiene;
+//      se salta si Chrome sigue corriendo, para no tocar archivos en uso).
+//   3. Chrome corre como proceso independiente (detached) y QUEDA ABIERTO al
+//      terminar — este script solo se desconecta del socket CDP (browser.close()
+//      sobre connectOverCDP desconecta, no mata Chrome; sin esa desconexión
+//      Node quedaría colgado para siempre — verificado en Playwright 1.61).
 // ─────────────────────────────────────────────────────────────────────────────
 const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
-const { clickByText, ensurePortIsFree } = require('./lib/playwright-helpers');
+const { clickByText, isPortUp } = require('./lib/playwright-helpers');
 const { enterFlowAndEnsureAssignment } = require('./lib/flow-helpers');
 const { generate } = require('./lib/llm-provider');
 const pipelineState = require('./lib/pipeline-state');
@@ -343,6 +346,14 @@ line 4
 **Advertencias:** [any phonetic re-spelling used, or other concerns for manual review — write "Ninguna" if none]`;
 
 async function readSongId(page) {
+  try {
+    await page.waitForFunction(() => {
+      const labels = Array.from(document.querySelectorAll('span.font-semibold'));
+      return labels.some((el) => el.textContent.trim() === 'Song ID:');
+    }, { timeout: 10000 });
+  } catch {
+    return null;
+  }
   return page.evaluate(() => {
     const labels = Array.from(document.querySelectorAll('span.font-semibold'));
     const label = labels.find((el) => el.textContent.trim() === 'Song ID:');
@@ -468,39 +479,42 @@ async function generateSongWithSelfCorrection(surveyContent, baseUserMessageOver
   return { fullResponse: lastResponse, passedQA: false };
 }
 
-// ─── CIERRE GARANTIZADO DEL NAVEGADOR ─────────────────────────────────────────
-// Mantiene una referencia global al contexto para poder cerrarlo ante cualquier
-// salida (Ctrl+C, kill, excepción), y así nunca dejar un chrome.exe huérfano.
-let activeContext = null;
+// ─── DESCONEXIÓN GARANTIZADA DE LA SESIÓN CDP ─────────────────────────────────
+// Chrome ahora vive como proceso independiente (detached) y NUNCA se cierra
+// desde acá. Pero la conexión CDP de Playwright mantiene vivo el event loop de
+// Node: verificado empíricamente (Playwright 1.61) que sin browser.close() el
+// proceso queda colgado para siempre, y que browser.close() sobre una conexión
+// connectOverCDP SOLO desconecta el socket — Chrome sigue corriendo intacto.
+let activeBrowser = null;
 let isClosing = false;
 
-async function safeCloseContext() {
+async function disconnectCdp() {
   if (isClosing) return;
   isClosing = true;
-  if (activeContext) {
+  if (activeBrowser) {
     try {
-      await activeContext.close();
+      await activeBrowser.close(); // sobre CDP = desconectar, NO mata Chrome
     } catch {
-      /* ya estaba cerrándose */
+      /* ya estaba desconectado */
     }
-    activeContext = null;
+    activeBrowser = null;
   }
 }
 
-// Ctrl+C y señales de terminación del SO
+// Ctrl+C y señales de terminación del SO: desconectar antes de salir.
 process.on('SIGINT', async () => {
-  console.log('\nSeñal de interrupción recibida — cerrando Chrome limpiamente...');
-  await safeCloseContext();
+  console.log('\nSeñal de interrupción recibida — desconectando de Chrome (queda abierto)...');
+  await disconnectCdp();
   process.exit(0);
 });
 process.on('SIGTERM', async () => {
-  await safeCloseContext();
+  await disconnectCdp();
   process.exit(0);
 });
-// Excepción no atrapada: cerrar Chrome antes de morir
+// Excepción no atrapada: desconectar antes de morir
 process.on('uncaughtException', async (err) => {
   console.error('Excepción no controlada:', err);
-  await safeCloseContext();
+  await disconnectCdp();
   process.exit(1);
 });
 // ──────────────────────────────────────────────────────────────────────────────
@@ -514,20 +528,47 @@ process.on('uncaughtException', async (err) => {
 
   try {
     if (!isDryRun) {
-      await ensurePortIsFree(9333);
+      if (!(await isPortUp(9333))) {
+        console.log('Lanzando Chrome en puerto de debug 9333...');
+        const chromeBin = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+        spawn(
+          chromeBin,
+          [
+            `--user-data-dir=${USER_DATA_DIR}`,
+            `--profile-directory=${PROFILE_DIRECTORY}`,
+            `--remote-debugging-port=9333`,
+            ...CHROME_ARGS,
+            TARGET_URL
+          ],
+          { detached: true, stdio: 'ignore' }
+        ).unref();
 
-      const context = await chromium.launchPersistentContext(USER_DATA_DIR, {
-        channel: 'chrome',
-        headless: false,
-        slowMo: 200,
-        args: CHROME_ARGS,
-        viewport: { width: 1440, height: 900 },
-      });
-      activeContext = context;
+        for (let i = 0; i < 20 && !(await isPortUp(9333)); i++) {
+          await new Promise((r) => setTimeout(r, 500));
+        }
+        if (!(await isPortUp(9333))) {
+          throw new Error('Chrome no levantó el puerto de debug a tiempo.');
+        }
+      } else {
+        console.log('Chrome ya está abierto en el puerto de debug 9333. Conectando...');
+      }
 
-      const page = context.pages()[0] || (await context.newPage());
-
-      await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded' });
+      const browser = await chromium.connectOverCDP('http://localhost:9333');
+      activeBrowser = browser;
+      const contexts = browser.contexts();
+      if (contexts.length === 0) {
+        throw new Error("No hay contextos de navegador disponibles");
+      }
+      const context = contexts[0];
+      const pages = context.pages();
+      let page = pages.find((p) => p.url().includes('cancioneterna.com')) || (pages.length > 0 ? pages[0] : null);
+      if (!page) {
+        page = await context.newPage();
+      }
+      await page.bringToFront();
+      if (!page.url().includes('cancioneterna.com/artists/flow')) {
+        await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded' });
+      }
 
       if (page.url().includes('/sign-in')) {
         console.log('\nNo hay sesión activa. Iniciá sesión manualmente en la ventana que se abrió (esperando hasta 5 minutos)...\n');
@@ -573,6 +614,14 @@ process.on('uncaughtException', async (err) => {
 
     console.log('Leyendo survey.txt...');
     const surveyContent = fs.readFileSync(SURVEY_PATH, 'utf-8');
+
+    // --- Pre-validación rápida de la encuesta ---
+    const recipientMatch = surveyContent.match(/(?:What's their name|recipient(?:'s)? name)\?:\s*(.+)/i);
+    if (!recipientMatch || !recipientMatch[1].trim() || recipientMatch[1].trim() === 'N/A') {
+      console.warn('\n⚠️ ADVERTENCIA: La encuesta no tiene el nombre del destinatario ("What\'s their name?:").');
+      console.warn('   Las reglas del prompt exigen un nombre. Esto provocará alucinaciones.');
+    }
+    // --------------------------------------------
 
     const baseUserMessage = isRedo
       ? buildRedoUserMessage(surveyContent, redoTitle, redoLyrics, redoFeedback)
@@ -653,11 +702,15 @@ process.on('uncaughtException', async (err) => {
     // Registrar el estado del pipeline para que los scripts siguientes
     // (suno-fill, flow-submit, --done) sepan sobre qué canción están trabajando
     // y puedan detectar si se cruzó con otra (ver lib/pipeline-state.js).
-    try {
-      const tituloForState = extractField(fullResponse, 'Título');
-      pipelineState.startNew({ songId, titulo: tituloForState, isRedo });
-    } catch (e) {
-      console.log('(No se pudo escribir state.json, no es crítico:', e.message, ')');
+    // En --dry-run NO tocar state.json: el mock pisaría el estado de una
+    // canción real en curso (mismo criterio que la caché en --dry-run).
+    if (!isDryRun) {
+      try {
+        const tituloForState = extractField(fullResponse, 'Título');
+        pipelineState.startNew({ songId, titulo: tituloForState, isRedo });
+      } catch (e) {
+        console.log('(No se pudo escribir state.json, no es crítico:', e.message, ')');
+      }
     }
 
     console.log('\n--- Letra generada ---\n');
@@ -672,16 +725,22 @@ process.on('uncaughtException', async (err) => {
         : '⚠️ Listo, pero con advertencia. Revisá song.txt cuidadosamente antes de continuar.'
     );
   } finally {
-    await safeCloseContext();
-    // Higiene de disco: limpiar caché solo si el perfil creció demasiado.
-    // Se hace acá, con el navegador ya cerrado, para no tocar archivos en uso.
+    await disconnectCdp();
+    // Higiene de disco: limpiar caché solo si el perfil creció demasiado Y
+    // Chrome NO está corriendo (con Chrome vivo los archivos están en uso —
+    // ahora el navegador queda abierto a propósito, así que casi siempre se
+    // salta; la limpieza ocurre en las corridas donde Chrome no quedó abierto).
     try {
-      cleanProfileCacheIfNeeded();
+      if (!isDryRun && (await isPortUp(9333))) {
+        console.log('\n(Chrome sigue abierto — se omite la limpieza de caché del perfil.)');
+      } else {
+        cleanProfileCacheIfNeeded();
+      }
     } catch (e) {
       console.log('No se pudo limpiar la caché (no es crítico):', e.message);
     }
   }
 })().catch((err) => {
   console.error('Automation failed:', err);
-  safeCloseContext().finally(() => process.exit(err.noSong ? 2 : 1));
+  disconnectCdp().finally(() => process.exit(err.noSong ? 2 : 1));
 });

@@ -29,7 +29,7 @@ const fs = require('fs');
 const path = require('path');
 const { findSunoMp3s, SUNO_DIR } = require('./lib/audio-match');
 const { extractFirstNames } = require('./lib/text-helpers');
-const { analyzeAudio, prepareVocals, cleanupVocalsTmp, transcribeFiles, stripStructuralTags, printReport, pickBestVersion, parseLyricsFromSongFile, parseTituloFromSongFile, getDurationAsync, formatDuration, formatElapsed, SONG_PATH } = require('./lib/audio-analysis');
+const { analyzeAudio, prepareVocals, cleanupVocalsTmp, transcribeFiles, runClapScore, stripStructuralTags, printReport, pickBestVersion, parseLyricsFromSongFile, parseTituloFromSongFile, getDurationAsync, formatDuration, formatElapsed, SONG_PATH } = require('./lib/audio-analysis');
 const { notify } = require('./lib/ntfy');
 
 function parseArgs(argv) {
@@ -133,6 +133,13 @@ function parseArgs(argv) {
       cleanupVocalsTmp(prepB);
     }
 
+    // CLAP: evaluar calidad perceptual de ambas versiones (modelo se carga 1 vez)
+    console.log('🎧 Evaluando calidad de audio con CLAP...');
+    const clapBatch = runClapScore(
+      [versionA.path, versionB.path],
+      { device: useDemucs ? 'cuda' : null },
+    );
+
     reportA = await analyzeAudio(versionA.path, {
       label: 'Versión A',
       titulo,
@@ -142,6 +149,7 @@ function parseArgs(argv) {
       firstNames,
       prepared: prepA,
       transcriptionOutcome: batch.results[0],
+      clapOutcome: clapBatch.results[0],
     });
     reportB = await analyzeAudio(versionB.path, {
       label: 'Versión B',
@@ -152,6 +160,7 @@ function parseArgs(argv) {
       firstNames,
       prepared: prepB,
       transcriptionOutcome: batch.results[1],
+      clapOutcome: clapBatch.results[1],
     });
   } else {
     console.log('⏳ Analizando Versión A... (puede tardar 1-3 minutos si Whisper necesita transcribir)');
@@ -186,11 +195,12 @@ function parseArgs(argv) {
         titleCantado: reportA.titleCantado,
         tagLeaking: reportA.tagLeaking,
         missingNames: reportA.missingNames,
+        clap: reportA.clap,
         summary: reportA.summary,
       },
       reportB: reportB ? {
         label: 'Versión B',
-        path: versionB.path,
+        path: reportB ? versionB.path : null,
         durationFormatted: reportB.durationFormatted,
         durationOk: reportB.durationOk,
         levenshteinScore: reportB.levenshteinScore,
@@ -199,6 +209,7 @@ function parseArgs(argv) {
         titleCantado: reportB.titleCantado,
         tagLeaking: reportB.tagLeaking,
         missingNames: reportB.missingNames,
+        clap: reportB.clap,
         summary: reportB.summary,
       } : null,
       timestamp: new Date().toISOString(),
@@ -234,6 +245,7 @@ function parseArgs(argv) {
     if (report.tagLeaking.length > 0) parts.push('tags cantados');
     if (report.missingNames && report.missingNames.length > 0) parts.push(`nombres ausentes: ${report.missingNames.join(',')}`);
     if (report.demucs.used && report.demucs.vocalPresence === true) parts.push('sin voz');
+    if (report.clap && report.clap.score !== null) parts.push(`CLAP:${report.clap.score}`);
     return parts.length ? ` (${parts.join(', ')})` : '';
   }
 

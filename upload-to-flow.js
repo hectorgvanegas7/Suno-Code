@@ -111,13 +111,17 @@ function parseArgs(argv) {
 
   // Conectar a Chrome existente
   const browser = await chromium.connectOverCDP(`http://localhost:${DEBUG_PORT}`);
-  const context = browser.contexts()[0];
+  const contexts = browser.contexts();
+  if (contexts.length === 0) {
+    console.error("❌ No hay contextos de navegador disponibles.");
+    process.exit(1);
+  }
+  const context = contexts[0];
   const pages = context.pages();
   const page = pages.find((p) => p.url().includes('cancioneterna.com'));
   if (!page) {
     const urls = pages.map((p) => p.url()).join(', ') || '(ninguna)';
     console.error(`❌ No se encontró tab de cancioneterna.com. Tabs: ${urls}`);
-    await browser.close().catch(() => {});
     process.exit(1);
   }
   await page.bringToFront();
@@ -226,6 +230,10 @@ function parseArgs(argv) {
   console.log('   → Cuando termines el Submit, registrá: node start-flow.js --done');
   console.log('══════════════════════════════════════════════════════════════════\n');
 
+  // Desconectar la sesión CDP para que Node pueda terminar. Sobre connectOverCDP,
+  // browser.close() SOLO desconecta — Chrome y la pestaña del Flow quedan
+  // abiertos para el Submit manual (verificado en Playwright 1.61; sin esto el
+  // proceso cuelga y start-flow.js se queda esperando el exit para siempre).
   await browser.close().catch(() => {});
 })().catch((err) => {
   console.error('upload-to-flow.js falló:', err.message);

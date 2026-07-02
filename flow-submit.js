@@ -41,7 +41,11 @@ function buildFlowNotes(rawNotes) {
 
 async function connectToFlowTab(debugPort = DEBUG_PORT) {
   const browser = await chromium.connectOverCDP(`http://localhost:${debugPort}`);
-  const context = browser.contexts()[0];
+  const contexts = browser.contexts();
+  if (contexts.length === 0) {
+    throw new Error("No hay contextos de navegador disponibles");
+  }
+  const context = contexts[0];
   const pages = context.pages();
   const page = pages.find((p) => p.url().includes('cancioneterna.com'));
   if (!page) {
@@ -156,11 +160,14 @@ async function findNotesField(page) {
   console.log('Conectado a:', page.url());
 
   try {
-    const titleLocator = page.locator('#title');
-    const lyricsLocator = page.locator('#lyrics');
-    if ((await titleLocator.count()) === 0 || (await lyricsLocator.count()) === 0) {
+    try {
+      await page.waitForSelector('#title', { timeout: 15000 });
+      await page.waitForSelector('#lyrics', { timeout: 15000 });
+    } catch {
       throw new Error('No se encontraron #title / #lyrics en la página. ¿Hay una asignación activa cargada en el Flow?');
     }
+    const titleLocator = page.locator('#title');
+    const lyricsLocator = page.locator('#lyrics');
 
     console.log('\nLlenando título...');
     await fillReactField(page, titleLocator, titulo, 'title');
@@ -193,7 +200,8 @@ async function findNotesField(page) {
   console.log(`\nScreenshot de verificación guardado en ${SCREENSHOT_PATH}`);
   console.log('Deteniéndose acá. Revisá el screenshot antes de subir el MP3 y hacer Submit to QA manualmente.');
 
-  await browser.close().catch(() => {}); // CDP: solo desconecta, no cierra Chrome
+  console.log('Dejando la pestaña del Flow abierta para tu revisión manual.');
+  process.exit(0);
 })().catch((err) => {
   console.error('flow-submit.js falló:', err);
   process.exit(1);

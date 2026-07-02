@@ -3,8 +3,12 @@
 //   node start-flow.js                  -> flujo completo: genera letra, llena
 //                                          Suno, clickea Create automáticamente,
 //                                          espera generación, descarga ambos MP3,
-//                                          llena el Flow. Se detiene para que
-//                                          Gabo analice y elija versión.
+//                                          llena el Flow, sube automáticamente
+//                                          la versión que recomienda el análisis
+//                                          de audio (B por defecto si no hay
+//                                          reporte confiable) y queda esperando a
+//                                          detectar el Submit to QA manual para
+//                                          cerrar (Sheets + Drive) solo.
 //
 //   node start-flow.js --no-auto-create -> igual pero SIN clickear Create ni
 //                                          descargar (vuelve al flujo manual
@@ -56,14 +60,21 @@
 //   3c. (auto, desactivable) verify-audio.js en background (--demucs por default,
 //       no bloquea el Paso 4/4; log en logs/verify-audio-auto-*.log).
 //   4. flow-submit.js  — llena título/letra/notas en el Flow.
-//   → STOP. Gabo revisa el resultado de verify-audio.js (o lo corre a mano si
-//     se saltéo), elige versión, corre upload-to-flow.js.
-//   → Gabo hace Submit to QA manualmente.
-//   → node start-flow.js --done registra en la hoja.
+//   5. Muestra la recomendación de verify-report.json y sube automáticamente
+//      LA VERSIÓN RECOMENDADA por el análisis (solo si el reporte es de esta
+//      canción y el análisis terminó bien; si no, B por defecto — A si solo
+//      hay una). Para cambiarla: node upload-to-flow.js --version A|B
+//      (manual, pisa la subida en el Flow).
+//   → Gabo hace Submit to QA manualmente (ÚNICA interacción manual).
+//   → El script detecta la card en "Recent completions" (pestaña dedicada en
+//     background, título verificado contra state.json) y corre el cierre solo:
+//     tiempo de sesión + screenshot + registro en Sheets + Drive.
+//     Fallback si se cortó antes: node start-flow.js --done.
 //
-// run.js cierra su propio Chrome al terminar (perfil compartido con Suno — ver
-// LESSONS.md "CDP lifecycle pattern"), así que para los Pasos 3b y 4 reusamos el
-// Chrome del puerto de debug (el de Suno) en vez de lanzar uno nuevo.
+// run.js usa el MISMO Chrome del puerto 9333 (lo lanza detached si no está) y
+// lo deja abierto al terminar — todos los pasos comparten esa instancia. Los
+// scripts solo se desconectan del socket CDP (browser.close() sobre
+// connectOverCDP desconecta, no mata Chrome — verificado en Playwright 1.61).
 //
 // El modo --poll usa el puerto 9334 (distinto del de Suno, 9333). Antes de lanzar
 // el flujo, cierra su Chrome y espera a que el puerto caiga — señal concreta de que
@@ -72,7 +83,6 @@
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const readline = require('readline');
 const { chromium } = require('playwright');
 const { isLoggedIn, clickByText, isPortUp, ensurePortIsFree } = require('./lib/playwright-helpers');
 const { enterFlowAndEnsureAssignment, FLOW_URL } = require('./lib/flow-helpers');
@@ -118,17 +128,8 @@ function writeToRunLog(chunk) {
   }
 }
 
-// Referencia al proceso del QA Dashboard mientras está corriendo, para poder
-// matarlo desde el handler de 'exit' si el proceso principal termina de
-// golpe (Ctrl+C, excepción no capturada) antes de llegar a su kill() normal
-// — si no, queda un servidor Express huérfano escuchando en el puerto 3000.
-let activeDashboardProcess = null;
-
 process.on('exit', () => {
   try { fs.closeSync(runLogFd); } catch {}
-  if (activeDashboardProcess && !activeDashboardProcess.killed) {
-    try { activeDashboardProcess.kill(); } catch {}
-  }
 });
 
 // Envuelve console.log/error para que todo lo que start-flow.js imprime (y todo
@@ -220,20 +221,27 @@ function runScript(scriptNameWithArgs) {
 }
 
 
-async function withCdp(fn) {
-  const browser = await chromium.connectOverCDP(`http://localhost:${DEBUG_PORT}`);
-  try {
-    return await fn(browser);
-  } finally {
-    await browser.close().catch(() => {}); // CDP: solo desconecta, no cierra Chrome
+let cachedBrowser = null;
+async function getBrowser() {
+  if (!cachedBrowser || !cachedBrowser.isConnected()) {
+    cachedBrowser = await chromium.connectOverCDP(`http://localhost:${DEBUG_PORT}`);
   }
+  return cachedBrowser;
+}
+
+async function withCdp(fn) {
+  const browser = await getBrowser();
+  return await fn(browser);
 }
 
 async function checkSunoLoginOnce() {
   return withCdp(async (browser) => {
-    const context = browser.contexts()[0];
+    const contexts = browser.contexts();
+    if (contexts.length === 0) return false;
+    const context = contexts[0];
     const pages = context.pages();
-    const page = pages.find((p) => p.url().includes('suno.com')) || pages[0];
+    const page = pages.find((p) => p.url().includes('suno.com')) || (pages.length > 0 ? pages[0] : null);
+    if (!page) return false;
     return isLoggedIn(page);
   });
 }
@@ -261,9 +269,11 @@ async function waitUntilSunoLoggedIn() {
 // renderice i18n keys crudas (ej: "createForm.createButton") en el texto visible.
 async function checkSunoSessionReady(maxAttempts = 3) {
   return withCdp(async (browser) => {
-    const context = browser.contexts()[0];
+    const contexts = browser.contexts();
+    if (contexts.length === 0) return false;
+    const context = contexts[0];
     const pages = context.pages();
-    let page = pages.find((p) => p.url().includes('suno.com')) || pages[0];
+    let page = pages.find((p) => p.url().includes('suno.com')) || (pages.length > 0 ? pages[0] : await context.newPage());
     await page.bringToFront();
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -319,7 +329,9 @@ async function checkSunoSessionReady(maxAttempts = 3) {
 // helper compartido para garantizar que haya una asignación activa (#lyrics).
 async function openFlowTabAndEnsureAssignment() {
   await withCdp(async (browser) => {
-    const context = browser.contexts()[0];
+    const contexts = browser.contexts();
+    if (contexts.length === 0) throw new Error("No hay contextos de navegador disponibles");
+    const context = contexts[0];
     let page = context.pages().find((p) => p.url().includes('cancioneterna.com'));
     const needNavigate = !page;
     if (!page) page = await context.newPage();
@@ -333,19 +345,18 @@ async function openFlowTabAndEnsureAssignment() {
 // ─── Helpers del modo --poll ──────────────────────────────────────────────────
 
 // ¿Hay sesión de Suno viva en el puerto de Suno (9333)? Si la hay, NO es seguro
-// arrancar el pipeline — run.js usa launchPersistentContext sobre el mismo perfil.
+// arrancar el poller — comparte el mismo perfil de Chrome y la conducta
+// singleton puede cerrar/hijackear la ventana de la otra instancia.
 async function isSunoSessionLive() {
   if (!(await isPortUp(DEBUG_PORT))) return false;
   try {
-    const browser = await chromium.connectOverCDP(`http://localhost:${DEBUG_PORT}`);
-    try {
-      const ctx = browser.contexts()[0];
-      const sunoPage = ctx.pages().find((p) => p.url().includes('suno.com'));
-      if (!sunoPage) return false;
-      return await isLoggedIn(sunoPage);
-    } finally {
-      await browser.close().catch(() => {});
-    }
+    const browser = await getBrowser();
+    const contexts = browser.contexts();
+    if (contexts.length === 0) return false;
+    const ctx = contexts[0];
+    const sunoPage = ctx.pages().find((p) => p.url().includes('suno.com'));
+    if (!sunoPage) return false;
+    return await isLoggedIn(sunoPage);
   } catch {
     return false;
   }
@@ -383,7 +394,9 @@ function closePollerChrome() {
 async function pollOnce(log) {
   const browser = await chromium.connectOverCDP(`http://localhost:${POLL_PORT}`);
   try {
-    const ctx = browser.contexts()[0];
+    const contexts = browser.contexts();
+    if (contexts.length === 0) return { found: false };
+    const ctx = contexts[0];
     let page = ctx.pages().find((p) => p.url().includes('cancioneterna.com'));
     const needNavigate = !page;
     if (!page) page = await ctx.newPage();
@@ -406,7 +419,7 @@ async function pollOnce(log) {
       return { found: false };
     }
   } finally {
-    await browser.close().catch(() => {}); // CDP: solo desconecta
+    await browser.close().catch(() => {});
   }
 }
 
@@ -436,6 +449,16 @@ function parseSessionTime(text) {
       totalTimeDecimal: Math.round((totalMin / 60) * 100) / 100,
     };
   }
+  // "1h session" / "2 h session" — horas exactas sin minutos (sin esto, una
+  // sesión de exactamente 1 hora tiraría "No se pudo parsear tiempo").
+  const hourOnly = text.match(/(\d+)\s*h(?:r|our)?s?\b/i);
+  if (hourOnly) {
+    const h = parseInt(hourOnly[1], 10);
+    return {
+      timeHHMM: `${String(h).padStart(2, '0')}:00`,
+      totalTimeDecimal: h,
+    };
+  }
   return null;
 }
 
@@ -444,15 +467,25 @@ function parseSessionTime(text) {
 // Lanza si no puede conectar, si el DOM no tiene la sección, si el título no
 // coincide con expectedTitulo (cuando se pasa), o si el tiempo no se puede parsear.
 // El screenshot falla sin lanzar (error logueado, screenshotPath queda null).
-async function readRecentCompletion(expectedTitulo) {
+//
+// options.page: pestaña dedicada a reutilizar. El loop de auto-detección del
+// Submit la pasa SIEMPRE — sin esto, cada poll navegaba/recargaba la MISMA
+// pestaña donde Hector está por hacer click en "Submit to QA" (cada 5s), lo
+// que puede robarle el click o interrumpir el formulario. Con una pestaña
+// dedicada en background, la pestaña de trabajo no se toca nunca.
+async function readRecentCompletion(expectedTitulo, { page: providedPage = null } = {}) {
   if (!(await isPortUp(DEBUG_PORT))) {
     throw new Error(`Chrome no está en el puerto ${DEBUG_PORT}`);
   }
 
   return withCdp(async (browser) => {
-    const context = browser.contexts()[0];
+    const contexts = browser.contexts();
+    if (contexts.length === 0) throw new Error("No hay contextos de navegador disponibles");
+    const context = contexts[0];
 
-    let page = context.pages().find((p) => p.url().includes('cancioneterna.com'));
+    let page = providedPage && !providedPage.isClosed()
+      ? providedPage
+      : context.pages().find((p) => p.url().includes('cancioneterna.com'));
     const openedNew = !page;
     if (!page) page = await context.newPage();
 
@@ -590,7 +623,7 @@ async function readRecentCompletion(expectedTitulo) {
 }
 
 // ─── MODO --done: cierre del flujo ────────────────────────────────────────────
-async function runDone() {
+async function runDone(passedCompletion = null) {
   const { logSongToSheet } = require('./lib/sheets-core');
 
   console.log('=== Cierre (--done): registrando en la hoja ===\n');
@@ -606,16 +639,24 @@ async function runDone() {
   let timeHHMM = null;
   let totalTimeDecimal = null;
   let screenshotPath = null;
-  console.log('\nLeyendo tiempo de sesión desde Recent completions...');
-  try {
-    const completion = await readRecentCompletion(current?.titulo ?? null);
-    timeHHMM = completion.timeHHMM;
-    totalTimeDecimal = completion.totalTimeDecimal;
-    screenshotPath = completion.screenshotPath;
-    console.log(`  ✅ ${completion.sessionText} → ${timeHHMM} (${totalTimeDecimal} decimal)`);
-  } catch (e) {
-    console.log(`  ⚠️ ${e.message}`);
-    console.log('  Total Time y Time quedan vacíos — llenálos a mano en la hoja.');
+  
+  if (passedCompletion) {
+    timeHHMM = passedCompletion.timeHHMM;
+    totalTimeDecimal = passedCompletion.totalTimeDecimal;
+    screenshotPath = passedCompletion.screenshotPath;
+    console.log(`  ✅ ${passedCompletion.sessionText} → ${timeHHMM} (${totalTimeDecimal} decimal)`);
+  } else {
+    console.log('\nLeyendo tiempo de sesión desde Recent completions...');
+    try {
+      const completion = await readRecentCompletion(current?.titulo ?? null);
+      timeHHMM = completion.timeHHMM;
+      totalTimeDecimal = completion.totalTimeDecimal;
+      screenshotPath = completion.screenshotPath;
+      console.log(`  ✅ ${completion.sessionText} → ${timeHHMM} (${totalTimeDecimal} decimal)`);
+    } catch (e) {
+      console.log(`  ⚠️ ${e.message}`);
+      console.log('  Total Time y Time quedan vacíos — llenálos a mano en la hoja.');
+    }
   }
 
   const result = await logSongToSheet({ timeHHMM, totalTimeDecimal });
@@ -717,24 +758,6 @@ async function tryDriveScreenshot(localPngPath, sheetRow, tabName) {
   }
 }
 
-// Pregunta en la misma sesión de terminal si ya se completó el Submit to QA.
-// Retorna true si el usuario confirma con "s". En entornos no-interactivos (stdin
-// no es TTY) no bloquea — informa que --done sigue disponible como fallback.
-async function askDoneQuestion() {
-  if (!process.stdin.isTTY) {
-    console.log('\n(stdin no es terminal interactiva — no se puede pedir confirmación en línea.)');
-    console.log('Cuando termines, registrá con: node start-flow.js --done');
-    return false;
-  }
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  return new Promise((resolve) => {
-    rl.question('\n¿Ya hiciste Submit to QA? (s/n): ', (answer) => {
-      rl.close();
-      resolve(answer.trim().toLowerCase() === 's');
-    });
-  });
-}
-
 // ─── MODO normal: flujo completo ──────────────────────────────────────────────
 // Con resume=true retoma un pipeline cortado usando state.json: salta los pasos
 // cuya etapa ya quedó registrada. El caso ambiguo es un crash después de
@@ -832,6 +855,7 @@ async function runFlow({ resume = false } = {}) {
   // Se puede saltar con --no-auto-create para volver al flujo manual.
   const noAutoCreate = process.argv.includes('--no-auto-create');
   let mp3sDescargados = false;
+  let hayVersionB = false; // si solo se descargó 1 versión, el upload debe ir a la A
   let verifyOk = false;
   let verifyPromise = null; // corre en paralelo con el Paso 4; se espera después
   if (skipSunoFill) {
@@ -843,6 +867,7 @@ async function runFlow({ resume = false } = {}) {
       const { findSunoMp3s } = require('./lib/audio-match');
       const { versionA, versionB } = findSunoMp3s(state.read()?.titulo || null, { recencyMinutes: 180 });
       mp3sDescargados = true;
+      hayVersionB = !!versionB;
       console.log(`  ✅ MP3s encontrados: ${versionA.name}${versionB ? ` + ${versionB.name}` : ' (solo 1 versión)'}`);
       if (!process.argv.includes('--no-auto-verify')) {
         console.log('\n  ⏳ Análisis de audio lanzado en paralelo con el Paso 4 (Whisper + demucs)...');
@@ -863,6 +888,7 @@ async function runFlow({ resume = false } = {}) {
       const { createAndDownload } = require('./lib/suno-create-dl');
       const { versionA, versionB } = await createAndDownload();
       mp3sDescargados = true;
+      hayVersionB = !!versionB;
       await notify(
         `MP3s listos: "${state.read()?.titulo || 'canción'}".\nVersiones A y B en Downloads/suno/.\nCorré: node verify-audio.js`,
         { title: 'Suno: generación completa', priority: 'high', tags: 'musical_note' }
@@ -906,108 +932,134 @@ async function runFlow({ resume = false } = {}) {
     verifyOk = await verifyPromise;
   }
 
-  // ── Paso 5: Recomendación + Upload automático ──────────────────────────────
-  // verifyOk + chequeo de título: verify-report.json puede quedar con datos de
-  // una canción anterior si el auto-verify de ESTA corrida falló antes de
-  // reescribirlo, o si --no-auto-verify se usó y el archivo quedó viejo. Nunca
-  // confiar en el archivo solo porque existe — ver el bug de "canción
-  // equivocada" documentado en lib/pipeline-state.js.
+  // ── Paso 5: Recomendación + Upload automático de la MEJOR versión ──────────
+  // Se sube la versión que recomienda verify-report.json (pickBestVersion:
+  // duración, letra, clipping, corte abrupto, CLAP...). Solo se confía en el
+  // reporte si el análisis de ESTA corrida terminó bien Y el título coincide
+  // con state.json — nunca un reporte viejo o de otra canción. Sin reporte
+  // confiable: B por defecto (A si solo se descargó una versión).
   const REPORT_PATH = path.join(__dirname, 'verify-report.json');
   const currentTitulo = state.read()?.titulo || null;
-  if (mp3sDescargados && verifyOk && fs.existsSync(REPORT_PATH)) {
-    try {
-      const report = JSON.parse(fs.readFileSync(REPORT_PATH, 'utf-8'));
+  if (mp3sDescargados) {
+    let versionToUpload = hayVersionB ? 'B' : 'A';
+    let uploadReason = hayVersionB
+      ? 'sin reporte de análisis confiable — B por defecto'
+      : 'solo se descargó una versión';
 
-      if (currentTitulo && report.titulo && report.titulo !== currentTitulo) {
-        console.log(
-          `\n⚠️ verify-report.json es de otra canción ("${report.titulo}") — no coincide con la actual ("${currentTitulo}"). Ignorando el reporte.`
-        );
-        throw new Error('verify-report.json desactualizado');
-      }
-
-      const rec = report.recommendation;
-
-      console.log('\n══════════════════════════════════════════════════════');
-      console.log(`📊 RECOMENDACIÓN: Versión ${rec.recommended}`);
-      console.log(`   Razón: ${rec.reason}`);
-      if (report.reportA) console.log(`   A: ${report.reportA.durationFormatted} — letra ${Math.round((report.reportA.levenshteinScore || 0) * 100)}%${report.reportA.clippingFlag ? ' — ⚠️ clipping' : ''}${report.reportA.abruptCutoff ? ' — ⚠️ corte abrupto' : ''}`);
-      if (report.reportB) console.log(`   B: ${report.reportB.durationFormatted} — letra ${Math.round((report.reportB.levenshteinScore || 0) * 100)}%${report.reportB.clippingFlag ? ' — ⚠️ clipping' : ''}${report.reportB.abruptCutoff ? ' — ⚠️ corte abrupto' : ''}`);
-      if (rec.scoreB !== null) console.log(`   Puntajes: A=${rec.scoreA}, B=${rec.scoreB}`);
-      console.log('══════════════════════════════════════════════════════');
-      console.log('\n👉 Escuchá ambas versiones antes de decidir. La recomendación es ORIENTATIVA.');
-
-      console.log('\n👉 Iniciando el QA Dashboard de lectura (puerto 3000)...');
-      const dashboardProcess = spawn('node', ['qa-dashboard.js'], { stdio: 'inherit' });
-      activeDashboardProcess = dashboardProcess;
-
-      // Abrir el navegador automáticamente apuntando al dashboard de audio
-      setTimeout(() => {
-        spawn('powershell', ['-NoProfile', '-Command', 'Start-Process http://localhost:3000'], { stdio: 'ignore' }).unref();
-      }, 1500);
-
-      let versionChoice;
+    if (verifyOk && fs.existsSync(REPORT_PATH)) {
       try {
-        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-        versionChoice = await new Promise((resolve) => {
-          rl.question(`\n¿Subir Versión ${rec.recommended} al Flow? (s = sí, n = no subir, A/B = subir la otra): `, (answer) => {
-            rl.close();
-            resolve(answer.trim().toUpperCase());
-          });
-        });
-      } finally {
-        // Pase lo que pase (excepción, respuesta normal), nunca dejar el
-        // dashboard corriendo en el puerto 3000.
-        dashboardProcess.kill();
-        activeDashboardProcess = null;
+        const report = JSON.parse(fs.readFileSync(REPORT_PATH, 'utf-8'));
+        if (currentTitulo && report.titulo && report.titulo === currentTitulo) {
+          const rec = report.recommendation;
+          console.log('\n══════════════════════════════════════════════════════');
+          console.log(`📊 RECOMENDACIÓN DE AUDIO: Versión ${rec.recommended}`);
+          console.log(`   Razón: ${rec.reason}`);
+          if (report.reportA) console.log(`   A: ${report.reportA.durationFormatted} — letra ${Math.round((report.reportA.levenshteinScore || 0) * 100)}%${report.reportA.clippingFlag ? ' — ⚠️ clipping' : ''}${report.reportA.abruptCutoff ? ' — ⚠️ corte abrupto' : ''}`);
+          if (report.reportB) console.log(`   B: ${report.reportB.durationFormatted} — letra ${Math.round((report.reportB.levenshteinScore || 0) * 100)}%${report.reportB.clippingFlag ? ' — ⚠️ clipping' : ''}${report.reportB.abruptCutoff ? ' — ⚠️ corte abrupto' : ''}`);
+          if (rec.scoreB !== null) console.log(`   Puntajes: A=${rec.scoreA}, B=${rec.scoreB}`);
+          console.log('══════════════════════════════════════════════════════');
+          if (rec.recommended === 'A' || rec.recommended === 'B') {
+            versionToUpload = rec.recommended;
+            uploadReason = 'recomendada por el análisis de audio';
+          }
+        } else {
+          console.log('\n  ⚠️ verify-report.json es de otra canción — se ignora para elegir versión.');
+        }
+      } catch (e) {
+        console.log(`\n  ⚠️ No se pudo leer verify-report.json (${e.message}) — se ignora.`);
       }
+    }
 
-      let versionToUpload = null;
-      if (versionChoice === 'S' || versionChoice === 'SI' || versionChoice === 'SÍ' || versionChoice === 'Y') {
-        versionToUpload = rec.recommended;
-      } else if (versionChoice === 'A' || versionChoice === 'B') {
-        versionToUpload = versionChoice;
-      }
-
-      if (versionToUpload) {
-        console.log(`\n=== Subiendo Versión ${versionToUpload} al Flow (upload-to-flow.js) ===\n`);
-        await runScript(`upload-to-flow.js --version ${versionToUpload}`);
-        state.write({ stage: state.STAGES.FLOW_FILLED });
-        console.log(`\n✅ Versión ${versionToUpload} subida al Flow exitosamente.`);
-      } else {
-        console.log('\n(No se subió ninguna versión. Podés hacerlo manualmente con: node upload-to-flow.js --version A|B)');
+    console.log(`\n🚀 Subiendo automáticamente la Versión ${versionToUpload} al Flow (${uploadReason})...`);
+    try {
+      await runScript(`upload-to-flow.js --version ${versionToUpload}`);
+      state.write({ stage: state.STAGES.FLOW_FILLED });
+      console.log(`\n✅ Versión ${versionToUpload} subida al Flow exitosamente.`);
+      const otra = versionToUpload === 'B' ? 'A' : 'B';
+      if (hayVersionB) {
+        console.log(`   (Si preferís la otra: node upload-to-flow.js --version ${otra} — pisa la subida en el Flow.)`);
       }
     } catch (e) {
-      console.log(`\n⚠️ No se pudo leer verify-report.json: ${e.message}`);
-      console.log('   Subí el MP3 manualmente con: node upload-to-flow.js --version A|B');
+      console.log(`\n⚠️ La subida automática de la Versión ${versionToUpload} falló: ${e.message}`);
+      console.log(`   Podés reintentar subir manualmente con: node upload-to-flow.js --version ${versionToUpload}`);
     }
-  } else if (mp3sDescargados) {
-    console.log(
-      '\n✅ Flujo completo. MP3s descargados en Downloads/suno/.\n' +
-        '   Revisá: suno-verify-overview.png, suno-verify-lyrics-expanded.png y flow-submit-verify.png.\n' +
-        '\n   Pasos manuales:\n' +
-        '     1. node verify-audio.js       → analiza las 2 versiones\n' +
-        '     2. Escuchá y elegí la versión\n' +
-        '     3. node upload-to-flow.js --version A|B  → sube el MP3 al Flow\n'
-    );
   } else {
     console.log(
-      '\n✅ Flujo completo hasta el checkpoint visual.\n' +
-        '   Revisá: suno-verify-overview.png, suno-verify-lyrics-expanded.png y flow-submit-verify.png.\n' +
-        '\n   Pasos manuales:\n' +
-        '     1. Clickeá Create en Suno (o: node suno-create.js)\n' +
-        '     2. Descargá los 2 MP3 a Downloads/suno/\n' +
-        '     3. node verify-audio.js     → analiza duración y letra\n' +
-        '     4. node upload-to-flow.js --version A|B  → sube el MP3 elegido\n'
+      '\n✅ Letra y formulario completados, pero no se descargaron MP3s en esta corrida.\n' +
+        '   Hacé Create en Suno, descargá los MP3 y subilos manualmente con:\n' +
+        '     node upload-to-flow.js --version A|B\n'
     );
   }
 
-  // ── Paso final: Submit to QA manual + registro ─────────────────────────────
-  console.log('🛑 Hacé Submit to QA manualmente en el Flow.');
-  const confirmed = await askDoneQuestion();
-  if (confirmed) {
-    await runDone();
+  // ── Paso final: Auto-detección del Submit to QA y Cierre automático ────────
+  // El poll corre sobre una PESTAÑA DEDICADA en background — nunca sobre la
+  // pestaña donde Hector hace click en Submit (recargarla cada 5s le robaba el
+  // click y podía interrumpir el formulario). La detección exige que el título
+  // de la card coincida con state.json: sin título conocido NO se auto-detecta
+  // (la primera card sería la canción ANTERIOR y se registraría un cierre falso).
+  if (!currentTitulo) {
+    console.log('\n⚠️ state.json no tiene título — no se puede auto-detectar el Submit sin riesgo');
+    console.log('   de registrar la canción equivocada. Cuando hagas Submit to QA, cerrá con:');
+    console.log('   node start-flow.js --done');
+    return;
+  }
+
+  console.log('\n==================================================================');
+  console.log('🛑 Hacé click en "Submit to QA" manualmente en el navegador.');
+  console.log('⏳ El script detectará la finalización y registrará en Sheets automáticamente...');
+  console.log('   (Espera máxima: 15 min. Fallback manual: node start-flow.js --done)');
+  console.log('==================================================================\n');
+
+  // Pestaña dedicada para el poll (se abre una sola vez y se cierra al final).
+  // Después de crearla se devuelve el foco a la pestaña de trabajo del Flow.
+  let pollPage = null;
+  try {
+    const browser = await getBrowser();
+    const ctx = browser.contexts()[0];
+    const workPage = ctx ? ctx.pages().find((p) => p.url().includes('cancioneterna.com')) : null;
+    pollPage = await ctx.newPage();
+    await pollPage.goto(FLOW_CREATE_URL, { waitUntil: 'domcontentloaded' }).catch(() => {});
+    if (workPage) await workPage.bringToFront().catch(() => {});
+  } catch (e) {
+    console.log(`  ⚠️ No se pudo abrir la pestaña de monitoreo (${e.message}). Cerrá con --done.`);
+    pollPage = null;
+  }
+
+  let completion = null;
+  const pollIntervalMs = 5000;
+  const deadline = Date.now() + 15 * 60 * 1000;
+
+  if (pollPage) {
+    while (Date.now() < deadline) {
+      try {
+        completion = await readRecentCompletion(currentTitulo, { page: pollPage });
+        if (completion) break;
+      } catch (e) {
+        // Título aún no coincide / formulario aún sin enviar — seguir esperando.
+        // Pero si Chrome se cerró, no tiene sentido seguir 15 minutos a ciegas.
+        if (!(await isPortUp(DEBUG_PORT))) {
+          console.log('\n⚠️ Chrome se cerró — la auto-detección no puede continuar.');
+          break;
+        }
+      }
+      await new Promise((r) => setTimeout(r, pollIntervalMs));
+    }
+    await pollPage.close().catch(() => {});
+  }
+
+  if (completion) {
+    console.log(`\n✅ ¡Detección automática exitosa!`);
+    console.log(`   Canción: "${completion.title}"`);
+    console.log(`   Tiempo de sesión: ${completion.sessionText}`);
+    await runDone(completion);
   } else {
-    console.log('\n(No se registró en la hoja. Podés hacerlo después con: node start-flow.js --done)');
+    console.log('\n⚠️ No se detectó el clic en "Submit to QA" (timeout de 15 min o Chrome cerrado).');
+    console.log('   Si ya hiciste el Submit, registra la canción ejecutando:');
+    console.log('   node start-flow.js --done');
+    await notify(
+      'No se auto-detectó el Submit to QA. Si ya lo hiciste, corré: node start-flow.js --done',
+      { title: 'Cancion Eterna: cierre pendiente', priority: 'default', tags: 'warning' }
+    ).catch(() => {});
   }
 }
 
@@ -1140,6 +1192,13 @@ async function runPoll(rawArgs) {
       }
     }
   }
+
+  // Desconectar la conexión CDP cacheada y salir explícitamente: el socket de
+  // connectOverCDP mantiene vivo el event loop de Node (verificado en
+  // Playwright 1.61) — sin esto el orquestador queda colgado al terminar.
+  // browser.close() sobre CDP solo desconecta; Chrome queda abierto.
+  if (cachedBrowser) await cachedBrowser.close().catch(() => {});
+  process.exit(0);
 })().catch((err) => {
   console.error('Orquestación falló:', err);
   process.exit(1);

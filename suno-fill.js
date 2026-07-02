@@ -50,9 +50,19 @@ async function fillSunoForm(page, titulo, voz, estilo, lyrics, genderTarget) {
   await page.waitForTimeout(300);
 
   // Fill Lyrics
-  const lyricsBox = page.locator(LYRICS_TEXTAREA);
-  await lyricsBox.click();
-  await lyricsBox.fill(lyrics);
+  const lyricsBox = page.locator(LYRICS_TEXTAREA).first();
+  await lyricsBox.click({ force: true });
+  // Usar teclado directamente si fill falla por ser un editor Lexical (contenteditable complejo)
+  try {
+    await lyricsBox.fill(lyrics, { force: true });
+  } catch (e) {
+    // Fallback: seleccionar todo y reemplazar tecleando
+    await page.keyboard.down('Control');
+    await page.keyboard.press('A');
+    await page.keyboard.up('Control');
+    await page.keyboard.press('Backspace');
+    await page.keyboard.insertText(lyrics);
+  }
   await page.waitForTimeout(300);
 
   // Fill Style. El campo de estilo no siempre es textarea.nth(1) — si Suno
@@ -139,17 +149,46 @@ async function fillSunoForm(page, titulo, voz, estilo, lyrics, genderTarget) {
   // --- Verification screenshots ---
   await page.screenshot({ path: 'suno-verify-overview.png' });
 
+  // Suno le quitó el botón "Expand lyrics box" en un rediseño (data-testid y
+  // aria-label ya no existen) — antes, si no se encontraba, el bloque entero se
+  // saltaba en silencio y dejaba flotando el PNG de la corrida anterior con
+  // pinta de estar actualizado (visto en vivo: overview.png con timestamp de
+  // ahora, lyrics-expanded.png con el de una canción de horas antes). Eso
+  // rompe justo la verificación visual que este proyecto trata como
+  // no-negociable. Mientras Suno no reintroduzca el botón, el fallback
+  // scrollea el editor de letra al inicio (para ver Verse 1, no el final
+  // donde queda el cursor) y saca un screenshot con OTRO nombre de archivo —
+  // nunca reusar 'suno-verify-lyrics-expanded.png' a medias, y borrar el
+  // viejo si quedó de una corrida anterior para que no lo confundan con uno
+  // fresco.
+  const OLD_EXPANDED_PATH = 'suno-verify-lyrics-expanded.png';
   const expandBtn = page.getByLabel(EXPAND_LYRICS_BOX_LABEL);
   if ((await expandBtn.count()) > 0) {
     await expandBtn.click();
     await page.waitForTimeout(500);
-    await page.screenshot({ path: 'suno-verify-lyrics-expanded.png' });
+    await page.screenshot({ path: OLD_EXPANDED_PATH });
     await expandBtn.click().catch(() => {});
     await page.waitForTimeout(300);
+  } else {
+    console.log(`  ⚠️ "${EXPAND_LYRICS_BOX_LABEL}" ya no existe en la UI de Suno (rediseño) — usando fallback de scroll-to-top.`);
+    if (fs.existsSync(OLD_EXPANDED_PATH)) {
+      fs.unlinkSync(OLD_EXPANDED_PATH);
+      console.log(`  🗑️  Borrado ${OLD_EXPANDED_PATH} viejo para que no se confunda con uno de esta corrida.`);
+    }
+    const lyricsBoxForScroll = page.locator(LYRICS_TEXTAREA).first();
+    // scrollIntoViewIfNeeded scrollea el panel CONTENEDOR (que tiene su propio
+    // scroll, separado del de la letra) para que la caja de letra quede
+    // visible — sin esto, el panel queda donde lo dejó el llenado de Título/
+    // More Options más abajo, y el screenshot termina mostrando el cuadro de
+    // Estilo en vez del de Letra aunque el scroll INTERNO de la letra esté en 0.
+    await lyricsBoxForScroll.scrollIntoViewIfNeeded().catch(() => {});
+    await lyricsBoxForScroll.evaluate((el) => { el.scrollTop = 0; }).catch(() => {});
+    await page.waitForTimeout(300);
+    await page.screenshot({ path: 'suno-verify-lyrics-top.png' });
   }
 
   // Re-acquire locators for verification (they were filled inside fillSunoForm)
-  const lyricsBox = page.locator(LYRICS_TEXTAREA);
+  const lyricsBox = page.locator(LYRICS_TEXTAREA).first();
   let styleBox = page.locator(STYLE_TEXTAREA).first();
   if ((await styleBox.count()) === 0) styleBox = page.locator('textarea').nth(1);
   const titleInputs = page.locator(TITLE_INPUT);
@@ -159,7 +198,7 @@ async function fillSunoForm(page, titulo, voz, estilo, lyrics, genderTarget) {
   }
   if (!titleInput) titleInput = titleInputs.first();
 
-  const lyricsValue = await lyricsBox.inputValue();
+  const lyricsValue = await lyricsBox.evaluate(el => el.value !== undefined ? el.value : el.innerText).catch(() => '');
   const styleValue = await styleBox.inputValue();
   const titleValue = await titleInput.inputValue();
   const weirdnessVal = await page.locator(`[role="slider"][aria-label="${WEIRDNESS_SLIDER_LABEL}"]`).getAttribute('aria-valuenow');
@@ -178,6 +217,10 @@ async function fillSunoForm(page, titulo, voz, estilo, lyrics, genderTarget) {
 
   console.log('\nFormulario completado. Revisando screenshots.');
 
+  // Desconectar la sesión CDP para que Node pueda terminar. Sobre connectOverCDP,
+  // browser.close() SOLO desconecta el socket — Chrome queda abierto con el
+  // formulario intacto (verificado empíricamente en Playwright 1.61; sin esto
+  // el proceso queda colgado y start-flow.js espera para siempre).
   await browser.close().catch(() => {});
 })().catch((err) => {
   console.error('Automation failed:', err);

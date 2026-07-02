@@ -18,9 +18,10 @@ Esta carpeta es un repo git (sin remoto). Hacé commit antes de cambios grandes.
 ## Flujo completo (en orden)
 
 `node start-flow.js` es el orquestador — corre todo esto como procesos hijo
-reales. El flujo hoy solo necesita 2 interacciones manuales: confirmar qué
-versión subir, y hacer Submit to QA. Ver `start-flow.js` en "Archivos clave"
-para los flags que saltean pasos individuales.
+reales. El flujo hoy solo necesita 1 interacción manual: hacer Submit to QA
+(se sube sola la versión que recomienda el análisis de audio — B por defecto
+si no hay reporte confiable; para cambiarla: `node upload-to-flow.js --version A|B`).
+Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
 
 1. **`node run.js`** — Abre el Artist Flow de cancioneterna.com, entra al Flow,
    resuelve la asignación activa (o asigna la más urgente). Lee la encuesta,
@@ -49,9 +50,10 @@ para los flags que saltean pasos individuales.
 4. **`verify-audio.js`** — corre automáticamente apenas aterrizan los 2 MP3 y
    **start-flow.js espera a que termine** (ya no es fire-and-forget en background)
    para poder leer su resultado. Analiza duración, Whisper, Levenshtein contra la
-   letra, nombres de destinatarios ausentes, y (con `--demucs`, el default) separa
-   voz y chequea instrumental accidental. Escribe `verify-report.json` con un
-   puntaje por versión (`pickBestVersion` en `lib/audio-analysis.js`) y una
+   letra, nombres de destinatarios ausentes, calidad perceptual con CLAP (claridad
+   vocal, producción, emoción, artefactos, final) y (con `--demucs`, el default)
+   separa voz y chequea instrumental accidental. Escribe `verify-report.json` con
+   un puntaje por versión (`pickBestVersion` en `lib/audio-analysis.js`) y una
    recomendación — INFORMA, nunca decide solo. `--no-auto-verify` saltea este paso;
    `--fast-verify` fuerza el modo rápido (Whisper small/CPU) en vez de `--demucs`.
 
@@ -61,36 +63,40 @@ para los flags que saltean pasos individuales.
 6. **(automático)** Si `verify-report.json` existe, es de la canción actual
    (chequeado contra `state.json` — nunca confía en un reporte viejo o de otra
    canción) y el análisis de este run terminó bien, `start-flow.js` muestra la
-   recomendación con puntajes y pregunta `¿Subir Versión A? (s/n/B)`. **Gabo
-   siempre escucha las 2 versiones antes de responder** — la recomendación es
-   orientativa, no una decisión automática.
+   recomendación con puntajes en consola y **sube automáticamente la versión
+   recomendada** (`pickBestVersion`: duración, letra, clipping, corte abrupto,
+   CLAP) con `node upload-to-flow.js --version A|B` (sube el MP3 al Flow +
+   copia de respaldo en `mp3/[Song ID] - [Título].mp3`, solo si el título de
+   `song.txt` coincide con `state.json`). Sin reporte confiable sube la B por
+   defecto (A si solo se descargó una versión). Si Gabo prefiere la otra, la
+   sube a mano con `node upload-to-flow.js --version A|B` (pisa la subida en el
+   Flow) antes del Submit. **SE DETIENE ahí — nunca hace Submit to QA** (Regla
+   Dura #1).
+   El QA Dashboard (`qa-dashboard.js`) ya NO forma parte de la orquestación —
+   quedó como herramienta standalone opcional (`node qa-dashboard.js`).
 
-7. **(automático tras confirmar)** Si Gabo confirma una versión, `start-flow.js`
-   corre `node upload-to-flow.js --version A|B` por él. Sube el MP3 al Flow y
-   además guarda una copia de respaldo en `mp3/[Song ID] - [Título].mp3` (solo si
-   el título de `song.txt` coincide con `state.json`, para no etiquetar mal el
-   archivo). **SE DETIENE ahí — nunca hace Submit to QA** (Regla Dura #1). Si no
-   hay reporte disponible o Gabo prefiere no confiar en él, sigue existiendo el
-   camino 100% manual: `node upload-to-flow.js --version A|B`.
+7. **(manual)** Gabo hace Submit to QA en el Flow. Es la ÚNICA interacción
+   manual del flujo normal.
 
-8. **(manual)** Gabo hace Submit to QA en el Flow.
-
-9. **(automático al final de `node start-flow.js`)** El proceso pausa y pregunta
-   `¿Ya hiciste Submit to QA? (s/n)`. Al responder `s`, corre automáticamente la
-   lógica de cierre: conecta al Chrome del puerto 9333, navega a
-   `/artists/flow/create`, lee la primera card de "Recent completions", verifica
-   que el título coincida con state.json, extrae el tiempo de sesión (ej. "26 min
-   session" → Time="00:26", Total Time=0.43) y toma un screenshot recortado de la
-   card (→ `screenshots/YYYY-MM-DD_slug.png`). Luego lee `song.txt`, elige el tab
+8. **(automático)** Mientras tanto `start-flow.js` queda esperando (máx. 15 min)
+   y detecta el Submit solo: pollea "Recent completions" en `/artists/flow/create`
+   usando una **pestaña dedicada en background** (nunca recarga la pestaña donde
+   Gabo trabaja), verifica que el título de la primera card coincida con
+   state.json (sin título en state.json NO auto-detecta — evitaría registrar la
+   canción anterior por error) y corta temprano si Chrome se cierra. Al detectar
+   la card corre el cierre automáticamente: extrae el tiempo de sesión (ej. "26
+   min session" → Time="00:26", Total Time=0.43), toma un screenshot recortado de
+   la card (→ `screenshots/YYYY-MM-DD_slug.png`), lo sube a Drive, elige el tab
    mensual más reciente del Google Sheet (ej. "JULY 2026") y llena la primera fila
    vacía con Date(A)/Total Songs=1(B)/Total Time(C)/Time(D)/Title(E)/Song ID(F). Si
    la extracción de tiempo falla (Chrome cerrado, título no coincide, etc.) se
    loguea un aviso y se continúa sin C ni D — anti-duplicados siempre activo. Marca
    state.json como completado. **`node start-flow.js --done`** (o `node sheets.js`)
-   queda como fallback si la sesión se cerró antes de responder.
+   queda como fallback si la sesión se cortó antes o venció el timeout (avisa
+   por ntfy en ese caso).
 
-10. **(manual)** Gabo llena Remarks + pega Flow Screenshot. Si el tiempo no se pudo
-    auto-detectar (aviso en consola), también llena Total Time y Time a mano.
+9. **(manual)** Gabo llena Remarks + pega Flow Screenshot. Si el tiempo no se pudo
+   auto-detectar (aviso en consola), también llena Total Time y Time a mano.
 
 ## Reglas importantes
 
@@ -98,6 +104,17 @@ para los flags que saltean pasos individuales.
   abierto y el título coincide. Si falla, queda vacío para que Gabo lo llene a mano.
 - **La verificación visual antes de Create NO es opcional** — ya atrapó defectos
   reales (ej. el bloque "Advertencias" colándose dentro de la letra). Nunca saltearla.
+- **`suno-verify-lyrics-expanded.png` puede no existir** — Suno le quitó el botón
+  "Expand lyrics box" en un rediseño (2026-07-02). `suno-fill.js` detecta que no
+  está y en su lugar genera `suno-verify-lyrics-top.png` (scrollea el panel Y el
+  editor al inicio para mostrar Verse 1, no el final donde queda el cursor tras
+  tipear) — y borra el `.expanded.png` viejo si quedó de una corrida anterior,
+  para que nunca quede un screenshot con pinta de fresco mostrando la letra de
+  OTRA canción (pasó de verdad: overview.png con timestamp de la corrida actual
+  al lado de expanded.png con la letra de una canción de horas antes, porque el
+  bloque entero se saltaba en silencio). Si volvés a ver `suno-verify-lyrics-
+  expanded.png` generarse, es que Suno restauró el botón — ambos caminos conviven
+  en el código.
 - **No correr run.js mientras una sesión de Suno está abierta** — comparten el
   mismo perfil de Chrome (`ChromeAutomationProfile`, `Profile 1`) y la conducta
   singleton de Chrome puede cerrar/hijackear la ventana de la otra. Secuenciá o avisá.
@@ -151,12 +168,20 @@ para los flags que saltean pasos individuales.
   `mp3/[Song ID] - [Título].mp3` (solo si el título de song.txt coincide con
   state.json). SE DETIENE sin Submit to QA (Regla Dura #1).
   Uso: `node upload-to-flow.js --version A|B` o `--file "ruta.mp3"`.
+- `qa-dashboard.js` — Express local (puerto 3000). **Ya NO lo forkea
+  `start-flow.js`** (la orquestación sube la Versión B automáticamente); quedó
+  como herramienta standalone opcional: `node qa-dashboard.js` muestra
+  survey/letra/QA/audio A vs B con botones "🟢 Aprobar y Subir Versión A/B"
+  (`POST /approve`, corre `upload-to-flow.js` internamente) y "✋ No subir
+  ninguna" (`POST /reject`), más un timer de la sesión del Flow.
 - `start-flow.js` — orquestador único. Modos:
   - `node start-flow.js` = flujo completo (genera, llena Suno, Create, descarga MP3,
-    ESPERA a verify-audio.js con `--demucs`, llena Flow, muestra recomendación de
-    versión y pregunta si subirla, corre upload-to-flow.js si confirmás, pregunta
-    Submit to QA). Después de Submit manual, responde `s` a la pregunta final para
-    cerrar automáticamente (o `start-flow.js --done` si la sesión se cortó antes).
+    corre verify-audio.js con `--demucs` en paralelo con el llenado del Flow, muestra
+    la recomendación, sube automáticamente la versión recomendada (B por defecto si
+    no hay reporte confiable) y queda esperando hasta 15 min
+    a detectar el Submit to QA manual — pestaña dedicada en background, título
+    verificado contra state.json — para cerrar solo (Sheets + Drive). Fallback:
+    `start-flow.js --done` si la sesión se cortó antes o venció el timeout.
   - `node start-flow.js --no-auto-create` = igual pero sin Create/descarga automáticos.
   - `node start-flow.js --no-auto-verify` = igual pero sin correr verify-audio.js
     (sin verify-report.json no hay recomendación ni auto-upload — todo queda manual).
@@ -181,10 +206,18 @@ para los flags que saltean pasos individuales.
   listener de stdin huérfano ni una promesa sin resolver).
 - `lib/audio-match.js` — encuentra los 2 MP3 por título + recencia en Downloads/suno/.
 - `lib/audio-analysis.js` — ffprobe (duración) + Whisper (transcripción) + comparación
-  letra + `pickBestVersion(reportA, reportB)`: puntúa cada versión (duración, corte
-  abrupto, clipping, fidelidad de letra, nombres ausentes, instrumental accidental) y
-  recomienda una — siempre orientativo, nunca decide solo.
+  letra + CLAP (calidad perceptual: claridad vocal, producción, emoción, artefactos,
+  final — ±15 pts informativo, no decide solo) + `pickBestVersion(reportA, reportB)`:
+  puntúa cada versión (duración, corte abrupto, clipping, fidelidad de letra, nombres
+  ausentes, instrumental accidental, CLAP) y recomienda una — siempre orientativo,
+  nunca decide solo.
 - `lib/transcribe.py` — script Python que usa faster-whisper para transcribir.
+- `lib/clap_score.py` — script Python que evalúa calidad de audio con CLAP (modelo
+  laion/clap-htsat-unfused). Recibe 1+ MP3, devuelve JSON con score 0-100 global y
+  5 dimensiones. 100% local, cero API de nube. Sigue el mismo patrón que
+  transcribe.py (batching, CUDA fallback, JSON a stdout). Requiere:
+  `pip install transformers librosa` (torch ya está para Whisper). Degrada con
+  gracia si no está instalado.
 - `lib/ntfy.js` — notificaciones push vía ntfy.sh. Tópico privado con sufijo aleatorio
   (ntfy.sh no tiene auth — un nombre adivinable deja leer/mandar notificaciones a
   cualquiera). Si el tópico cambia otra vez, avisar: hay que re-suscribirse en la app.

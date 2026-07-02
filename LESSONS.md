@@ -1,5 +1,44 @@
 # Lessons / gotchas
 
+## Suno le quitó el botón "Expand lyrics box" — screenshot de verificación quedaba stale en silencio (2026-07-02)
+
+Hector corrió `node start-flow.js` en real y `suno-fill.js` reventó esperando
+`[data-testid="lyrics-textarea"]` — ese selector ya no existe en el DOM de Suno
+(rediseño de su UI). `lib/suno-selectors.js` ya tenía un fix sin commitear
+(`LYRICS_TEXTAREA` con fallback a `[aria-label="Lyrics editor"]` y
+`.lyrics-editor-content`) que resolvía eso, pero al validar en vivo apareció un
+segundo bug, más peligroso porque fallaba callado: `EXPAND_LYRICS_BOX_LABEL`
+("Expand lyrics box") tampoco existe más en la UI nueva. El bloque que generaba
+`suno-verify-lyrics-expanded.png` estaba envuelto en
+`if ((await expandBtn.count()) > 0)` — al no encontrarse, el bloque entero se
+saltaba SIN error ni log, dejando el PNG de la corrida anterior tirado ahí como
+si fuera de la canción actual. Confirmado con timestamps: `suno-verify-
+overview.png` con la hora de la corrida real, `suno-verify-lyrics-expanded.png`
+con la hora de una canción de horas antes (letra de otra persona, "Teresa" en
+vez de "Marlene") — exactamente el escenario que la regla de "verificación
+visual antes de Create no es opcional" existe para atrapar, roto por dentro.
+
+**Causa raíz:** confiar en un `aria-label` de texto libre de un producto de
+terceros como selector — Suno puede renombrar/quitar el botón en cualquier
+rediseño sin avisar, y el código lo trataba como "no aplica esta vez" en vez de
+"algo cambió, avisar".
+
+**Fix (`suno-fill.js`):** si `EXPAND_LYRICS_BOX_LABEL` no se encuentra, loguea
+una advertencia explícita, borra el `.expanded.png` viejo si existe (nunca dejar
+un archivo con pinta de fresco que no lo es), y genera
+`suno-verify-lyrics-top.png` en su lugar: `lyricsBox.scrollIntoViewIfNeeded()`
+(el PANEL contenedor tiene su propio scroll, separado del de adentro de la
+letra — sin este paso el screenshot mostraba el cuadro de Estilo en vez del de
+Letra) + `el.scrollTop = 0` (para ver Verse 1, no el final donde queda el
+cursor después de tipear 1381 caracteres).
+
+**Takeaway:** cualquier selector basado en texto/aria-label de una UI de
+terceros que hoy cae a un `if (count > 0) { ... } ` sin `else` es un candidato a
+fallo silencioso — cuando el elemento desaparece, el bloque no corre y nadie se
+entera. Si el paso importa para la seguridad del pipeline (como la verificación
+visual), el `else` tiene que loguear fuerte y dejar rastro de que el fallback
+se activó, no solo saltear.
+
 ## Sonnet 5 truncaba song.txt con el mismo max_tokens que andaba bien en Sonnet 4.6 (2026-07-02)
 
 Al migrar `run.js` de `claude-sonnet-4-6` a `claude-sonnet-5` (mismo llamado, mismo
@@ -879,3 +918,27 @@ touching a model ID, a `cache_control`/`thinking`/other API-shape parameter,
 or "is X still current" for *any* provider (Anthropic or otherwise), verify
 against a live source first. Never assume a change someone describes as
 "corrected" or "restored" is actually reflected in the file — read it back.
+
+## browser.close() sobre connectOverCDP NO mata Chrome — pero NO llamarlo cuelga Node para siempre
+
+Al hacer el pipeline "no cerrar nunca Chrome" (2026-07-02) se quitaron todos
+los `browser.close()` de los scripts que se conectan por CDP (run.js,
+suno-fill.js, suno-create.js, upload-to-flow.js), creyendo que `.close()` en
+Playwright sobre CDP terminaba el proceso de Chrome. Resultado real: el
+websocket CDP abierto mantiene vivo el event loop de Node, así que cada script
+quedaba COLGADO al terminar — y como start-flow.js espera el exit de cada hijo
+(`runScript`), el pipeline entero se atascaba en silencio en el Paso 1.
+
+**Verificado empíricamente (Playwright 1.61.0, Chrome 149, Windows):**
+- `connectOverCDP` sin `browser.close()` → Node nunca sale (colgado, hay que matarlo).
+- `browser.close()` tras `connectOverCDP` → Node sale limpio y **Chrome sigue
+  corriendo intacto** (solo se desconecta el socket; el puerto de debug sigue
+  respondiendo). Es el comportamiento documentado de Playwright para browsers
+  "connected to" (distinto de `launch()`/`launchPersistentContext`, donde
+  `close()` SÍ termina el navegador).
+
+**Regla:** todo script que use `connectOverCDP` debe terminar con
+`await browser.close().catch(() => {})` (o `process.exit()`). Eso desconecta
+sin tocar Chrome. La confusión histórica venía de `launchPersistentContext`,
+donde `context.close()` sí cierra la ventana — ese es el motivo del patrón
+"Chrome standalone + connectOverCDP", no un supuesto peligro de `browser.close()`.
