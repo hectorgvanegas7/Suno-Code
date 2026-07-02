@@ -22,3 +22,9 @@ UsershectoAppDataLocalChromeAutomationProfile/
 # Salidas locales
 mp3/
 debug/
+
+# Basura de trabajo: pruebas sueltas, patches ya aplicados y prompts one-off.
+# Nunca commitear — si un scratch se vuelve útil, renombrarlo y agregarlo en serio.
+scratch-*
+*.patch
+prompt-*.md
