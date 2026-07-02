@@ -757,7 +757,11 @@ async function runFlow({ resume = false } = {}) {
   }
   const skipGenerate = resumeStage !== null;
   const skipSunoFill = resumeStage === state.STAGES.SUNO_FILLED || resumeStage === state.STAGES.FLOW_FILLED;
-  const skipFlowFill = false; // Siempre abrir y asegurar que esté lleno el Flow para revisión manual
+  // Solo saltear el llenado del Flow si la canción ya está COMPLETED (subida
+  // + registrada). Para cualquier otra etapa, siempre re-abrir y asegurar que
+  // el Flow esté lleno para revisión manual — pero no tiene sentido
+  // re-rellenar título/letra/notas de una canción que ya se cerró del todo.
+  const skipFlowFill = resumeStage === state.STAGES.COMPLETED;
 
   console.log(`📝 Log de esta corrida: ${RUN_LOG_PATH}`);
   console.log('=== Paso 0/4: preflight ===');
