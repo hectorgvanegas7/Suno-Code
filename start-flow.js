@@ -668,8 +668,11 @@ function buildRemarkDraft() {
   }
 }
 
-// Intenta subir el screenshot a Google Drive y poner =IMAGE(url) en col H.
-// Si el service account no tiene Drive scope, falla silenciosamente.
+// Sube el screenshot a la carpeta compartida de Drive. A propósito NO escribe
+// nada en la hoja (columna H queda vacía) — Hector prefiere pegar la foto él
+// mismo "flotando sobre las celdas" en vez de un =IMAGE() automático. Falla
+// silenciosamente si faltan credenciales o el upload falla; el screenshot
+// local y el registro en la hoja ya se hicieron antes de llegar acá.
 async function tryDriveScreenshot(localPngPath, sheetRow, tabName) {
   if (!fs.existsSync(localPngPath)) return;
   const { google } = require('googleapis');
@@ -686,8 +689,6 @@ async function tryDriveScreenshot(localPngPath, sheetRow, tabName) {
     auth.setCredentials(token);
 
     const drive = google.drive({ version: 'v3', auth });
-    const sheets = google.sheets({ version: 'v4', auth });
-    const { SPREADSHEET_ID } = require('./lib/sheets-core');
 
     console.log('\n📸 Subiendo screenshot a tu Google Drive personal...');
     const uploadRes = await drive.files.create({
