@@ -38,14 +38,16 @@ app.get('/', (req, res) => {
     surveyText = '(No se encontró survey.txt)';
   }
 
-  // Find MP3 files for Version A and B
-  const files = fs.existsSync(SUNO_DIR) ? fs.readdirSync(SUNO_DIR) : [];
-  const mp3s = files.filter(f => f.endsWith('.mp3')).sort((a, b) => {
-    return fs.statSync(path.join(SUNO_DIR, b)).mtimeMs - fs.statSync(path.join(SUNO_DIR, a)).mtimeMs;
-  }).slice(0, 2);
-  
-  const versionA = mp3s[1];
-  const versionB = mp3s[0];
+  // Los MP3 de esta canción ya están identificados por verify-audio.js
+  // (lib/audio-match.js filtra por título + recencia). Usar esas rutas en
+  // vez de re-escanear Downloads/suno/ por mtime, que puede agarrar el MP3
+  // de otra canción generada el mismo día.
+  const versionAPath = report.reportA?.path;
+  const versionBPath = report.reportB?.path;
+  const versionA = versionAPath ? path.basename(versionAPath) : null;
+  const versionB = versionBPath ? path.basename(versionBPath) : null;
+  const versionAExists = versionA && fs.existsSync(path.join(SUNO_DIR, versionA));
+  const versionBExists = versionB && fs.existsSync(path.join(SUNO_DIR, versionB));
 
   const html = `
 <!DOCTYPE html>
@@ -216,7 +218,7 @@ app.get('/', (req, res) => {
               <span class="badge ${report.reportA?.clippingFlag ? 'badge-warning' : 'badge-success'}">${report.reportA?.clippingFlag ? 'Clipping' : 'Sin Clipping'}</span>
               <span class="badge badge-success">Letra: ${report.reportA ? Math.round((report.reportA.levenshteinScore || 0) * 100) : 0}% match</span>
             </div>
-            ${versionA ? `<audio controls src="/audio/${versionA}"></audio>` : '<p style="color:red; font-size: 12px; margin: 0.75rem 0 0 0;">MP3 no encontrado</p>'}
+            ${versionAExists ? `<audio controls src="/audio/${versionA}"></audio>` : '<p style="color:red; font-size: 12px; margin: 0.75rem 0 0 0;">MP3 no encontrado</p>'}
           </div>
 
           <!-- VERSION B -->
@@ -231,7 +233,7 @@ app.get('/', (req, res) => {
               <span class="badge ${report.reportB?.clippingFlag ? 'badge-warning' : 'badge-success'}">${report.reportB?.clippingFlag ? 'Clipping' : 'Sin Clipping'}</span>
               <span class="badge badge-success">Letra: ${report.reportB ? Math.round((report.reportB.levenshteinScore || 0) * 100) : 0}% match</span>
             </div>
-            ${versionB ? `<audio controls src="/audio/${versionB}"></audio>` : '<p style="color:red; font-size: 12px; margin: 0.75rem 0 0 0;">MP3 no encontrado</p>'}
+            ${versionBExists ? `<audio controls src="/audio/${versionB}"></audio>` : '<p style="color:red; font-size: 12px; margin: 0.75rem 0 0 0;">MP3 no encontrado</p>'}
           </div>
         </div>
 
