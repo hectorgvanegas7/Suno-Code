@@ -29,7 +29,7 @@ const fs = require('fs');
 const path = require('path');
 const { findSunoMp3s, SUNO_DIR } = require('./lib/audio-match');
 const { extractFirstNames } = require('./lib/text-helpers');
-const { analyzeAudio, printReport, pickBestVersion, parseLyricsFromSongFile, parseTituloFromSongFile, getDurationAsync, formatDuration, formatElapsed, SONG_PATH } = require('./lib/audio-analysis');
+const { analyzeAudio, prepareVocals, cleanupVocalsTmp, transcribeFiles, stripStructuralTags, printReport, pickBestVersion, parseLyricsFromSongFile, parseTituloFromSongFile, getDurationAsync, formatDuration, formatElapsed, SONG_PATH } = require('./lib/audio-analysis');
 const { notify } = require('./lib/ntfy');
 
 function parseArgs(argv) {
@@ -109,26 +109,58 @@ function parseArgs(argv) {
   ]);
   console.log(`⏱️  Duración — A: ${formatDuration(durationA)}${versionB ? `, B: ${formatDuration(durationB)}` : ''}\n`);
 
-  // Analizar cada versión
-  console.log('⏳ Analizando Versión A... (puede tardar 1-3 minutos si Whisper necesita transcribir)');
-  const reportA = await analyzeAudio(versionA.path, {
-    label: 'Versión A',
-    titulo,
-    lyricsText,
-    useDemucs: !!args.demucs,
-    duration: durationA,
-    firstNames,
-  });
-
+  // Analizar cada versión. Con 2 versiones se usa el camino batcheado:
+  // demucs por versión (secuencial — GPU) y UNA sola invocación de Whisper para
+  // ambas, así el modelo (large-v3 con --demucs) se carga una única vez en vez
+  // de pagar la carga dos veces.
+  let reportA;
   let reportB = null;
   if (versionB) {
-    console.log('⏳ Analizando Versión B...');
+    console.log('⏳ Analizando Versiones A y B (Whisper se carga una sola vez para ambas)...');
+    const useDemucs = !!args.demucs;
+    const prepA = await prepareVocals(versionA.path, useDemucs);
+    const prepB = await prepareVocals(versionB.path, useDemucs);
+    let batch;
+    try {
+      const cleanLyrics = stripStructuralTags(lyricsText);
+      batch = transcribeFiles([prepA.targetPath, prepB.targetPath], {
+        model: useDemucs ? 'large-v3' : 'small',
+        device: useDemucs ? 'cuda' : null,
+        initialPrompt: useDemucs && cleanLyrics ? cleanLyrics : null,
+      });
+    } finally {
+      cleanupVocalsTmp(prepA);
+      cleanupVocalsTmp(prepB);
+    }
+
+    reportA = await analyzeAudio(versionA.path, {
+      label: 'Versión A',
+      titulo,
+      lyricsText,
+      useDemucs,
+      duration: durationA,
+      firstNames,
+      prepared: prepA,
+      transcriptionOutcome: batch.results[0],
+    });
     reportB = await analyzeAudio(versionB.path, {
       label: 'Versión B',
       titulo,
       lyricsText,
-      useDemucs: !!args.demucs,
+      useDemucs,
       duration: durationB,
+      firstNames,
+      prepared: prepB,
+      transcriptionOutcome: batch.results[1],
+    });
+  } else {
+    console.log('⏳ Analizando Versión A... (puede tardar 1-3 minutos si Whisper necesita transcribir)');
+    reportA = await analyzeAudio(versionA.path, {
+      label: 'Versión A',
+      titulo,
+      lyricsText,
+      useDemucs: !!args.demucs,
+      duration: durationA,
       firstNames,
     });
   }
