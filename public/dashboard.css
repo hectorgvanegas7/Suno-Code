@@ -79,11 +79,26 @@ body {
   background: rgba(15, 23, 42, 0.4);
 }
 .version-card.recommended {
+  border-width: 2px;
   border-color: var(--success);
-  background: rgba(16, 185, 129, 0.04);
+  background: rgba(16, 185, 129, 0.06);
+  box-shadow: 0 0 0 1px rgba(16, 185, 129, 0.25);
+}
+.recommended-pill {
+  display: inline-block;
+  font-size: 0.65rem;
+  font-weight: bold;
+  letter-spacing: 0.03em;
+  color: var(--success);
+  border: 1px solid var(--success);
+  border-radius: 1rem;
+  padding: 0.1rem 0.5rem;
+  margin-left: 0.5rem;
+  vertical-align: middle;
 }
 .badge {
   display: inline-block;
+  white-space: nowrap;
   padding: 0.25rem 0.5rem;
   border-radius: 0.25rem;
   font-size: 0.75rem;

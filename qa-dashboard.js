@@ -81,7 +81,7 @@ function renderVersionCard({ label, versionReport, score, filename, fileExists, 
   return `
     <div class="version-card ${isRecommended ? 'recommended' : ''}">
       <div style="display: flex; justify-content: space-between; align-items: center;">
-        <h3 style="margin:0; font-size: 1.1rem;">Versión ${label}</h3>
+        <h3 style="margin:0; font-size: 1.1rem;">Versión ${label}${isRecommended ? '<span class="recommended-pill">RECOMENDADA</span>' : ''}</h3>
         <span style="font-weight:bold; font-size: 1.1rem; color: var(--primary);">${score ?? 'N/A'} pts</span>
       </div>
       <div style="margin-top: 0.5rem; display: flex; flex-wrap: wrap; gap: 0.25rem;">
