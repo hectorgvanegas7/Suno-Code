@@ -106,12 +106,19 @@ para los flags que saltean pasos individuales.
 
 ## Archivos clave
 
-- `run.js` — generación de letra (~900 líneas, validación estructural dura adentro).
-  Usa `lib/flow-helpers.js` para entrar al Flow, `lib/llm-provider.js` para el LLM,
-  `lib/cache-helpers.js` para la caché de respuestas, `lib/text-helpers.js` para
-  extraer nombres de destinatarios, y escribe `state.json` al terminar.
-  `--provider=claude|gemini` (default claude), `--dry-run` (mock local, sin API ni
-  Chrome, útil para probar el pipeline sin gastar saldo).
+- `run.js` — generación de letra (~900 líneas). Usa `lib/flow-helpers.js` para entrar
+  al Flow, `lib/llm-provider.js` para el LLM, `lib/cache-helpers.js` para la caché de
+  respuestas, `lib/text-helpers.js` para extraer nombres de destinatarios, y escribe
+  `state.json` al terminar. `--provider=claude|gemini` (default claude), `--dry-run`
+  (mock local, sin API ni Chrome, útil para probar el pipeline sin gastar saldo).
+- `lib/song-validate.js` — `hardValidate`, `validateContentForWrite`, `parseSections`,
+  `extractField`: la validación estructural dura de la letra (movida desde `run.js` para
+  poder testearla sin ejecutar el pipeline entero). Cubierta por
+  `test/song-validate.test.js` (`npm test`, 19 casos, 100% local sin API — incluye las
+  regresiones reales de LESSONS.md: límites de palabra con tildes, N/A condicional,
+  preámbulo antes de Título, símbolos no-✓ en el checklist, nombres multi-destinatario).
+  ⚠️ Cada regla nueva del `SYSTEM_PROMPT` de `run.js` debe chequearse contra este
+  validador Y agregarse un caso al test.
 - `lib/llm-provider.js` — `generate(provider, surveyText, systemPrompt, isDryRun)`:
   unifica las llamadas a Anthropic (`claude-sonnet-5`) y Gemini (`gemini-3.5-flash`)
   en un solo lugar. En `isDryRun` devuelve siempre el mismo texto mock, sin llamar a
@@ -154,9 +161,18 @@ para los flags que saltean pasos individuales.
   - `node start-flow.js --no-auto-verify` = igual pero sin correr verify-audio.js
     (sin verify-report.json no hay recomendación ni auto-upload — todo queda manual).
   - `node start-flow.js --fast-verify` = el auto-verify usa Whisper small/CPU en vez de `--demucs`.
+  - `node start-flow.js --resume` = retoma un pipeline cortado a mitad de camino usando
+    `state.json`: salta letra/Suno/Flow ya completados. Nunca re-clickea Create (evita
+    gastar créditos doble) — si los MP3 no están en disco (ventana de 180 min), Create y
+    descarga quedan manuales. Si `song.txt` no coincide con `state.json`, aborta con error
+    en vez de mezclar canciones.
   - `node start-flow.js --done` = cierre: registra en la hoja + marca state.json.
   - `node start-flow.js --poll [N]` = vigía de cola (cada N min, default 3; acepta "30s").
   - `poll-flow.js` es ahora un redirect deprecated a `start-flow.js --poll`.
+  - Cada corrida (normal o `--poll`) escribe toda su salida — la propia + la de cada
+    script hijo (`run.js`, `suno-fill.js`, `flow-submit.js`, `upload-to-flow.js`) — en
+    `logs/run-<timestamp>.log`, además de mostrarla en la terminal como siempre. El
+    auto-verify en background sigue con su log aparte (`logs/verify-audio-auto-*.log`).
 - `lib/suno-create-dl.js` — chequea créditos de Suno, Create × 1 (Suno v5.5 genera 2
   versiones por click), espera generación y descarga ambos MP3 a Downloads/suno/. Si
   falla clickear Download → MP3 Audio en la UI, cae a `pauseForHumanInteraction` en
@@ -169,7 +185,13 @@ para los flags que saltean pasos individuales.
   abrupto, clipping, fidelidad de letra, nombres ausentes, instrumental accidental) y
   recomienda una — siempre orientativo, nunca decide solo.
 - `lib/transcribe.py` — script Python que usa faster-whisper para transcribir.
-- `lib/ntfy.js` — notificaciones push vía ntfy.sh (tópico cancioneterna-gabo-2026).
+- `lib/ntfy.js` — notificaciones push vía ntfy.sh. Tópico privado con sufijo aleatorio
+  (ntfy.sh no tiene auth — un nombre adivinable deja leer/mandar notificaciones a
+  cualquiera). Si el tópico cambia otra vez, avisar: hay que re-suscribirse en la app.
+- `lib/suno-selectors.js` — data-testid/aria-label/texto de la UI de Suno usados por
+  `suno-fill.js`, `lib/suno-create-dl.js` y `start-flow.js`, centralizados acá (mismo
+  patrón que `lib/flow-helpers.js`) para que un cambio de selector no quede
+  desincronizado entre archivos.
 - `sheets.js` — wrapper standalone de `lib/sheets-core.js` (registro en Google Sheet)
 - `lib/playwright-helpers.js` — helpers de Playwright (clickByText, setSliderValue,
   expandIfCollapsed, connectToSunoTab, isLoggedIn). Además:
