@@ -5,8 +5,10 @@ survey.txt
 logs/
 .cache/
 
-# Secretos — NUNCA commitear (clave privada del service account)
+# Secretos — NUNCA commitear
 google-credentials.json
+oauth-credentials.json
+token.json
 
 # Efímeros del pipeline (se pisan en cada corrida)
 state.json
