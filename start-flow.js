@@ -34,6 +34,14 @@
 //                                          (default 3) si cayó una canción.
 //                                          Acepta segundos con sufijo "s" (ej: 30s).
 //
+// Cada corrida escribe TODA su salida (la propia + la de cada script hijo:
+// run.js, suno-fill.js, flow-submit.js, upload-to-flow.js) en un único archivo
+// logs/run-<timestamp>.log, además de seguir mostrándola en la terminal como
+// siempre — ya no hace falta buscar entre varias ventanas si algo falla a
+// mitad de camino. El auto-verify en background (Paso 3c) sigue teniendo su
+// propio log aparte (logs/verify-audio-auto-<timestamp>.log) porque corre
+// desacoplado del proceso padre.
+//
 // ══════════════════════════════════════════════════════════════════════════════
 // 🛑 REGLA DURA #1 — NUNCA hacer Submit to QA automáticamente.
 //    Ver CLAUDE.md sección "REGLA DURA". El Submit es siempre manual.
@@ -83,6 +91,52 @@ const PROFILE_DIRECTORY = 'Profile 1';
 const LOGIN_WAIT_TIMEOUT_MS = 5 * 60 * 1000;
 const AUTO_VERIFY_LOG_DIR = path.join(__dirname, 'logs');
 
+// ─── Log unificado por corrida ────────────────────────────────────────────────
+// Todo lo que start-flow.js imprime (console.log/error) MÁS el stdout/stderr de
+// cada proceso hijo lanzado por runScript() (run.js, suno-fill.js,
+// flow-submit.js, upload-to-flow.js) se copia a un único archivo por corrida,
+// además de seguir mostrándose en la terminal como siempre. Antes había que
+// buscar la salida entre varias terminales/logs sueltos si algo fallaba a mitad
+// de camino; ahora queda todo en un solo lugar con timestamp de la corrida.
+//
+// Usa fs.writeSync sobre un fd abierto (no un stream) para que cada línea quede
+// en disco de inmediato — el pipeline llama process.exit() en varios puntos
+// (runDone, runPoll, catch del entry point) y un write stream asíncrono podría
+// perder las últimas líneas si el proceso muere antes de que termine de volcar
+// el buffer. No cubre el log separado de verify-audio.js en background (ver
+// AUTO_VERIFY_LOG_DIR arriba) — ese ya tiene su propio archivo por diseño,
+// documentado en LESSONS.md, porque corre desacoplado del proceso padre.
+fs.mkdirSync(AUTO_VERIFY_LOG_DIR, { recursive: true });
+const RUN_LOG_PATH = path.join(AUTO_VERIFY_LOG_DIR, `run-${new Date().toISOString().replace(/[:.]/g, '-')}.log`);
+const runLogFd = fs.openSync(RUN_LOG_PATH, 'a');
+
+function writeToRunLog(chunk) {
+  try {
+    fs.writeSync(runLogFd, chunk);
+  } catch {
+    // Un fallo de disco al loguear nunca debe romper el pipeline.
+  }
+}
+
+process.on('exit', () => {
+  try { fs.closeSync(runLogFd); } catch {}
+});
+
+// Envuelve console.log/error para que todo lo que start-flow.js imprime (y todo
+// lo que imprimen los módulos que requiere, como lib/preflight.js) también
+// quede en el log unificado. No reemplaza el comportamiento visible en
+// terminal, solo le agrega una copia a disco.
+const originalConsoleLog = console.log.bind(console);
+const originalConsoleError = console.error.bind(console);
+console.log = (...args) => {
+  originalConsoleLog(...args);
+  writeToRunLog(`${args.map(String).join(' ')}\n`);
+};
+console.error = (...args) => {
+  originalConsoleError(...args);
+  writeToRunLog(`${args.map(String).join(' ')}\n`);
+};
+
 // Corre verify-audio.js como proceso hijo ESPERADO — start-flow.js espera a que
 // termine para poder leer el verify-report.json y recomendar la mejor versión.
 // Si falla, NUNCA rompe el pipeline principal — solo se loguea.
@@ -127,10 +181,23 @@ function runVerifyAudio({ fast = false } = {}) {
   });
 }
 
+// stdin se mantiene 'inherit' (los scripts hijo tienen sus propios prompts
+// interactivos — pauseForHumanInteraction espera un ENTER, y algunos leen
+// input directamente — necesitan la terminal real, no un pipe). stdout/stderr
+// van por 'pipe' para poder copiarlos al log unificado (ver RUN_LOG_PATH
+// arriba) mientras se siguen mostrando en la terminal igual que con 'inherit'.
 function runScript(scriptNameWithArgs) {
   return new Promise((resolve, reject) => {
     const parts = scriptNameWithArgs.split(/\s+/);
-    const child = spawn('node', parts, { cwd: __dirname, stdio: 'inherit' });
+    const child = spawn('node', parts, { cwd: __dirname, stdio: ['inherit', 'pipe', 'pipe'] });
+    child.stdout.on('data', (chunk) => {
+      process.stdout.write(chunk);
+      writeToRunLog(chunk);
+    });
+    child.stderr.on('data', (chunk) => {
+      process.stderr.write(chunk);
+      writeToRunLog(chunk);
+    });
     child.on('exit', (code) => {
       if (code === 0) resolve();
       else {
@@ -670,6 +737,7 @@ async function runFlow({ resume = false } = {}) {
   const skipSunoFill = resumeStage === state.STAGES.SUNO_FILLED || resumeStage === state.STAGES.FLOW_FILLED;
   const skipFlowFill = resumeStage === state.STAGES.FLOW_FILLED;
 
+  console.log(`📝 Log de esta corrida: ${RUN_LOG_PATH}`);
   console.log('=== Paso 0/4: preflight ===');
   const pre = runPreflight();
   if (!pre.ok) {
@@ -909,6 +977,7 @@ async function runPoll(rawArgs) {
   const intervalLabel = isSeconds ? `${parseFloat(intervalArg)}s` : `${parseFloat(intervalArg)} min`;
 
   log(`Vigía de cola iniciado. Revisando cada ${intervalLabel}. (Ctrl+C para detener.)`);
+  log(`Log de esta corrida: ${RUN_LOG_PATH}`);
 
   // Chequeo de seguridad: no arrancar si hay Suno vivo en el puerto de Suno.
   if (await isSunoSessionLive()) {
