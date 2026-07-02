@@ -29,7 +29,7 @@ const fs = require('fs');
 const path = require('path');
 const { findSunoMp3s, SUNO_DIR } = require('./lib/audio-match');
 const { extractFirstNames } = require('./lib/text-helpers');
-const { analyzeAudio, printReport, parseLyricsFromSongFile, parseTituloFromSongFile, getDurationAsync, formatDuration, formatElapsed, SONG_PATH } = require('./lib/audio-analysis');
+const { analyzeAudio, printReport, pickBestVersion, parseLyricsFromSongFile, parseTituloFromSongFile, getDurationAsync, formatDuration, formatElapsed, SONG_PATH } = require('./lib/audio-analysis');
 const { notify } = require('./lib/ntfy');
 
 function parseArgs(argv) {
@@ -136,8 +136,54 @@ function parseArgs(argv) {
   // Imprimir reporte completo
   printReport(titulo, reportA, reportB);
 
+  // Generar recomendación y guardar reporte a JSON
+  const recommendation = pickBestVersion(reportA, reportB);
+  const REPORT_PATH = path.join(__dirname, 'verify-report.json');
+  try {
+    fs.writeFileSync(REPORT_PATH, JSON.stringify({
+      titulo,
+      recommendation,
+      reportA: {
+        label: 'Versión A',
+        path: versionA.path,
+        durationFormatted: reportA.durationFormatted,
+        durationOk: reportA.durationOk,
+        levenshteinScore: reportA.levenshteinScore,
+        clippingFlag: reportA.clippingFlag,
+        abruptCutoff: reportA.abruptCutoff,
+        titleCantado: reportA.titleCantado,
+        tagLeaking: reportA.tagLeaking,
+        missingNames: reportA.missingNames,
+        summary: reportA.summary,
+      },
+      reportB: reportB ? {
+        label: 'Versión B',
+        path: versionB.path,
+        durationFormatted: reportB.durationFormatted,
+        durationOk: reportB.durationOk,
+        levenshteinScore: reportB.levenshteinScore,
+        clippingFlag: reportB.clippingFlag,
+        abruptCutoff: reportB.abruptCutoff,
+        titleCantado: reportB.titleCantado,
+        tagLeaking: reportB.tagLeaking,
+        missingNames: reportB.missingNames,
+        summary: reportB.summary,
+      } : null,
+      timestamp: new Date().toISOString(),
+    }, null, 2), 'utf-8');
+    console.log(`📄 Reporte guardado en ${REPORT_PATH}`);
+  } catch (e) {
+    console.warn(`⚠️ No se pudo guardar verify-report.json: ${e.message}`);
+  }
+
+  console.log(`\n📊 RECOMENDACIÓN: Versión ${recommendation.recommended}`);
+  console.log(`   Razón: ${recommendation.reason}`);
+  if (recommendation.scoreB !== null) {
+    console.log(`   Puntajes: A=${recommendation.scoreA}, B=${recommendation.scoreB}`);
+  }
+
   const overallElapsedMs = Date.now() - overallStart;
-  console.log(`⏱️  verify-audio.js completo en ${formatElapsed(overallElapsedMs)}.\n`);
+  console.log(`\n⏱️  verify-audio.js completo en ${formatElapsed(overallElapsedMs)}.\n`);
 
   // Próximos pasos
   console.log('Próximos pasos:');

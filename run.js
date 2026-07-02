@@ -384,8 +384,8 @@ async function readSurveyResponses(page) {
   });
 }
 
-async function generateSongWithClaude(surveyText) {
-  return await generate(provider, surveyText, SYSTEM_PROMPT, isDryRun);
+async function generateSongWithProvider(surveyText, targetProvider) {
+  return await generate(targetProvider, surveyText, SYSTEM_PROMPT, isDryRun);
 }
 
 // ─── VALIDACIÓN ESTRUCTURAL DURA (nueva capa) ─────────────────────────────────
@@ -676,8 +676,8 @@ async function generateSongWithSelfCorrection(surveyContent, baseUserMessageOver
   let lastFailures = [];
 
   for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt++) {
-    console.log(`\nGenerando letra con Claude (intento ${attempt}/${MAX_GENERATION_ATTEMPTS})...`);
-    lastResponse = await generateSongWithClaude(userMessage);
+    console.log(`\nGenerando letra con ${provider} (intento ${attempt}/${MAX_GENERATION_ATTEMPTS})...`);
+    lastResponse = await generateSongWithProvider(userMessage, provider);
 
     const { valid, failures } = hardValidate(lastResponse, surveyContent);
     lastFailures = failures;
@@ -817,7 +817,7 @@ process.on('uncaughtException', async (err) => {
       : undefined;
 
     const surveyHash = getSurveyHash(surveyContent);
-    const cachedResponse = readCache(surveyHash);
+    const cachedResponse = !isDryRun ? readCache(surveyHash) : null;
 
     let fullResponse, passedQA;
 
@@ -829,7 +829,7 @@ process.on('uncaughtException', async (err) => {
       const result = await generateSongWithSelfCorrection(surveyContent, baseUserMessage);
       fullResponse = result.fullResponse;
       passedQA = result.passedQA;
-      if (passedQA) {
+      if (passedQA && !isDryRun) {
         writeCache(surveyHash, result);
       }
     }

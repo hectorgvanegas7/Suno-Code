@@ -3,3 +3,4 @@ node_modules/
 song.txt
 survey.txt
 logs/
+.cache/

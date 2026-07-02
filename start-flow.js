@@ -75,58 +75,58 @@ const PROFILE_DIRECTORY = 'Profile 1';
 const LOGIN_WAIT_TIMEOUT_MS = 5 * 60 * 1000;
 const AUTO_VERIFY_LOG_DIR = path.join(__dirname, 'logs');
 
-// Lanza verify-audio.js como proceso hijo DESACOPLADO (detached + unref) apenas
-// los 2 MP3 terminan de aterrizar — start-flow.js NO espera a que termine, sigue
-// de inmediato con el Paso 4/4. Por defecto corre en modo --demucs (htdemucs_ft +
-// Whisper large-v3 CUDA en la RTX 4070): como no bloquea, el tiempo extra no
-// importa. --fast-verify fuerza el modo rápido (Whisper small/CPU) si hace falta.
-// Si el proceso hijo falla, NUNCA rompe el pipeline principal — solo se loguea
-// a un archivo y se manda un aviso por ntfy (best-effort, no se espera).
-function launchAutoVerify({ fast = false } = {}) {
-  try {
-    fs.mkdirSync(AUTO_VERIFY_LOG_DIR, { recursive: true });
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const logPath = path.join(AUTO_VERIFY_LOG_DIR, `verify-audio-auto-${stamp}.log`);
-    const logFd = fs.openSync(logPath, 'a');
+// Corre verify-audio.js como proceso hijo ESPERADO — start-flow.js espera a que
+// termine para poder leer el verify-report.json y recomendar la mejor versión.
+// Si falla, NUNCA rompe el pipeline principal — solo se loguea.
+function runVerifyAudio({ fast = false } = {}) {
+  return new Promise((resolve) => {
+    try {
+      fs.mkdirSync(AUTO_VERIFY_LOG_DIR, { recursive: true });
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const logPath = path.join(AUTO_VERIFY_LOG_DIR, `verify-audio-auto-${stamp}.log`);
+      const logFd = fs.openSync(logPath, 'a');
 
-    const modeLabel = fast ? 'modo rápido (Whisper small/CPU)' : '--demucs (htdemucs_ft + Whisper large-v3 CUDA)';
-    console.log(`\n=== Paso 3c/4: verify-audio.js automático en background — ${modeLabel} ===`);
-    console.log(`  Log: ${logPath}`);
-    console.log('  (Pasá --no-auto-verify para saltear este paso, --fast-verify para forzar el modo rápido)');
+      const modeLabel = fast ? 'modo rápido (Whisper small/CPU)' : '--demucs (htdemucs_ft + Whisper large-v3 CUDA)';
+      console.log(`\n=== Paso 3c/4: verify-audio.js — ${modeLabel} ===`);
+      console.log(`  Log: ${logPath}`);
+      console.log('  (Pasá --no-auto-verify para saltear este paso, --fast-verify para forzar el modo rápido)');
 
-    const args = fast ? ['verify-audio.js'] : ['verify-audio.js', '--demucs'];
-    const child = spawn('node', args, {
-      cwd: __dirname,
-      detached: true,
-      stdio: ['ignore', logFd, logFd],
-    });
-    child.unref();
+      const args = fast ? ['verify-audio.js'] : ['verify-audio.js', '--demucs'];
+      const child = spawn('node', args, {
+        cwd: __dirname,
+        stdio: ['ignore', logFd, logFd],
+      });
 
-    child.on('error', (e) => {
-      console.log(`  ⚠️ No se pudo lanzar verify-audio.js automático: ${e.message}`);
-      notify(`⚠️ Auto-verify no arrancó: ${e.message}`, { title: 'verify-audio automático falló', priority: 'default', tags: 'warning' }).catch(() => {});
-    });
-    child.on('exit', (code) => {
-      if (code !== 0) {
-        notify(
-          `⚠️ verify-audio.js automático terminó con error (código ${code}). Revisá: ${logPath}`,
-          { title: 'Auto-verify falló', priority: 'default', tags: 'warning' }
-        ).catch(() => {});
-      }
-    });
-  } catch (e) {
-    // Nunca debe romper el pipeline principal por esto.
-    console.log(`  ⚠️ No se pudo iniciar verify-audio.js automático: ${e.message}`);
-  }
+      child.on('error', (e) => {
+        console.log(`  ⚠️ No se pudo lanzar verify-audio.js: ${e.message}`);
+        notify(`⚠️ Auto-verify no arrancó: ${e.message}`, { title: 'verify-audio falló', priority: 'default', tags: 'warning' }).catch(() => {});
+        resolve(false);
+      });
+      child.on('exit', (code) => {
+        if (code !== 0) {
+          console.log(`  ⚠️ verify-audio.js terminó con código ${code}. Ver: ${logPath}`);
+          notify(
+            `⚠️ verify-audio.js terminó con error (código ${code}). Revisá: ${logPath}`,
+            { title: 'verify-audio falló', priority: 'default', tags: 'warning' }
+          ).catch(() => {});
+        }
+        resolve(code === 0);
+      });
+    } catch (e) {
+      console.log(`  ⚠️ No se pudo iniciar verify-audio.js: ${e.message}`);
+      resolve(false);
+    }
+  });
 }
 
-function runScript(scriptName) {
+function runScript(scriptNameWithArgs) {
   return new Promise((resolve, reject) => {
-    const child = spawn('node', [scriptName], { cwd: __dirname, stdio: 'inherit' });
+    const parts = scriptNameWithArgs.split(/\s+/);
+    const child = spawn('node', parts, { cwd: __dirname, stdio: 'inherit' });
     child.on('exit', (code) => {
       if (code === 0) resolve();
       else {
-        const err = new Error(`${scriptName} terminó con código ${code}`);
+        const err = new Error(`${parts[0]} terminó con código ${code}`);
         if (code === 2) err.noSong = true; // código 2 = cola vacía (ver flow-helpers.js)
         reject(err);
       }
@@ -692,10 +692,13 @@ async function runFlow() {
       if (versionA) console.log(`     Versión A: ${versionA.path || versionA.label}`);
       if (versionB) console.log(`     Versión B: ${versionB.path || versionB.label}`);
 
-      // Paso 3c: verify-audio.js automático en background (no bloquea).
-      // --no-auto-verify lo saltea; --fast-verify fuerza el modo rápido en vez de --demucs.
+      // Paso 3c: verify-audio.js — ahora se ESPERA para leer el resultado
+      // y recomendar la mejor versión al usuario.
+      // --no-auto-verify lo saltea; --fast-verify fuerza el modo rápido.
+      let verifyOk = false;
       if (!process.argv.includes('--no-auto-verify')) {
-        launchAutoVerify({ fast: process.argv.includes('--fast-verify') });
+        console.log('\n  ⏳ Esperando análisis de audio (Whisper + demucs)...');
+        verifyOk = await runVerifyAudio({ fast: process.argv.includes('--fast-verify') });
       } else {
         console.log('\n  (--no-auto-verify: saltando el análisis automático — corré node verify-audio.js a mano)');
       }
@@ -712,17 +715,71 @@ async function runFlow() {
   await runScript('flow-submit.js');
   state.write({ stage: state.STAGES.FLOW_FILLED });
 
-  if (mp3sDescargados) {
+  // ── Paso 5: Recomendación + Upload automático ──────────────────────────────
+  // verifyOk + chequeo de título: verify-report.json puede quedar con datos de
+  // una canción anterior si el auto-verify de ESTA corrida falló antes de
+  // reescribirlo, o si --no-auto-verify se usó y el archivo quedó viejo. Nunca
+  // confiar en el archivo solo porque existe — ver el bug de "canción
+  // equivocada" documentado en lib/pipeline-state.js.
+  const REPORT_PATH = path.join(__dirname, 'verify-report.json');
+  const currentTitulo = state.read()?.titulo || null;
+  if (mp3sDescargados && verifyOk && fs.existsSync(REPORT_PATH)) {
+    try {
+      const report = JSON.parse(fs.readFileSync(REPORT_PATH, 'utf-8'));
+
+      if (currentTitulo && report.titulo && report.titulo !== currentTitulo) {
+        console.log(
+          `\n⚠️ verify-report.json es de otra canción ("${report.titulo}") — no coincide con la actual ("${currentTitulo}"). Ignorando el reporte.`
+        );
+        throw new Error('verify-report.json desactualizado');
+      }
+
+      const rec = report.recommendation;
+
+      console.log('\n══════════════════════════════════════════════════════');
+      console.log(`📊 RECOMENDACIÓN: Versión ${rec.recommended}`);
+      console.log(`   Razón: ${rec.reason}`);
+      if (report.reportA) console.log(`   A: ${report.reportA.durationFormatted} — letra ${Math.round((report.reportA.levenshteinScore || 0) * 100)}%${report.reportA.clippingFlag ? ' — ⚠️ clipping' : ''}${report.reportA.abruptCutoff ? ' — ⚠️ corte abrupto' : ''}`);
+      if (report.reportB) console.log(`   B: ${report.reportB.durationFormatted} — letra ${Math.round((report.reportB.levenshteinScore || 0) * 100)}%${report.reportB.clippingFlag ? ' — ⚠️ clipping' : ''}${report.reportB.abruptCutoff ? ' — ⚠️ corte abrupto' : ''}`);
+      if (rec.scoreB !== null) console.log(`   Puntajes: A=${rec.scoreA}, B=${rec.scoreB}`);
+      console.log('══════════════════════════════════════════════════════');
+      console.log('\n👉 Escuchá ambas versiones antes de decidir. La recomendación es ORIENTATIVA.');
+
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      const versionChoice = await new Promise((resolve) => {
+        rl.question(`\n¿Subir Versión ${rec.recommended} al Flow? (s = sí, n = no subir, A/B = subir la otra): `, (answer) => {
+          rl.close();
+          resolve(answer.trim().toUpperCase());
+        });
+      });
+
+      let versionToUpload = null;
+      if (versionChoice === 'S' || versionChoice === 'SI' || versionChoice === 'SÍ' || versionChoice === 'Y') {
+        versionToUpload = rec.recommended;
+      } else if (versionChoice === 'A' || versionChoice === 'B') {
+        versionToUpload = versionChoice;
+      }
+
+      if (versionToUpload) {
+        console.log(`\n=== Subiendo Versión ${versionToUpload} al Flow (upload-to-flow.js) ===\n`);
+        await runScript(`upload-to-flow.js --version ${versionToUpload}`);
+        state.write({ stage: state.STAGES.FLOW_FILLED });
+        console.log(`\n✅ Versión ${versionToUpload} subida al Flow exitosamente.`);
+      } else {
+        console.log('\n(No se subió ninguna versión. Podés hacerlo manualmente con: node upload-to-flow.js --version A|B)');
+      }
+    } catch (e) {
+      console.log(`\n⚠️ No se pudo leer verify-report.json: ${e.message}`);
+      console.log('   Subí el MP3 manualmente con: node upload-to-flow.js --version A|B');
+    }
+  } else if (mp3sDescargados) {
     console.log(
       '\n✅ Flujo completo. MP3s descargados en Downloads/suno/.\n' +
         '   Revisá: suno-verify-overview.png, suno-verify-lyrics-expanded.png y flow-submit-verify.png.\n' +
-        '\n   Próximos pasos:\n' +
-        '     1. node verify-audio.js       → analiza las 2 versiones (duración + Whisper)\n' +
+        '\n   Pasos manuales:\n' +
+        '     1. node verify-audio.js       → analiza las 2 versiones\n' +
         '     2. Escuchá y elegí la versión\n' +
-        '     3. node upload-to-flow.js --version A|B  → sube el MP3 al Flow\n' +
-        '     4. Hacé Submit to QA manualmente en el Flow\n' +
-        '     5. node start-flow.js --done  → registra en la hoja\n' +
-        '\n   Cuando termines, volvé acá y respondé.'
+        '     3. node upload-to-flow.js --version A|B  → sube el MP3 al Flow\n'
     );
   } else {
     console.log(
@@ -732,11 +789,12 @@ async function runFlow() {
         '     1. Clickeá Create en Suno (o: node suno-create.js)\n' +
         '     2. Descargá los 2 MP3 a Downloads/suno/\n' +
         '     3. node verify-audio.js     → analiza duración y letra\n' +
-        '     4. node upload-to-flow.js --version A|B  → sube el MP3 elegido\n' +
-        '     5. Hacé Submit to QA manualmente\n' +
-        '\n   Cuando termines los pasos de arriba, volvé acá y respondé.'
+        '     4. node upload-to-flow.js --version A|B  → sube el MP3 elegido\n'
     );
   }
+
+  // ── Paso final: Submit to QA manual + registro ─────────────────────────────
+  console.log('🛑 Hacé Submit to QA manualmente en el Flow.');
   const confirmed = await askDoneQuestion();
   if (confirmed) {
     await runDone();
