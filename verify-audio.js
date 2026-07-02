@@ -168,6 +168,7 @@ function parseArgs(argv) {
     if (report.clippingFlag) parts.push(`clipping ${report.clippingCount}`);
     if (report.abruptCutoff === true) parts.push('final abrupto');
     if (report.tagLeaking.length > 0) parts.push('tags cantados');
+    if (report.missingNames && report.missingNames.length > 0) parts.push(`nombres ausentes: ${report.missingNames.join(',')}`);
     if (report.demucs.used && report.demucs.vocalPresence === true) parts.push('sin voz');
     return parts.length ? ` (${parts.join(', ')})` : '';
   }

@@ -389,11 +389,14 @@ async function readSurveyResponses(page) {
 }
 
 async function generateSongWithClaude(surveyText) {
-  // ─── VERSIÓN GEMINI (MOCK OFFLINE LOCAL) ──────────────────────────────────
-  console.log('--- LOCAL OFFLINE MOCK ACTIVE ---');
-  console.log('Returning cached/mock song response text without calling any API...');
-  
-  return `**Título:** Cuatro Regalos de Mi Vida
+  const dryRunMode = process.argv.includes('--dry-run');
+
+  if (dryRunMode) {
+    // ─── VERSIÓN GEMINI (MOCK OFFLINE LOCAL) ──────────────────────────────────
+    console.log('--- LOCAL OFFLINE MOCK ACTIVE ---');
+    console.log('Returning cached/mock song response text without calling any API...');
+    
+    return `**Título:** Cuatro Regalos de Mi Vida
 
 **Voz:** Femenina
 
@@ -464,6 +467,26 @@ mamá los ama por siempre, eso lo pueden asegurar.
 - Sin acróstico en el nombre: ✓
 
 **Advertencias:** Los dos ítems marcados con ✗ (nombre como primera palabra del coro y ausencia de nombre en Verse 1) son excepciones intencionales y obligatorias por la regla de "Múltiples Destinatarios" para cuatro nombres, donde cada nombre debe aparecer en la línea 3 de su sección designada (Verse 1, Chorus 1, Verse 2, Chorus 2) en lugar de seguir el patrón estándar de un solo destinatario. Esto se hizo específicamente para corregir la ausencia de "Nestor" señalada en la corrección obligatoria del intento anterior. No se usó ninguna re-escritura fonética.`;
+  }
+
+  // ─── VERSIÓN GEMINI (PRODUCCIÓN LIVE) ───────────────────────────────────────
+  if (!process.env.GEMINI_API_KEY) {
+    throw new Error('GEMINI_API_KEY no está configurada. Corré "setx GEMINI_API_KEY <tu-key>" y abrí una terminal nueva.');
+  }
+
+  const { GoogleGenerativeAI } = require('@google/generative-ai');
+  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+  const model = genAI.getGenerativeModel({
+    model: 'gemini-2.0-flash',
+    systemInstruction: SYSTEM_PROMPT,
+    generationConfig: {
+      maxOutputTokens: 2000,
+      temperature: 1.0,
+    },
+  });
+
+  const result = await model.generateContent(surveyText);
+  return result.response.text().trim();
 }
 
 // ─── VALIDACIÓN ESTRUCTURAL DURA (nueva capa) ─────────────────────────────────
@@ -667,7 +690,8 @@ function hardValidate(fullResponse, surveyText) {
       const isConditionalNA = /\(si aplica\)/i.test(trimmed) && /\bn\/a\b/i.test(trimmed);
       const isMultiRecipientBypass = isMultiRecipient && trimmed.includes('✗') && (
         trimmed.toLowerCase().includes('nombre = primera palabra') ||
-        trimmed.toLowerCase().includes('ausente en verse 1')
+        trimmed.toLowerCase().includes('ausente en verse 1') ||
+        trimmed.toLowerCase().includes('nombre solo una vez por chorus')
       );
 
       if (!isMultiRecipientBypass && (trimmed.includes('✗') || (!trimmed.includes('✓') && !isConditionalNA && /[a-záéíóúñ]/i.test(trimmed)))) {

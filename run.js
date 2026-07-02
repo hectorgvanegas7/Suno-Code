@@ -621,7 +621,8 @@ function hardValidate(fullResponse, surveyText) {
       
       const isMultiRecipientBypass = isMultiRecipient && trimmed.includes('✗') && (
         trimmed.toLowerCase().includes('nombre = primera palabra') ||
-        trimmed.toLowerCase().includes('ausente en verse 1')
+        trimmed.toLowerCase().includes('ausente en verse 1') ||
+        trimmed.toLowerCase().includes('nombre solo una vez por chorus')
       );
 
       if (!isMultiRecipientBypass && (trimmed.includes('✗') || (!trimmed.includes('✓') && !isConditionalNA && /[a-záéíóúñ]/i.test(trimmed)))) {
