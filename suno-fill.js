@@ -2,6 +2,7 @@ const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 const { safeClick, setSliderValue, expandIfCollapsed, withReloadRetry, connectToSunoTab, pauseForHumanInteraction, isPortUp } = require('./lib/playwright-helpers');
+const { LYRICS_TEXTAREA, TITLE_INPUT, STYLE_TEXTAREA, MORE_OPTIONS_TOGGLE_TEXT, WEIRDNESS_SLIDER_LABEL, STYLE_INFLUENCE_SLIDER_LABEL, EXPAND_LYRICS_BOX_LABEL } = require('./lib/suno-selectors');
 
 const SONG_PATH = path.join(__dirname, 'song.txt');
 
@@ -49,7 +50,7 @@ async function fillSunoForm(page, titulo, voz, estilo, lyrics, genderTarget) {
   await page.waitForTimeout(300);
 
   // Fill Lyrics
-  const lyricsBox = page.locator('[data-testid="lyrics-textarea"]');
+  const lyricsBox = page.locator(LYRICS_TEXTAREA);
   await lyricsBox.click();
   await lyricsBox.fill(lyrics);
   await page.waitForTimeout(300);
@@ -58,9 +59,7 @@ async function fillSunoForm(page, titulo, voz, estilo, lyrics, genderTarget) {
   // reordena el DOM, ese índice llena el campo equivocado en silencio. Probamos
   // primero selectores semánticos (placeholder/aria) y caemos a nth(1) sólo si
   // ninguno aparece, para no romper si el DOM cambió.
-  let styleBox = page
-    .locator('textarea[placeholder*="style" i], textarea[aria-label*="style" i], textarea[placeholder*="estilo" i]')
-    .first();
+  let styleBox = page.locator(STYLE_TEXTAREA).first();
   if ((await styleBox.count()) === 0) {
     styleBox = page.locator('textarea').nth(1);
   }
@@ -72,19 +71,19 @@ async function fillSunoForm(page, titulo, voz, estilo, lyrics, genderTarget) {
   // expandIfCollapsed uses a 10s explicit waitFor so translation-key failures bubble up fast
   // to withReloadRetry instead of hanging 30 seconds.
   const genderButton = page.getByRole('button', { name: genderTarget, exact: true }).first();
-  await expandIfCollapsed(page, 'More Options', genderButton);
+  await expandIfCollapsed(page, MORE_OPTIONS_TOGGLE_TEXT, genderButton);
 
   // Vocal Gender
   await safeClick(page, genderButton, { label: `Vocal Gender (${genderTarget})`, maxAttempts: 3 });
   await page.waitForTimeout(300);
 
   // Sliders
-  await setSliderValue(page, 'Weirdness', 55);
-  await setSliderValue(page, 'Style Influence', 55);
+  await setSliderValue(page, WEIRDNESS_SLIDER_LABEL, 55);
+  await setSliderValue(page, STYLE_INFLUENCE_SLIDER_LABEL, 55);
   await page.waitForTimeout(300);
 
   // Title
-  const titleInputs = page.locator('input[placeholder="Song Title (Optional)"]');
+  const titleInputs = page.locator(TITLE_INPUT);
   const titleCount = await titleInputs.count();
   let titleInput = null;
   for (let i = 0; i < titleCount; i++) {
@@ -140,7 +139,7 @@ async function fillSunoForm(page, titulo, voz, estilo, lyrics, genderTarget) {
   // --- Verification screenshots ---
   await page.screenshot({ path: 'suno-verify-overview.png' });
 
-  const expandBtn = page.getByLabel('Expand lyrics box');
+  const expandBtn = page.getByLabel(EXPAND_LYRICS_BOX_LABEL);
   if ((await expandBtn.count()) > 0) {
     await expandBtn.click();
     await page.waitForTimeout(500);
@@ -150,12 +149,10 @@ async function fillSunoForm(page, titulo, voz, estilo, lyrics, genderTarget) {
   }
 
   // Re-acquire locators for verification (they were filled inside fillSunoForm)
-  const lyricsBox = page.locator('[data-testid="lyrics-textarea"]');
-  let styleBox = page
-    .locator('textarea[placeholder*="style" i], textarea[aria-label*="style" i], textarea[placeholder*="estilo" i]')
-    .first();
+  const lyricsBox = page.locator(LYRICS_TEXTAREA);
+  let styleBox = page.locator(STYLE_TEXTAREA).first();
   if ((await styleBox.count()) === 0) styleBox = page.locator('textarea').nth(1);
-  const titleInputs = page.locator('input[placeholder="Song Title (Optional)"]');
+  const titleInputs = page.locator(TITLE_INPUT);
   let titleInput = null;
   for (let i = 0; i < await titleInputs.count(); i++) {
     if (await titleInputs.nth(i).isVisible()) { titleInput = titleInputs.nth(i); break; }
@@ -165,8 +162,8 @@ async function fillSunoForm(page, titulo, voz, estilo, lyrics, genderTarget) {
   const lyricsValue = await lyricsBox.inputValue();
   const styleValue = await styleBox.inputValue();
   const titleValue = await titleInput.inputValue();
-  const weirdnessVal = await page.locator('[role="slider"][aria-label="Weirdness"]').getAttribute('aria-valuenow');
-  const influenceVal = await page.locator('[role="slider"][aria-label="Style Influence"]').getAttribute('aria-valuenow');
+  const weirdnessVal = await page.locator(`[role="slider"][aria-label="${WEIRDNESS_SLIDER_LABEL}"]`).getAttribute('aria-valuenow');
+  const influenceVal = await page.locator(`[role="slider"][aria-label="${STYLE_INFLUENCE_SLIDER_LABEL}"]`).getAttribute('aria-valuenow');
 
   console.log('\n--- Valores leidos del formulario ---');
   console.log('Title:', titleValue);

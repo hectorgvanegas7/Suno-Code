@@ -71,6 +71,7 @@ const { enterFlowAndEnsureAssignment, FLOW_URL } = require('./lib/flow-helpers')
 const { runPreflight } = require('./lib/preflight');
 const { notify } = require('./lib/ntfy');
 const state = require('./lib/pipeline-state');
+const { LYRICS_TEXTAREA } = require('./lib/suno-selectors');
 
 const DEBUG_PORT = 9333;   // Chrome de Suno (ya corriendo para suno-fill y flow-submit)
 const POLL_PORT  = 9334;   // Chrome propio del modo --poll (se abre y cierra dentro del modo)
@@ -202,11 +203,12 @@ async function checkSunoSessionReady(maxAttempts = 3) {
       let definitive = true;
       try {
         await page.waitForFunction(
-          () =>
-            !!document.querySelector('[data-testid="lyrics-textarea"]') ||
+          (lyricsSelector) =>
+            !!document.querySelector(lyricsSelector) ||
             Array.from(document.querySelectorAll('a, button')).some((el) =>
               /^sign in$/i.test(el.textContent.trim())
             ),
+          LYRICS_TEXTAREA,
           { timeout: 10000 }
         );
       } catch {
@@ -215,7 +217,7 @@ async function checkSunoSessionReady(maxAttempts = 3) {
 
       if (definitive) {
         // Estado definitivo alcanzado — determinar cuál ganó.
-        const hasForm = (await page.locator('[data-testid="lyrics-textarea"]').count()) > 0;
+        const hasForm = (await page.locator(LYRICS_TEXTAREA).count()) > 0;
         return hasForm; // true = logueado, false = no logueado
       }
 
