@@ -59,7 +59,7 @@ const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
 const { chromium } = require('playwright');
-const { isLoggedIn, clickByText } = require('./lib/playwright-helpers');
+const { isLoggedIn, clickByText, isPortUp, ensurePortIsFree } = require('./lib/playwright-helpers');
 const { enterFlowAndEnsureAssignment, FLOW_URL } = require('./lib/flow-helpers');
 const { runPreflight } = require('./lib/preflight');
 const { notify } = require('./lib/ntfy');
@@ -135,14 +135,6 @@ function runScript(scriptName) {
   });
 }
 
-async function isPortUp(port) {
-  try {
-    const res = await fetch(`http://localhost:${port}/json/version`);
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
 
 async function withCdp(fn) {
   const browser = await chromium.connectOverCDP(`http://localhost:${DEBUG_PORT}`);

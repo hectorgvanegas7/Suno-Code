@@ -19,9 +19,16 @@ const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
-const { clickByText } = require('./lib/playwright-helpers');
+const { clickByText, ensurePortIsFree } = require('./lib/playwright-helpers');
 const { enterFlowAndEnsureAssignment } = require('./lib/flow-helpers');
 const pipelineState = require('./lib/pipeline-state');
+const { getSurveyHash, readCache, writeCache } = require('./lib/cache-helpers');
+const { extractFirstNames } = require('./lib/text-helpers');
+
+const args = process.argv.slice(2);
+const isDryRun = args.includes('--dry-run');
+const providerArg = args.find(a => a.startsWith('--provider='));
+const provider = providerArg ? providerArg.split('=')[1] : 'claude';
 
 const USER_DATA_DIR = 'C:\\Users\\hecto\\AppData\\Local\\ChromeAutomationProfile';
 const PROFILE_DIRECTORY = 'Profile 1';
@@ -378,43 +385,7 @@ async function readSurveyResponses(page) {
 }
 
 async function generateSongWithClaude(surveyText) {
-  if (!process.env.ANTHROPIC_API_KEY) {
-    throw new Error('ANTHROPIC_API_KEY no está configurada. Corré "setx ANTHROPIC_API_KEY <tu-key>" y abrí una terminal nueva.');
-  }
-
-  const response = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'x-api-key': process.env.ANTHROPIC_API_KEY,
-      'anthropic-version': '2023-06-01',
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: 'claude-sonnet-5',
-      max_tokens: 8192,
-      system: [
-        {
-          type: 'text',
-          text: SYSTEM_PROMPT,
-          cache_control: { type: 'ephemeral', ttl: '1h' },
-        },
-      ],
-      messages: [{ role: 'user', content: surveyText }],
-    }),
-  });
-
-  if (!response.ok) {
-    throw new Error(`Anthropic API error ${response.status}: ${await response.text()}`);
-  }
-
-  const data = await response.json();
-  if (data.usage) {
-    const u = data.usage;
-    console.log(
-      `  usage: input=${u.input_tokens} cache_creation=${u.cache_creation_input_tokens ?? 0} cache_read=${u.cache_read_input_tokens ?? 0} output=${u.output_tokens}`
-    );
-  }
-  return data.content.map((block) => block.text || '').join('').trim();
+  return await generate(provider, surveyText, SYSTEM_PROMPT, isDryRun);
 }
 
 // ─── VALIDACIÓN ESTRUCTURAL DURA (nueva capa) ─────────────────────────────────
@@ -474,22 +445,7 @@ function hardValidate(fullResponse, surveyText) {
   // y Soraya."), así que filtramos las palabras de relleno comunes en vez de
   // asumir que la primera palabra es el nombre — eso rompía por completo la
   // validación en encuestas multi-destinatario (ver LESSONS.md).
-  const nameFieldRaw =
-    (surveyText.match(/What['']s their name\??:\s*([^\n]+)/i) ||
-      surveyText.match(/Nombre[^:]*:\s*([^\n]+)/i) || [])[1] || '';
-  const NAME_FIELD_FILLER_WORDS = new Set([
-    'mis', 'mi', 'su', 'sus', 'el', 'la', 'los', 'las', 'de', 'del',
-    'hijo', 'hija', 'hijos', 'hijas', 'y', 'and', 'e',
-  ]);
-  const firstNames = [
-    ...new Set(
-      nameFieldRaw
-        .replace(/[.,]/g, ' ')
-        .split(/\s+/)
-        .map((w) => w.toLowerCase())
-        .filter((w) => w.length > 1 && !NAME_FIELD_FILLER_WORDS.has(w))
-    ),
-  ];
+  const firstNames = extractFirstNames(surveyText);
 
   const isMultiRecipient = firstNames.length > 1;
 
@@ -788,65 +744,70 @@ process.on('uncaughtException', async (err) => {
 // ──────────────────────────────────────────────────────────────────────────────
 
 (async () => {
-  const context = await chromium.launchPersistentContext(USER_DATA_DIR, {
-    channel: 'chrome',
-    headless: false,
-    slowMo: 200,
-    args: CHROME_ARGS,
-    viewport: { width: 1440, height: 900 },
-  });
-  activeContext = context;
+  let isRedo = false;
+  let redoTitle = null;
+  let redoLyrics = null;
+  let redoFeedback = null;
+  let songId = 'OFFLINE_MOCK_ID';
 
   try {
-    const page = context.pages()[0] || (await context.newPage());
+    if (!isDryRun) {
+      await ensurePortIsFree(9333);
 
-    await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded' });
+      const context = await chromium.launchPersistentContext(USER_DATA_DIR, {
+        channel: 'chrome',
+        headless: false,
+        slowMo: 200,
+        args: CHROME_ARGS,
+        viewport: { width: 1440, height: 900 },
+      });
+      activeContext = context;
 
-    if (page.url().includes('/sign-in')) {
-      console.log('\nNo hay sesión activa. Iniciá sesión manualmente en la ventana que se abrió (esperando hasta 5 minutos)...\n');
-      await page.waitForURL((url) => !url.toString().includes('/sign-in'), { timeout: 300000 });
+      const page = context.pages()[0] || (await context.newPage());
+
       await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded' });
-    }
 
-    console.log('Entrando al Flow y asegurando asignación activa...');
-    const flowResult = await enterFlowAndEnsureAssignment(page, clickByText);
-    if (flowResult.assigned === 'newly-assigned') {
-      console.log('Se asignó la canción más urgente.');
+      if (page.url().includes('/sign-in')) {
+        console.log('\nNo hay sesión activa. Iniciá sesión manualmente en la ventana que se abrió (esperando hasta 5 minutos)...\n');
+        await page.waitForURL((url) => !url.toString().includes('/sign-in'), { timeout: 300000 });
+        await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded' });
+      }
+
+      console.log('Entrando al Flow y asegurando asignación activa...');
+      const flowResult = await enterFlowAndEnsureAssignment(page, clickByText);
+      if (flowResult.assigned === 'newly-assigned') {
+        console.log('Se asignó la canción más urgente.');
+      } else {
+        console.log('Ya hay una asignación activa en curso, continuando con ella...');
+      }
+
+      redoFeedback = await readRedoFeedback(page);
+      isRedo = redoFeedback !== null;
+
+      if (isRedo) {
+        console.log('Detected REDO state (this song was already assigned and rejected by QC).');
+        redoTitle = await page.locator('#title').inputValue();
+        redoLyrics = await page.locator('#lyrics').inputValue();
+      }
+
+      console.log('Reading Survey Responses...');
+      const surveyLines = await readSurveyResponses(page);
+      if (surveyLines.length === 0) {
+        throw new Error('No se encontraron respuestas de la encuesta en la página.');
+      }
+      const surveyText = surveyLines.join('\n');
+      fs.writeFileSync(SURVEY_PATH, surveyText, 'utf-8');
+      console.log(`Encuesta guardada en ${SURVEY_PATH}`);
+
+      console.log('Leyendo Song ID...');
+      songId = await readSongId(page);
+      if (!songId) {
+        throw new Error('No se encontró el Song ID en la página.');
+      }
+      console.log(`Song ID: ${songId}`);
     } else {
-      console.log('Ya hay una asignación activa en curso, continuando con ella...');
+      console.log('--- MOCK GENERATION DRY RUN ---');
     }
-
-    // Ojo: el banner naranja (bg-orange-50/border-orange-200) NO es exclusivo de
-    // REDO — el banner "Priority Delivery" usa exactamente las mismas clases y
-    // no tiene feedback adentro. Por eso el estado REDO se determina por si
-    // readRedoFeedback() efectivamente encuentra texto, no por el color del banner.
-    const redoFeedback = await readRedoFeedback(page);
-    const isRedo = redoFeedback !== null;
-
-    let redoTitle = null;
-    let redoLyrics = null;
-
-    if (isRedo) {
-      console.log('Detected REDO state (this song was already assigned and rejected by QC).');
-      redoTitle = await page.locator('#title').inputValue();
-      redoLyrics = await page.locator('#lyrics').inputValue();
-    }
-
-    console.log('Reading Survey Responses...');
-    const surveyLines = await readSurveyResponses(page);
-    if (surveyLines.length === 0) {
-      throw new Error('No se encontraron respuestas de la encuesta en la página.');
-    }
-    const surveyText = surveyLines.join('\n');
-    fs.writeFileSync(SURVEY_PATH, surveyText, 'utf-8');
-    console.log(`Encuesta guardada en ${SURVEY_PATH}`);
-
-    console.log('Leyendo Song ID...');
-    const songId = await readSongId(page);
-    if (!songId) {
-      throw new Error('No se encontró el Song ID en la página.');
-    }
-    console.log(`Song ID: ${songId}`);
 
     console.log('Leyendo survey.txt...');
     const surveyContent = fs.readFileSync(SURVEY_PATH, 'utf-8');
@@ -855,8 +816,23 @@ process.on('uncaughtException', async (err) => {
       ? buildRedoUserMessage(surveyContent, redoTitle, redoLyrics, redoFeedback)
       : undefined;
 
-    const { fullResponse, passedQA } = await generateSongWithSelfCorrection(surveyContent, baseUserMessage);
+    const surveyHash = getSurveyHash(surveyContent);
+    const cachedResponse = readCache(surveyHash);
 
+    let fullResponse, passedQA;
+
+    if (cachedResponse && !isRedo) {
+      console.log('♻️  Usando letra en caché local (se omitió la llamada al LLM)...');
+      fullResponse = cachedResponse.fullResponse;
+      passedQA = cachedResponse.passedQA;
+    } else {
+      const result = await generateSongWithSelfCorrection(surveyContent, baseUserMessage);
+      fullResponse = result.fullResponse;
+      passedQA = result.passedQA;
+      if (passedQA) {
+        writeCache(surveyHash, result);
+      }
+    }
     // Si quedó razonamiento/preámbulo antes de "**Título:**" (ej. cuando se
     // agota MAX_GENERATION_ATTEMPTS y se guarda con advertencia), arrancar
     // desde ahí — nunca guardar ese texto en song.txt.

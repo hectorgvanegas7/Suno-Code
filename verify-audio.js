@@ -28,6 +28,7 @@
 const fs = require('fs');
 const path = require('path');
 const { findSunoMp3s, SUNO_DIR } = require('./lib/audio-match');
+const { extractFirstNames } = require('./lib/text-helpers');
 const { analyzeAudio, printReport, parseLyricsFromSongFile, parseTituloFromSongFile, getDurationAsync, formatDuration, formatElapsed, SONG_PATH } = require('./lib/audio-analysis');
 const { notify } = require('./lib/ntfy');
 
@@ -70,22 +71,7 @@ function parseArgs(argv) {
   const SURVEY_PATH = path.join(__dirname, 'survey.txt');
   if (fs.existsSync(SURVEY_PATH)) {
     const surveyText = fs.readFileSync(SURVEY_PATH, 'utf-8');
-    const nameFieldRaw =
-      (surveyText.match(/What['']s their name\??:\s*([^\n]+)/i) ||
-        surveyText.match(/Nombre[^:]*:\s*([^\n]+)/i) || [])[1] || '';
-    const NAME_FIELD_FILLER_WORDS = new Set([
-      'mis', 'mi', 'su', 'sus', 'el', 'la', 'los', 'las', 'de', 'del',
-      'hijo', 'hija', 'hijos', 'hijas', 'y', 'and', 'e',
-    ]);
-    firstNames = [
-      ...new Set(
-        nameFieldRaw
-          .replace(/[.,]/g, ' ')
-          .split(/\s+/)
-          .map((w) => w.toLowerCase())
-          .filter((w) => w.length > 1 && !NAME_FIELD_FILLER_WORDS.has(w))
-      ),
-    ];
+    firstNames = extractFirstNames(surveyText);
   }
 
   // Encontrar los 2 MP3

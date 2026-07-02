@@ -1,7 +1,7 @@
 const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
-const { safeClick, setSliderValue, expandIfCollapsed, withReloadRetry, connectToSunoTab } = require('./lib/playwright-helpers');
+const { safeClick, setSliderValue, expandIfCollapsed, withReloadRetry, connectToSunoTab, pauseForHumanInteraction, isPortUp } = require('./lib/playwright-helpers');
 
 const SONG_PATH = path.join(__dirname, 'song.txt');
 
@@ -112,6 +112,10 @@ async function fillSunoForm(page, titulo, voz, estilo, lyrics, genderTarget) {
   console.log('  Estilo:', estilo);
   console.log('  Lyrics length:', lyrics.length, 'chars');
 
+  if (!(await isPortUp(9333))) {
+    throw new Error('❌ Chrome no está escuchando en el puerto 9333. ¿Olvidaste iniciarlo con la flag de debugging?');
+  }
+
   const { browser, page } = await connectToSunoTab(chromium);
   console.log('Connected to:', page.url());
 
@@ -120,13 +124,18 @@ async function fillSunoForm(page, titulo, voz, estilo, lyrics, genderTarget) {
   }
   await page.waitForTimeout(1000);
 
-  // Fill the form, retrying with page.reload() if any text-based selector times
-  // out (e.g. Suno rendered raw i18n keys instead of translated UI labels).
-  await withReloadRetry(
-    page,
-    () => fillSunoForm(page, titulo, voz, estilo, lyrics, genderTarget),
-    { maxAttempts: 3, description: 'formulario de Suno (Advanced mode)' }
-  );
+  try {
+    // Fill the form, retrying with page.reload() if any text-based selector times
+    // out (e.g. Suno rendered raw i18n keys instead of translated UI labels).
+    await withReloadRetry(
+      page,
+      () => fillSunoForm(page, titulo, voz, estilo, lyrics, genderTarget),
+      { maxAttempts: 3, description: 'formulario de Suno (Advanced mode)' }
+    );
+  } catch (err) {
+    console.error('\n❌ Error crítico llenando el formulario de Suno:', err.message);
+    await pauseForHumanInteraction('Suno cambió su interfaz o no cargó correctamente. Por favor, llena el formulario de Create manualmente.');
+  }
 
   // --- Verification screenshots ---
   await page.screenshot({ path: 'suno-verify-overview.png' });

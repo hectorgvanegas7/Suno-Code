@@ -12,6 +12,7 @@
 const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
+const { pauseForHumanInteraction, isPortUp } = require('./lib/playwright-helpers');
 
 const SONG_PATH = path.join(__dirname, 'song.txt');
 const DEBUG_PORT = 9333;
@@ -147,35 +148,44 @@ async function findNotesField(page) {
   console.log('  Lyrics length:', lyrics.length, 'chars');
   console.log('  Notes (para el Flow):', flowNotes);
 
+  if (!(await isPortUp(DEBUG_PORT))) {
+    throw new Error(`❌ Chrome no está escuchando en el puerto ${DEBUG_PORT}. ¿Olvidaste iniciarlo con la flag de debugging?`);
+  }
+
   const { browser, page } = await connectToFlowTab();
   console.log('Conectado a:', page.url());
 
-  const titleLocator = page.locator('#title');
-  const lyricsLocator = page.locator('#lyrics');
-  if ((await titleLocator.count()) === 0 || (await lyricsLocator.count()) === 0) {
-    throw new Error('No se encontraron #title / #lyrics en la página. ¿Hay una asignación activa cargada en el Flow?');
-  }
+  try {
+    const titleLocator = page.locator('#title');
+    const lyricsLocator = page.locator('#lyrics');
+    if ((await titleLocator.count()) === 0 || (await lyricsLocator.count()) === 0) {
+      throw new Error('No se encontraron #title / #lyrics en la página. ¿Hay una asignación activa cargada en el Flow?');
+    }
 
-  console.log('\nLlenando título...');
-  await fillReactField(page, titleLocator, titulo, 'title');
+    console.log('\nLlenando título...');
+    await fillReactField(page, titleLocator, titulo, 'title');
 
-  console.log('Llenando letra...');
-  await fillReactField(page, lyricsLocator, lyrics, 'lyrics');
+    console.log('Llenando letra...');
+    await fillReactField(page, lyricsLocator, lyrics, 'lyrics');
 
-  console.log('Buscando campo de notas...');
-  const notesLocator = await findNotesField(page);
-  if (notesLocator) {
-    console.log('Llenando notas...');
-    // No pisar las notas/feedback que ya haya en el campo (de QC u otra persona):
-    // las nuevas se agregan abajo, no reemplazan lo existente.
-    const existingNotes = (await notesLocator.inputValue()).trim();
-    const combinedNotes =
-      existingNotes && !existingNotes.includes(flowNotes)
-        ? `${existingNotes}\n\n${flowNotes}`
-        : existingNotes || flowNotes;
-    await fillReactField(page, notesLocator, combinedNotes, 'notes');
-  } else {
-    console.warn('  ⚠️ No se llenó el campo de notas — no se encontró con la heurística actual. Llenar a mano.');
+    console.log('Buscando campo de notas...');
+    const notesLocator = await findNotesField(page);
+    if (notesLocator) {
+      console.log('Llenando notas...');
+      // No pisar las notas/feedback que ya haya en el campo (de QC u otra persona):
+      // las nuevas se agregan abajo, no reemplazan lo existente.
+      const existingNotes = (await notesLocator.inputValue()).trim();
+      const combinedNotes =
+        existingNotes && !existingNotes.includes(flowNotes)
+          ? `${existingNotes}\n\n${flowNotes}`
+          : existingNotes || flowNotes;
+      await fillReactField(page, notesLocator, combinedNotes, 'notes');
+    } else {
+      console.warn('  ⚠️ No se llenó el campo de notas — no se encontró con la heurística actual. Llenar a mano.');
+    }
+  } catch (err) {
+    console.error('\n❌ Error interactuando con la interfaz del Artist Flow:', err.message);
+    await pauseForHumanInteraction('La interfaz del Artist Flow cambió o no hay una asignación activa. Por favor, copia y pega el Título, Letra y Notas manualmente en la página web.');
   }
 
   await page.waitForTimeout(300);

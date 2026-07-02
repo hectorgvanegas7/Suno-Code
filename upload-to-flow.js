@@ -22,6 +22,8 @@ const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 const { findSunoMp3s } = require('./lib/audio-match');
+const { pauseForHumanInteraction, isPortUp } = require('./lib/playwright-helpers');
+const state = require('./lib/pipeline-state');
 
 const DEBUG_PORT = 9333;
 const SONG_PATH = path.join(__dirname, 'song.txt');
@@ -102,7 +104,12 @@ function parseArgs(argv) {
   console.log(`   Tamaño: ${Math.round(stat.size / 1024)} KB`);
 
   // Conectar al Flow
-  console.log('\n📡 Conectando al Flow (Chrome puerto 9333)...');
+  console.log('\n📡 Conectando al Flow...');
+  if (!(await isPortUp(DEBUG_PORT))) {
+    throw new Error(`❌ Chrome no está escuchando en el puerto ${DEBUG_PORT}. ¿Olvidaste iniciarlo con la flag de debugging?`);
+  }
+
+  // Conectar a Chrome existente
   const browser = await chromium.connectOverCDP(`http://localhost:${DEBUG_PORT}`);
   const context = browser.contexts()[0];
   const pages = context.pages();
@@ -152,22 +159,20 @@ function parseArgs(argv) {
       console.log('   Usando primer input[type="file"] disponible.');
     } else {
       console.error('\n❌ No se encontró ningún campo de carga de archivo en el Flow.');
-      console.error('   Verificá que la asignación activa tiene el campo de MP3 visible.');
-      console.error('   Si el campo está oculto o aún no aparece, subí el MP3 manualmente.');
-      await browser.close().catch(() => {});
-      process.exit(1);
+      await pauseForHumanInteraction('No se encontró el botón para subir el MP3 en la interfaz del Flow. Por favor, súbelo manualmente y presiona ENTER.');
     }
   }
 
   // Subir el archivo
   console.log(`\n⬆️  Subiendo: ${path.basename(mp3Path)}`);
   try {
-    await fileInput.setInputFiles(mp3Path);
-    await page.waitForTimeout(2000);
+    if (fileInput) {
+      await fileInput.setInputFiles(mp3Path);
+      await page.waitForTimeout(2000);
+    }
   } catch (e) {
-    console.error(`❌ Error al subir el archivo: ${e.message}`);
-    await browser.close().catch(() => {});
-    process.exit(1);
+    console.error(`❌ Error al subir el archivo programáticamente: ${e.message}`);
+    await pauseForHumanInteraction('Ocurrió un error intentando subir el MP3. Por favor, súbelo manualmente al Flow y presiona ENTER al finalizar.');
   }
 
   // Verificar que la UI muestre el archivo cargado
@@ -181,6 +186,31 @@ function parseArgs(argv) {
 
   if (uploadConfirmed) {
     console.log('  ✅ Archivo visible en la UI del Flow.');
+
+    try {
+      const current = state.read();
+      const songContent = fs.existsSync(SONG_PATH) ? fs.readFileSync(SONG_PATH, 'utf-8') : '';
+      const songTxtTitle = parseTitulo(songContent);
+
+      if (current && current.songId && current.titulo) {
+        if (songTxtTitle && songTxtTitle !== current.titulo) {
+          console.warn(`  ⚠️ Peligro: El título en state.json ("${current.titulo}") no coincide con song.txt ("${songTxtTitle}"). Copia en mp3/ abortada para evitar renombrar incorrectamente.`);
+        } else {
+          const destDir = path.join(__dirname, 'mp3');
+          if (!fs.existsSync(destDir)) fs.mkdirSync(destDir);
+          const cleanTitle = current.titulo.replace(/[<>:"\/\\|?*]+/g, '').trim();
+          const newName = `${current.songId} - ${cleanTitle}.mp3`;
+          const destPath = path.join(destDir, newName);
+          fs.copyFileSync(mp3Path, destPath);
+          console.log(`  📁 Copia de respaldo organizada guardada en: mp3/${newName}`);
+        }
+      } else {
+        console.warn(`  ⚠️ state.json incompleto o ausente. Copia en mp3/ abortada.`);
+      }
+    } catch (e) {
+      console.error(`  ⚠️ No se pudo guardar la copia organizada en mp3/: ${e.message}`);
+    }
+
   } else {
     console.log('  ⚠️  No se pudo confirmar que el archivo quedó en la UI (revisá flow-upload-verify.png).');
   }

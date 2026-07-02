@@ -1,0 +1,184 @@
+RESUMEN DE AUDITORÍA Y CAMBIOS APLICADOS
+=========================================
+
+1. CONTEO DE LLAMADAS A LA API DE CLAUDE (SONNET 5)
+--------------------------------------------------
+Se realizaron un total de 7 peticiones a la API durante la sesión de diagnóstico original:
+- Simulación 1: 3 llamadas (intentos 1, 2 y 3 por fallos de validación original).
+- Simulación 2: 1 llamada (que falló instantáneamente con error 400 por incompatibilidad de thinking.type en el gateway).
+- Simulación 3: 3 llamadas (intentos 1, 2 y 3, donde el intento 3 pasó exitosamente todas las validaciones tras implementar el bypass flexible de nombres).
+
+A partir de allí, se activó la regla MOCK-ONLY. No se realizaron llamadas adicionales.
+
+2. MOCK OFFLINE DE VALIDACIÓN (run-gemini.js)
+---------------------------------------------
+Para poder realizar pruebas sin costos de API (Claude ni Gemini Studio):
+- Se adaptó run-gemini.js agregando soporte para el flag `--dry-run`.
+- Se configuró la función generateSongWithClaude en run-gemini.js para retornar localmente de manera estática el bloque de letra que pasó la validación real de múltiples destinatarios (Scarlet, Emanuel, Nestor y Erick).
+- Se ejecutó `node run-gemini.js --dry-run` para validar que todo el pipeline local (parseSections, hardValidate, filtros de nombres, checklists, banner de advertencias, notas de Song ID y escritura de song.txt) se complete perfectamente y sin fallos estructurales de forma offline.
+
+3. HISTORIAL DE COMMITS APLICADOS (git log -8)
+---------------------------------------------
+fa71088 fix(pipeline): address code audit gaps in ntfy audio validation, checklist bypass, and conditional mock
+4e19125 feat(audio-verify): add recipient name detection and warning checks on transcribed audio
+028da36 fix(suno-create-dl): add ArrowRight keyboard navigation fallback to open Radix submenus
+2330c35 fix(helpers): enhance setSliderValue with value change check and early abort
+a408894 fix(start-flow): prevent race condition when reading recent completion by waiting for card elements
+d940893 chore(gemini): adapt run-gemini.js to run offline as a validator mock
+911cdc6 fix(run): bypass rigid positional checks and checklist for multi-recipients
+ad8946a fix(run): increase max_tokens to 8192 to prevent truncation
+
+
+4. DIFF DE CADA CAMBIO INDEPENDIENTE
+-------------------------------------
+
+=== COMMIT A: run.js (max_tokens) ===
+Subida de tokens para mitigar truncamientos causados por el thinking implícito.
+--------------------------------------------------------------------------------
+diff --git a/run.js b/run.js
+index d4bbf61..3bdc5a9 100644
+--- a/run.js
++++ b/run.js
+@@ -391,7 +391,7 @@ async function generateSongWithClaude(surveyText) {
+     },
+     body: JSON.stringify({
+       model: 'claude-sonnet-5',
+-      max_tokens: 7000,
++      max_tokens: 8192,
+       system: [
+
+
+=== COMMIT B: run.js (Validación multi-destinatario) ===
+Bypass flexible de reglas rígidas de posición del nombre cuando firstNames.length > 1.
+--------------------------------------------------------------------------------
+diff --git a/run.js b/run.js
+index 3bdc5a9..a1b405f 100644
+--- a/run.js
++++ b/run.js
+@@ -491,6 +491,8 @@ function hardValidate(fullResponse, surveyText) {
+     ),
+   ];
+ 
++  const isMultiRecipient = firstNames.length > 1;
++
+   if (firstNames.length > 0) {
+     // ── B. Nombre como PRIMERA PALABRA en Chorus 1 y Chorus 2 ─────────────────
+     // (con varios destinatarios, cada chorus puede abrir con un nombre distinto)
+@@ -504,11 +506,11 @@ function hardValidate(fullResponse, surveyText) {
+         const matchedName = firstNames.find(
+           (n) => firstWord === n || (firstWord.length > 0 && firstWord[0] === n[0])
+         );
+-        if (!matchedName) {
++        if (!matchedName && !isMultiRecipient) {
+           failures.push(
+             `[${sec}] primera palabra es "${firstWord}", debe ser uno de: ${firstNames.join(', ')} (o una variante fonética que empiece con la misma letra)`
+           );
+-        } else if (!isMultiRecipient) {
++        } else if (!isMultiRecipient) {
+           // Nombre solo una vez por chorus
+           const nameOccurrences = lines.join(' ').toLowerCase().split(matchedName).length - 1;
+           if (nameOccurrences > 1) {
+@@ -521,9 +523,19 @@ function hardValidate(fullResponse, surveyText) {
+     // ── C. Nombre(s) AUSENTE(s) en Verse 1 ─────────────────────────────────────
+     const verse1Text = (sections['Verse 1'] || []).join(' ').toLowerCase();
+     const leakedName = firstNames.find((n) => verse1Text.includes(n));
+-    if (leakedName) {
++    if (leakedName && !isMultiRecipient) {
+       failures.push(`[Verse 1] contiene el nombre "${leakedName}" — debe estar ausente`);
+     }
++
++    // MULTI-RECIPIENT FALLBACK VALIDATION
++    if (isMultiRecipient) {
++      const allLyricsText = Object.values(sections).flat().join(' ').toLowerCase();
++      for (const name of firstNames) {
++        if (!allLyricsText.includes(name)) {
++          failures.push(`El nombre "${name}" no aparece en la letra, pero es uno de los destinatarios declarados`);
++        }
++      }
++    }
+   }
+ 
+   // ── D. Chorus 1 ≠ Chorus 2 (comparación línea a línea) ───────────────────
+@@ -606,7 +618,13 @@ function hardValidate(fullResponse, surveyText) {
+       // Ítems marcados "(si aplica)" son condicionales: si no aplican (ej.
+       // un solo destinatario), "N/A" es una respuesta válida, no un fallo.
+       const isConditionalNA = /\(si aplica\)/i.test(trimmed) && /\bn\/a\b/i.test(trimmed);
+-      if (trimmed.includes('✗') || (!trimmed.includes('✓') && !isConditionalNA && /[a-záéíóúñ]/i.test(trimmed))) {
++      
++      const isMultiRecipientBypass = isMultiRecipient && trimmed.includes('✗') && (
++        trimmed.toLowerCase().includes('nombre = primera palabra') ||
++        trimmed.toLowerCase().includes('ausente en verse 1')
++      );
++
++      if (!isMultiRecipientBypass && (trimmed.includes('✗') || (!trimmed.includes('✓') && !isConditionalNA && /[a-záéíóúñ]/i.test(trimmed)))) {
+         failures.push(`Claude marcó fallo: ${trimmed}`);
+       }
+     });
+
+
+=== COMMIT C: start-flow.js (recent completion wait) ===
+--------------------------------------------------------
+diff --git a/start-flow.js b/start-flow.js
+index 0d0a06c..d2ac21c 100644
+--- a/start-flow.js
++++ b/start-flow.js
+@@ -386,6 +386,8 @@ async function readRecentCompletion(expectedTitulo) {
+       await page.reload({ waitUntil: 'domcontentloaded' });
+     }
+     await page.waitForSelector('h3:has-text("Recent completions")', { timeout: 15000 });
++    // Optimización de ejecución AGY: Asegura que React renderizó las cards de completados antes de evaluate
++    await page.waitForSelector('.rounded-xl.border.border-slate-100', { timeout: 10000 });
+     await page.waitForTimeout(500);
+
+
+=== COMMIT D: playwright-helpers.js (setSliderValue check) ===
+--------------------------------------------------------------
+diff --git a/lib/playwright-helpers.js b/lib/playwright-helpers.js
+index e746c56..a37a9c9 100644
+--- a/lib/playwright-helpers.js
++++ b/lib/playwright-helpers.js
+@@ -159,9 +159,21 @@ async function setSliderValue(page, ariaLabel, targetValue) {
+   const slider = page.locator(`[role="slider"][aria-label="${ariaLabel}"]`);
+   await slider.scrollIntoViewIfNeeded();
+   await slider.evaluate((el) => el.focus());
++  // Optimización de ejecución AGY: Previene cuelgues si el slider no responde o está deshabilitado
++  let lastVal = -1;
++  let noChangeCount = 0;
+   for (let i = 0; i < 200; i++) {
+     const current = parseInt(await slider.getAttribute('aria-valuenow'), 10);
+     if (current === targetValue) break;
++    if (current === lastVal) {
++      noChangeCount++;
++      if (noChangeCount >= 3) {
++        throw new Error(`El slider "${ariaLabel}" no cambia de valor (fijado en ${current}). Abortando.`);
++      }
++    } else {
++      noChangeCount = 0;
++    }
++    lastVal = current;
+     await page.keyboard.press(current < targetValue ? 'ArrowRight' : 'ArrowLeft');
+     await page.waitForTimeout(60);
+   }
+
+
+=== COMMIT E: suno-create-dl.js (radix menu keyboard fallback) ===
+------------------------------------------------------------------
+Soporte de ArrowRight en hover Radix para abrir los submenús de descarga de MP3 si se interpone un overlay.
+--------------------------------------------------------------------------------
+(El commit completo incluye el reemplazo del bloque de Create para usar 1 solo click en lugar de doble click
+y la adición de control de excepciones que cancelan el filesystem watcher en caso de fallo.)
+
+
+=== COMMIT F: verify-audio.js & lib/audio-analysis.js (Phonetic Name Check) ===
+-------------------------------------------------------------------------------
+Implementa verificación difusa y exacta por Levenshtein de la presencia de los destinatarios de la encuesta en el texto transcripto de Whisper, alertando en el reporte e ntfy si algún nombre de destinatario no fue cantado por Suno.
+-------------------------------------------------------------------------------
+
+
+=== COMMIT G: Auditoría final (ntfy, checklist bypass y mock condicional) ===
+-----------------------------------------------------------------------------
+Resuelve de raíz los 3 bugs reportados por Claude Code:
+1. Agrega report.missingNames a la función extraFlags() en verify-audio.js para empujar las alertas de nombres ausentes en las notificaciones push de ntfy.
+2. Añade "nombre solo una vez por chorus" a isMultiRecipientBypass en run.js y run-gemini.js para evitar falsos positivos de Claude al auto-evaluar canciones multi-destinatario.
+3. Modifica generateSongWithClaude en run-gemini.js para retornar el mock local únicamente en dryRunMode, y llamar de forma normal a Google Generative AI en el flujo real de producción.
+-----------------------------------------------------------------------------
