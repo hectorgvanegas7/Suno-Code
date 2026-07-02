@@ -386,6 +386,8 @@ async function readRecentCompletion(expectedTitulo) {
       await page.reload({ waitUntil: 'domcontentloaded' });
     }
     await page.waitForSelector('h3:has-text("Recent completions")', { timeout: 15000 });
+    // Optimización de ejecución AGY: Asegura que React renderizó las cards de completados antes de evaluate
+    await page.waitForSelector('.rounded-xl.border.border-slate-100', { timeout: 10000 });
     await page.waitForTimeout(500);
 
     // Extraer título, texto de sesión e índice global de la primera card
