@@ -67,8 +67,15 @@ function renderQaDetail(versionReport) {
 // solo cambian los datos que recibe.
 function renderVersionCard({ label, versionReport, score, filename, fileExists, isRecommended }) {
   const letraMatch = versionReport ? Math.round((versionReport.levenshteinScore || 0) * 100) : 0;
+  const audioId = `audio-${label}`;
   const audioTag = fileExists
-    ? `<audio controls src="/audio/${filename}"></audio>`
+    ? `
+      <audio id="${audioId}" data-version="${label}" controls src="/audio/${filename}"></audio>
+      <div class="audio-controls">
+        <button type="button" class="play-btn" data-audio-target="${audioId}">▶ Reproducir</button>
+        <span class="now-playing" data-now-playing="${label}">🔊 Sonando</span>
+      </div>
+    `
     : '<p style="color:red; font-size: 12px; margin: 0.75rem 0 0 0;">MP3 no encontrado</p>';
 
   return `
@@ -209,6 +216,7 @@ app.get('/', (req, res) => {
       </div>
     </div>
   </div>
+  <script src="/dashboard.client.js"></script>
 </body>
 </html>
   `;

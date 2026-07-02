@@ -94,6 +94,34 @@ body {
 .badge-success { background: var(--success); color: white; }
 .badge-warning { background: var(--warning); color: black; }
 audio { width: 100%; margin-top: 0.75rem; }
+.audio-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 0.5rem;
+}
+.play-btn {
+  background: var(--primary);
+  color: white;
+  border: none;
+  border-radius: 0.375rem;
+  padding: 0.35rem 0.75rem;
+  font-size: 12.5px;
+  font-weight: bold;
+  cursor: pointer;
+}
+.play-btn:hover {
+  filter: brightness(1.1);
+}
+.now-playing {
+  font-size: 12px;
+  color: var(--success);
+  font-weight: bold;
+  visibility: hidden;
+}
+.now-playing.visible {
+  visibility: visible;
+}
 .qa-detail {
   margin-top: 0.75rem;
   font-size: 13px;
