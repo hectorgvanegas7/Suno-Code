@@ -65,6 +65,29 @@ function parseArgs(argv) {
   console.log(`   Carpeta: ${args.dir || SUNO_DIR}`);
   console.log(`   Ventana de recencia: ${args.minutes || 20} minutos\n`);
 
+  // Extraer nombres desde survey.txt si existe para validar presencia en audio
+  let firstNames = [];
+  const SURVEY_PATH = path.join(__dirname, 'survey.txt');
+  if (fs.existsSync(SURVEY_PATH)) {
+    const surveyText = fs.readFileSync(SURVEY_PATH, 'utf-8');
+    const nameFieldRaw =
+      (surveyText.match(/What['']s their name\??:\s*([^\n]+)/i) ||
+        surveyText.match(/Nombre[^:]*:\s*([^\n]+)/i) || [])[1] || '';
+    const NAME_FIELD_FILLER_WORDS = new Set([
+      'mis', 'mi', 'su', 'sus', 'el', 'la', 'los', 'las', 'de', 'del',
+      'hijo', 'hija', 'hijos', 'hijas', 'y', 'and', 'e',
+    ]);
+    firstNames = [
+      ...new Set(
+        nameFieldRaw
+          .replace(/[.,]/g, ' ')
+          .split(/\s+/)
+          .map((w) => w.toLowerCase())
+          .filter((w) => w.length > 1 && !NAME_FIELD_FILLER_WORDS.has(w))
+      ),
+    ];
+  }
+
   // Encontrar los 2 MP3
   let versionA, versionB;
   try {
@@ -108,6 +131,7 @@ function parseArgs(argv) {
     lyricsText,
     useDemucs: !!args.demucs,
     duration: durationA,
+    firstNames,
   });
 
   let reportB = null;
@@ -119,6 +143,7 @@ function parseArgs(argv) {
       lyricsText,
       useDemucs: !!args.demucs,
       duration: durationB,
+      firstNames,
     });
   }
 
