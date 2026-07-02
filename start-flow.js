@@ -118,8 +118,17 @@ function writeToRunLog(chunk) {
   }
 }
 
+// Referencia al proceso del QA Dashboard mientras está corriendo, para poder
+// matarlo desde el handler de 'exit' si el proceso principal termina de
+// golpe (Ctrl+C, excepción no capturada) antes de llegar a su kill() normal
+// — si no, queda un servidor Express huérfano escuchando en el puerto 3000.
+let activeDashboardProcess = null;
+
 process.on('exit', () => {
   try { fs.closeSync(runLogFd); } catch {}
+  if (activeDashboardProcess && !activeDashboardProcess.killed) {
+    try { activeDashboardProcess.kill(); } catch {}
+  }
 });
 
 // Envuelve console.log/error para que todo lo que start-flow.js imprime (y todo
@@ -924,22 +933,28 @@ async function runFlow({ resume = false } = {}) {
 
       console.log('\n👉 Iniciando el QA Dashboard de lectura (puerto 3000)...');
       const dashboardProcess = spawn('node', ['qa-dashboard.js'], { stdio: 'inherit' });
-      
+      activeDashboardProcess = dashboardProcess;
+
       // Abrir el navegador automáticamente apuntando al dashboard de audio
       setTimeout(() => {
         spawn('powershell', ['-NoProfile', '-Command', 'Start-Process http://localhost:3000'], { stdio: 'ignore' }).unref();
       }, 1500);
 
-      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-      const versionChoice = await new Promise((resolve) => {
-        rl.question(`\n¿Subir Versión ${rec.recommended} al Flow? (s = sí, n = no subir, A/B = subir la otra): `, (answer) => {
-          rl.close();
-          resolve(answer.trim().toUpperCase());
+      let versionChoice;
+      try {
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+        versionChoice = await new Promise((resolve) => {
+          rl.question(`\n¿Subir Versión ${rec.recommended} al Flow? (s = sí, n = no subir, A/B = subir la otra): `, (answer) => {
+            rl.close();
+            resolve(answer.trim().toUpperCase());
+          });
         });
-      });
-
-      // Detener el servidor del dashboard de inmediato para liberar recursos
-      dashboardProcess.kill();
+      } finally {
+        // Pase lo que pase (excepción, respuesta normal), nunca dejar el
+        // dashboard corriendo en el puerto 3000.
+        dashboardProcess.kill();
+        activeDashboardProcess = null;
+      }
 
       let versionToUpload = null;
       if (versionChoice === 'S' || versionChoice === 'SI' || versionChoice === 'SÍ' || versionChoice === 'Y') {
