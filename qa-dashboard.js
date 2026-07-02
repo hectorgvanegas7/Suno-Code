@@ -12,8 +12,9 @@ const SONG_PATH = path.join(__dirname, 'song.txt');
 const SURVEY_PATH = path.join(__dirname, 'survey.txt');
 const SUNO_DIR = path.join(require('os').homedir(), 'Downloads', 'suno');
 
-// Serve MP3 files
+// Serve MP3 files and static dashboard assets (CSS/JS)
 app.use('/audio', express.static(SUNO_DIR));
+app.use(express.static(path.join(__dirname, 'public')));
 
 // Arma la tarjeta de una versión (A o B) — misma estructura para ambas,
 // solo cambian los datos que recibe.
@@ -91,114 +92,7 @@ app.get('/', (req, res) => {
 <head>
   <meta charset="UTF-8">
   <title>QA Dashboard - Canción Eterna</title>
-  <style>
-    :root {
-      --bg: #0f172a;
-      --surface: #1e293b;
-      --primary: #3b82f6;
-      --text: #f8fafc;
-      --text-muted: #94a3b8;
-      --success: #10b981;
-      --warning: #f59e0b;
-    }
-    body {
-      font-family: system-ui, -apple-system, sans-serif;
-      background: var(--bg);
-      color: var(--text);
-      margin: 0;
-      padding: 1.5rem;
-    }
-    .grid {
-      display: grid;
-      grid-template-columns: 1.150fr 1.150fr 1.3fr;
-      gap: 1.5rem;
-      max-width: 1600px;
-      margin: 0 auto;
-    }
-    .card {
-      background: var(--surface);
-      padding: 1.5rem;
-      border-radius: 1rem;
-      box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
-      display: flex;
-      flex-direction: column;
-      height: calc(100vh - 5rem);
-      box-sizing: border-box;
-    }
-    .card-title {
-      font-size: 1.4rem;
-      font-weight: bold;
-      margin-top: 0;
-      margin-bottom: 1rem;
-      border-bottom: 1px solid #334155;
-      padding-bottom: 0.5rem;
-    }
-    .scrollable-content {
-      flex: 1;
-      overflow-y: auto;
-      background: #0f172a;
-      border-radius: 0.5rem;
-      padding: 1rem;
-    }
-    .lyrics {
-      white-space: pre-wrap;
-      font-family: monospace;
-      font-size: 14px;
-      color: var(--text);
-      line-height: 1.6;
-    }
-    .survey-block {
-      font-size: 13.5px;
-      line-height: 1.6;
-      color: var(--text-muted);
-      margin-bottom: 1rem;
-    }
-    .survey-question {
-      font-weight: bold;
-      color: var(--text);
-      display: block;
-      margin-bottom: 0.2rem;
-    }
-    .survey-answer {
-      background: rgba(255,255,255,0.02);
-      padding: 0.5rem;
-      border-radius: 0.25rem;
-      border-left: 2px solid var(--primary);
-    }
-    .version-card {
-      margin-bottom: 1.2rem;
-      padding: 1.2rem;
-      border-radius: 0.75rem;
-      border: 1px solid #334155;
-      background: rgba(15, 23, 42, 0.4);
-    }
-    .version-card.recommended {
-      border-color: var(--success);
-      background: rgba(16, 185, 129, 0.04);
-    }
-    .badge {
-      display: inline-block;
-      padding: 0.25rem 0.5rem;
-      border-radius: 0.25rem;
-      font-size: 0.75rem;
-      font-weight: bold;
-      margin-right: 0.5rem;
-      margin-bottom: 0.5rem;
-    }
-    .badge-success { background: var(--success); color: white; }
-    .badge-warning { background: var(--warning); color: black; }
-    audio { width: 100%; margin-top: 0.75rem; }
-    .alert-box {
-      background: rgba(59, 130, 246, 0.1);
-      border: 1px solid var(--primary);
-      color: var(--text);
-      padding: 1rem;
-      border-radius: 0.5rem;
-      font-size: 14px;
-      text-align: center;
-      margin-top: auto;
-    }
-  </style>
+  <link rel="stylesheet" href="/dashboard.css">
 </head>
 <body>
   <div class="grid">
