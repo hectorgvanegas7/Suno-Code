@@ -21,6 +21,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { clickByText, ensurePortIsFree } = require('./lib/playwright-helpers');
 const { enterFlowAndEnsureAssignment } = require('./lib/flow-helpers');
+const { generate } = require('./lib/llm-provider');
 const pipelineState = require('./lib/pipeline-state');
 const { getSurveyHash, readCache, writeCache } = require('./lib/cache-helpers');
 const { extractFirstNames } = require('./lib/text-helpers');

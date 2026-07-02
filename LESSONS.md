@@ -851,3 +851,31 @@ by simply rerunning the script. Worth distinguishing from the deterministic
 "Assign Most Urgent Song" bug above — if the *same* script fails the *same*
 way 2-3 times in a row, that's a real bug, not flakiness; investigate instead
 of just retrying again.
+
+## Model IDs and API params guessed from training data instead of verified
+
+Over one session, `lib/llm-provider.js` got "fixed" three separate times by
+assuming instead of checking: removed `cache_control`'s `ttl: '1h'` believing
+it was an invalid field breaking Anthropic's prompt caching (it's real,
+documented syntax — removing it just silently shortened the cache window from
+1h to the 5min default); hardcoded a "Haiku → Sonnet" cost-escalation strategy
+using `claude-3-5-haiku-20241022` and `claude-3-5-sonnet-20241022` (both
+retired Anthropic snapshots — every real API call 404'd); and separately,
+`gemini-2.0-flash` sat hardcoded in the same file's Gemini branch, unnoticed
+because attention was on the Anthropic branch, months after Google shut that
+model down (would also 404 on every real call, silently, since Gemini was
+never the default provider being tested).
+
+**Fix:** verified every claim against live sources before touching the file
+again — the `claude-api` skill's cached model table for Anthropic, WebSearch +
+WebFetch for Gemini (no skill covers non-Anthropic providers). Corrected to
+`claude-sonnet-5`, restored `ttl: '1h'`, dropped the Haiku escalation
+entirely, updated to `gemini-3.5-flash`.
+
+**Takeaway:** model ID strings and API parameter names are exactly the kind of
+detail that looks plausible and is quietly wrong — a training-data guess reads
+identically to a correct answer until the API 404s in production. Before
+touching a model ID, a `cache_control`/`thinking`/other API-shape parameter,
+or "is X still current" for *any* provider (Anthropic or otherwise), verify
+against a live source first. Never assume a change someone describes as
+"corrected" or "restored" is actually reflected in the file — read it back.
