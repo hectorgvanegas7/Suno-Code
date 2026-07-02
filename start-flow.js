@@ -19,6 +19,13 @@
 //                                          small/CPU) en vez de --demucs, que
 //                                          es el default.
 //
+//   node start-flow.js --resume         -> retoma un pipeline cortado a mitad de
+//                                          camino usando state.json: salta los
+//                                          pasos ya completados (letra, Suno,
+//                                          Flow). NUNCA re-clickea Create — si
+//                                          los MP3 no están en disco, Create y
+//                                          descarga quedan manuales.
+//
 //   node start-flow.js --done           -> cierre: registra la canción en la
 //                                          hoja y marca el estado como completado.
 //                                          Se corre DESPUÉS de hacer Submit to QA.
@@ -637,15 +644,56 @@ async function askDoneQuestion() {
 }
 
 // ─── MODO normal: flujo completo ──────────────────────────────────────────────
-async function runFlow() {
+// Con resume=true retoma un pipeline cortado usando state.json: salta los pasos
+// cuya etapa ya quedó registrada. El caso ambiguo es un crash después de
+// suno-fill: no sabemos si Create llegó a clickearse, y un Create doble gasta
+// créditos de Suno — por eso en resume NUNCA se re-clickea Create; se buscan los
+// MP3 en disco con ventana amplia y, si no están, Create/descarga quedan manuales.
+async function runFlow({ resume = false } = {}) {
+  let resumeStage = null;
+  if (resume) {
+    const st = state.read();
+    if (!st) {
+      console.log('⚠️  --resume: no hay state.json — arrancando desde cero.\n');
+    } else if (st.stage === state.STAGES.COMPLETED) {
+      console.log(`--resume: "${st.titulo}" ya está marcada como completada. Nada que reanudar.`);
+      console.log('Para una canción nueva corré: node start-flow.js');
+      return;
+    } else {
+      resumeStage = st.stage;
+      console.log(`🔁 --resume: retomando "${st.titulo}" (${st.songId}) desde la etapa "${resumeStage}".\n`);
+    }
+  }
+  const skipGenerate = resumeStage !== null;
+  const skipSunoFill = resumeStage === state.STAGES.SUNO_FILLED || resumeStage === state.STAGES.FLOW_FILLED;
+  const skipFlowFill = resumeStage === state.STAGES.FLOW_FILLED;
+
   console.log('=== Paso 0/4: preflight ===');
   const pre = runPreflight();
   if (!pre.ok) {
     throw new Error('Preflight falló. Resolvé lo de arriba y volvé a correr.');
   }
 
-  console.log('\n=== Paso 1/4: generando letra (run.js) ===\n');
-  await runScript('run.js');
+  if (skipGenerate) {
+    console.log('\n=== Paso 1/4: SALTEADO (--resume) — usando song.txt existente ===');
+    const SONG_TXT = path.join(__dirname, 'song.txt');
+    if (!fs.existsSync(SONG_TXT)) {
+      throw new Error('--resume: no existe song.txt — no hay nada que retomar. Corré sin --resume.');
+    }
+    const { parseTituloFromSongFile } = require('./lib/audio-analysis');
+    const songTitulo = parseTituloFromSongFile(fs.readFileSync(SONG_TXT, 'utf-8'));
+    const stTitulo = state.read()?.titulo || null;
+    if (stTitulo && songTitulo && songTitulo !== stTitulo) {
+      throw new Error(
+        `--resume: song.txt es de otra canción ("${songTitulo}") — state.json dice "${stTitulo}". ` +
+        'No se puede retomar sin riesgo de mezclar canciones. Corré sin --resume.'
+      );
+    }
+    console.log(`  song.txt OK: "${songTitulo || stTitulo}"`);
+  } else {
+    console.log('\n=== Paso 1/4: generando letra (run.js) ===\n');
+    await runScript('run.js');
+  }
 
   console.log('\n=== Paso 2/4: verificando sesión de Suno ===');
   if (await isPortUp(DEBUG_PORT)) {
@@ -669,9 +717,13 @@ async function runFlow() {
     console.log('Login detectado.');
   }
 
-  console.log('\n=== Paso 3/4: llenando formulario de Suno (suno-fill.js) ===\n');
-  await runScript('suno-fill.js');
-  state.write({ stage: state.STAGES.SUNO_FILLED });
+  if (skipSunoFill) {
+    console.log('\n=== Paso 3/4: SALTEADO (--resume) — el formulario de Suno ya estaba llenado ===');
+  } else {
+    console.log('\n=== Paso 3/4: llenando formulario de Suno (suno-fill.js) ===\n');
+    await runScript('suno-fill.js');
+    state.write({ stage: state.STAGES.SUNO_FILLED });
+  }
 
   // Paso 3b: Create automático + esperar generación + descargar MP3s.
   // Se puede saltar con --no-auto-create para volver al flujo manual.
@@ -679,7 +731,29 @@ async function runFlow() {
   let mp3sDescargados = false;
   let verifyOk = false;
   let verifyPromise = null; // corre en paralelo con el Paso 4; se espera después
-  if (!noAutoCreate) {
+  if (skipSunoFill) {
+    // En resume no sabemos si el crash fue antes o después del click en Create.
+    // Re-clickearlo podría gastar créditos por duplicado, así que solo se buscan
+    // los MP3 en disco (ventana amplia de 180 min por si pasó un rato).
+    console.log('\n=== Paso 3b/4: --resume — buscando MP3s ya descargados (sin re-clickear Create) ===');
+    try {
+      const { findSunoMp3s } = require('./lib/audio-match');
+      const { versionA, versionB } = findSunoMp3s(state.read()?.titulo || null, { recencyMinutes: 180 });
+      mp3sDescargados = true;
+      console.log(`  ✅ MP3s encontrados: ${versionA.name}${versionB ? ` + ${versionB.name}` : ' (solo 1 versión)'}`);
+      if (!process.argv.includes('--no-auto-verify')) {
+        console.log('\n  ⏳ Análisis de audio lanzado en paralelo con el Paso 4 (Whisper + demucs)...');
+        verifyPromise = runVerifyAudio({ fast: process.argv.includes('--fast-verify') });
+      } else {
+        console.log('\n  (--no-auto-verify: saltando el análisis automático — corré node verify-audio.js a mano)');
+      }
+    } catch (e) {
+      console.log(`  ⚠️ No se encontraron MP3s en disco: ${e.message}`);
+      console.log('  Revisá Suno: si la generación ya corrió, descargá los 2 MP3 a Downloads/suno/');
+      console.log('  (o corré node suno-create.js si Create nunca llegó a clickearse).');
+      console.log('  El pipeline sigue con los pasos manuales de siempre.');
+    }
+  } else if (!noAutoCreate) {
     console.log('\n=== Paso 3b/4: Create + generación + descarga (suno-create-dl.js) ===');
     console.log('  (Pasá --no-auto-create para saltar este paso y hacer Create a mano)\n');
     try {
@@ -713,10 +787,14 @@ async function runFlow() {
     }
   }
 
-  console.log('\n=== Paso 4/4: llenando título/letra/notas en el Flow (flow-submit.js) ===');
-  await openFlowTabAndEnsureAssignment();
-  await runScript('flow-submit.js');
-  state.write({ stage: state.STAGES.FLOW_FILLED });
+  if (skipFlowFill) {
+    console.log('\n=== Paso 4/4: SALTEADO (--resume) — el Flow ya estaba llenado ===');
+  } else {
+    console.log('\n=== Paso 4/4: llenando título/letra/notas en el Flow (flow-submit.js) ===');
+    await openFlowTabAndEnsureAssignment();
+    await runScript('flow-submit.js');
+    state.write({ stage: state.STAGES.FLOW_FILLED });
+  }
 
   // Esperar el análisis que quedó corriendo en paralelo (Paso 3c) antes de
   // recomendar versión. runVerifyAudio nunca rechaza — resuelve false si falló.
@@ -929,6 +1007,7 @@ async function runPoll(rawArgs) {
 
   const isDone = rawArgs.includes('--done');
   const isPoll = rawArgs.includes('--poll');
+  const isResume = rawArgs.includes('--resume');
 
   if (isDone) {
     await runDone();
@@ -936,7 +1015,7 @@ async function runPoll(rawArgs) {
     await runPoll(rawArgs);
   } else {
     try {
-      await runFlow();
+      await runFlow({ resume: isResume });
     } catch (err) {
       if (err.noSong) {
         console.log('\nNo hay canciones en cola. Entrando en modo poll automático (intervalo: 59s)...\n');
