@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node --test",
     "flow": "node start-flow.js",
     "done": "node start-flow.js --done",
     "poll": "node start-flow.js --poll",
