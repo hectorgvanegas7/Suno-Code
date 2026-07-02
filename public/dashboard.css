@@ -94,6 +94,46 @@ body {
 .badge-success { background: var(--success); color: white; }
 .badge-warning { background: var(--warning); color: black; }
 audio { width: 100%; margin-top: 0.75rem; }
+.qa-detail {
+  margin-top: 0.75rem;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.qa-detail summary {
+  cursor: pointer;
+  color: var(--text);
+  font-weight: bold;
+  user-select: none;
+}
+.qa-detail-empty {
+  margin: 0.5rem 0 0 0;
+}
+.qa-check-list {
+  list-style: none;
+  margin: 0.5rem 0 0 0;
+  padding: 0;
+}
+.qa-check-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  padding: 0.15rem 0;
+}
+.qa-check-icon {
+  flex-shrink: 0;
+  width: 1rem;
+  text-align: center;
+  font-weight: bold;
+}
+.qa-check-ok { color: var(--success); }
+.qa-check-warn { color: var(--warning); }
+.qa-summary-text {
+  margin: 0.6rem 0 0 0;
+  padding-top: 0.5rem;
+  border-top: 1px solid #334155;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
 .alert-box {
   background: rgba(59, 130, 246, 0.1);
   border: 1px solid var(--primary);

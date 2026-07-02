@@ -16,6 +16,53 @@ const SUNO_DIR = path.join(require('os').homedir(), 'Downloads', 'suno');
 app.use('/audio', express.static(SUNO_DIR));
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Detalle expandible de los chequeos individuales de verify-audio.js para
+// una versión (los mismos campos que resumen los badges, desglosados).
+function renderQaDetail(versionReport) {
+  if (!versionReport) {
+    return `
+      <details class="qa-detail">
+        <summary>Ver detalle QA</summary>
+        <p class="qa-detail-empty">Sin datos de análisis para esta versión.</p>
+      </details>
+    `;
+  }
+
+  const missingNames = versionReport.missingNames || [];
+  const tagLeaking = versionReport.tagLeaking || [];
+  const letraOk = (versionReport.levenshteinScore || 0) >= 0.75;
+
+  const checks = [
+    { label: 'Duración en rango', ok: versionReport.durationOk, detail: versionReport.durationFormatted || 'N/A' },
+    { label: 'Fade out (sin corte abrupto)', ok: !versionReport.abruptCutoff },
+    { label: 'Sin clipping', ok: !versionReport.clippingFlag },
+    { label: 'Título no cantado', ok: !versionReport.titleCantado },
+    { label: 'Sin tags cantados', ok: !tagLeaking.length, detail: tagLeaking.join(', ') },
+    { label: 'Nombres presentes en el audio', ok: !missingNames.length, detail: missingNames.length ? `faltan: ${missingNames.join(', ')}` : '' },
+    { label: 'Match de letra (Levenshtein)', ok: letraOk, detail: `${Math.round((versionReport.levenshteinScore || 0) * 100)}%` },
+  ];
+  const passCount = checks.filter((c) => c.ok).length;
+
+  const rows = checks
+    .map(
+      (c) => `
+        <li>
+          <span class="qa-check-icon ${c.ok ? 'qa-check-ok' : 'qa-check-warn'}">${c.ok ? '✓' : '⚠'}</span>
+          <span>${c.label}${c.detail ? ` — ${c.detail}` : ''}</span>
+        </li>
+      `
+    )
+    .join('');
+
+  return `
+    <details class="qa-detail">
+      <summary>Ver detalle QA (${passCount}/${checks.length})</summary>
+      <ul class="qa-check-list">${rows}</ul>
+      ${versionReport.summary ? `<p class="qa-summary-text">${versionReport.summary}</p>` : ''}
+    </details>
+  `;
+}
+
 // Arma la tarjeta de una versión (A o B) — misma estructura para ambas,
 // solo cambian los datos que recibe.
 function renderVersionCard({ label, versionReport, score, filename, fileExists, isRecommended }) {
@@ -37,6 +84,7 @@ function renderVersionCard({ label, versionReport, score, filename, fileExists, 
         <span class="badge badge-success">Letra: ${letraMatch}% match</span>
       </div>
       ${audioTag}
+      ${renderQaDetail(versionReport)}
     </div>
   `;
 }
