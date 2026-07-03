@@ -109,10 +109,19 @@ async function fillSunoForm(page, titulo, voz, estilo, lyrics, genderTarget) {
 }
 
 (async () => {
+  if (!fs.existsSync(SONG_PATH)) {
+    throw new Error('No existe song.txt — corré primero node run.js (o node start-flow.js).');
+  }
   const songContent = fs.readFileSync(SONG_PATH, 'utf-8');
   const { titulo, voz, estilo, lyrics } = parseSongFile(songContent);
   if (!titulo || !voz || !estilo || !lyrics) {
-    throw new Error('No se pudo parsear song.txt completamente.');
+    const faltan = [
+      !titulo && '**Título:**',
+      !voz && '**Voz:**',
+      !estilo && '**Estilo Suno:**',
+      !lyrics && '[Verse 1] (letra)',
+    ].filter(Boolean).join(', ');
+    throw new Error(`No se pudo parsear song.txt completamente. Campos faltantes: ${faltan}.`);
   }
   const genderTarget = /femenin/i.test(voz) ? 'Female' : 'Male';
   console.log('Parseado de song.txt:');
@@ -204,16 +213,27 @@ async function fillSunoForm(page, titulo, voz, estilo, lyrics, genderTarget) {
   const weirdnessVal = await page.locator(`[role="slider"][aria-label="${WEIRDNESS_SLIDER_LABEL}"]`).getAttribute('aria-valuenow');
   const influenceVal = await page.locator(`[role="slider"][aria-label="${STYLE_INFLUENCE_SLIDER_LABEL}"]`).getAttribute('aria-valuenow');
 
+  const allSectionsPresent = ['[Verse 1]', '[Chorus 1]', '[Verse 2]', '[Chorus 2]', '[Bridge]', '[Outro]'].every((s) => lyricsValue.includes(s));
+  const endsCorrectly = lyricsValue.trim().endsWith(lyrics.trim().split('\n').pop().trim());
+
   console.log('\n--- Valores leidos del formulario ---');
   console.log('Title:', titleValue);
   console.log('Style:', styleValue);
   console.log('Weirdness:', weirdnessVal, 'Style Influence:', influenceVal);
   console.log('Lyrics value length:', lyricsValue.length);
-  console.log(
-    'Lyrics contains all sections:',
-    ['[Verse 1]', '[Chorus 1]', '[Verse 2]', '[Chorus 2]', '[Bridge]', '[Outro]'].every((s) => lyricsValue.includes(s))
-  );
-  console.log('Lyrics ends correctly:', lyricsValue.trim().endsWith(lyrics.trim().split('\n').pop().trim()));
+  console.log('Lyrics contains all sections:', allSectionsPresent);
+  console.log('Lyrics ends correctly:', endsCorrectly);
+
+  // Antes esto solo se logueaba y el pipeline seguía derecho al Create — una
+  // letra a medias en el editor podía terminar generada (créditos gastados en
+  // una canción truncada). Ahora una relectura fallida detiene y pide ojos.
+  if (!allSectionsPresent || !endsCorrectly) {
+    await pauseForHumanInteraction(
+      `La relectura del formulario de Suno no coincide con song.txt (` +
+      `secciones completas: ${allSectionsPresent}, final correcto: ${endsCorrectly}). ` +
+      'Revisá/corregí la letra en el editor de Suno manualmente antes de continuar.'
+    );
+  }
 
   console.log('\nFormulario completado. Revisando screenshots.');
 

@@ -37,6 +37,15 @@ Este archivo recopila propuestas de arquitectura, robustez y ahorro de costos pa
 *   **Monitoreo del Balance de Créditos de Suno:**
     *   *Detalle:* Leer el elemento HTML de créditos disponibles en la interfaz de Suno al iniciar. Si los créditos son insuficientes para generar las 2 versiones, notificar inmediatamente por consola/NTFY en vez de esperar el timeout en el botón "Create".
 
-## 5. Panel de Control de QA Local (Dashboard Express/React)
+## 5. Ideas post-refactor 2026-07-03 (checkpoints + dry-run del orquestador)
+*   **Checkpoint remoto desde el celular:** hoy los checkpoints piden ENTER en la terminal. ntfy.sh soporta publicar de vuelta al tópico — se puede escuchar el tópico y aceptar un "OK" desde la app del celular como confirmación, sin ir a la PC.
+*   **Screenshot adjunto en el ntfy del checkpoint:** ntfy soporta attachments (header `Attach`/PUT del archivo). Adjuntar `suno-verify-overview.png` al aviso del checkpoint pre-Create permitiría verificar la letra desde el celular.
+*   **Checksum de song.txt en state.json:** guardar un hash de song.txt al escribirlo; cada script que lo lea avisa si cambió inesperadamente. Habría detectado el clobbering del 2026-07-03 (un `run.js --dry-run` suelto pisó la letra real) en el acto.
+*   **Detector de drift de selectores:** script standalone que abre suno.com/create y verifica que TODOS los selectores de `lib/suno-selectors.js` sigan existiendo — aviso temprano de rediseños de Suno antes de que reviente a mitad de una canción.
+*   **Tests para los parsers de song.txt:** `parseSongFile` está duplicado-ish en suno-fill.js y flow-submit.js y solo se prueba en vivo. Extraerlo a `lib/` y cubrirlo en `test/` igual que song-validate.
+*   **Watchdog por paso:** timeout global configurable por etapa (ej. suno-create-dl > 15 min → ntfy urgent + pausa interactiva) para que un cuelgue silencioso nunca pase desapercibido.
+*   **Higiene automática:** rotar logs/ y screenshots/ de más de 30 días al final de cada corrida exitosa.
+
+## 6. Panel de Control de QA Local (Dashboard Express/React)
 *   **Consola de Aprobación Visual:**
     *   *Detalle:* Levantar un servidor Express local muy ligero que exponga una interfaz web simple. En ella, el operador de QA puede ver el survey original, la letra de Claude, el checklist de errores, y escuchar los MP3s descargados lado a lado, reduciendo los tiempos del proceso manual de QA antes del "Submit".

@@ -142,6 +142,9 @@ async function findNotesField(page) {
 
 (async () => {
   console.log('Leyendo song.txt...');
+  if (!fs.existsSync(SONG_PATH)) {
+    throw new Error('No existe song.txt — corré primero node run.js (o node start-flow.js).');
+  }
   const songContent = fs.readFileSync(SONG_PATH, 'utf-8');
   const { titulo, lyrics, notes } = parseSongFile(songContent);
   if (!titulo || !lyrics || !notes) {

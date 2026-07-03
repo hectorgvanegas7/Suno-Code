@@ -39,6 +39,22 @@
 //                                          10-15s. Acepta minutos ("3"), segundos
 //                                          ("30s") o rangos ("10-15s", "1-2").
 //
+//   node start-flow.js --dry-run        -> ensayo COMPLETO sin gastar nada:
+//                                          run.js con mock local (cero API),
+//                                          cero Chrome/Suno/Flow (todo simulado),
+//                                          pero ejercita de verdad los checkpoints
+//                                          de ENTER y las notificaciones ntfy.
+//                                          Respalda y restaura song.txt para no
+//                                          pisar una canción real en curso.
+//
+//   node start-flow.js --no-pause       -> desactiva los checkpoints de
+//                                          verificación humana (ENTER antes del
+//                                          Create de Suno y antes de subir el MP3
+//                                          al Flow). Para corridas desatendidas.
+//                                          El Submit to QA sigue siendo manual
+//                                          SIEMPRE (Regla Dura #1) — esto no lo
+//                                          toca ni lo puede tocar.
+//
 // Cada corrida escribe TODA su salida (la propia + la de cada script hijo:
 // run.js, suno-fill.js, flow-submit.js, upload-to-flow.js) en un único archivo
 // logs/run-<timestamp>.log, además de seguir mostrándola en la terminal como
@@ -87,7 +103,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const { chromium } = require('playwright');
-const { isLoggedIn, clickByText, isPortUp } = require('./lib/playwright-helpers');
+const { isLoggedIn, clickByText, isPortUp, confirmToContinue } = require('./lib/playwright-helpers');
 const { enterFlowAndEnsureAssignment, FLOW_URL } = require('./lib/flow-helpers');
 const { runPreflight } = require('./lib/preflight');
 const { notify } = require('./lib/ntfy');
@@ -95,6 +111,18 @@ const state = require('./lib/pipeline-state');
 const { LYRICS_TEXTAREA } = require('./lib/suno-selectors');
 
 const DEBUG_PORT = 9333;   // Chrome de Suno (ya corriendo para suno-fill y flow-submit)
+
+// Checkpoints de verificación humana (ENTER antes de actuar). Activos por
+// default — Hector quiere verificar TODO antes de que el bot actúe. Solo se
+// desactivan explícitamente con --no-pause (corridas desatendidas).
+const NO_PAUSE = process.argv.includes('--no-pause');
+async function checkpoint(summary, nextAction) {
+  if (NO_PAUSE) {
+    console.log(`\n(--no-pause: checkpoint salteado — ${nextAction})\n`);
+    return;
+  }
+  await confirmToContinue(summary, { nextAction });
+}
 const POLL_PORT  = 9333;   // Mismo puerto, reusamos el navegador abierto
 const FLOW_CREATE_URL = 'https://cancioneterna.com/artists/flow/create';
 const SCREENSHOTS_DIR = path.join(__dirname, 'screenshots');
@@ -830,6 +858,10 @@ async function runFlow({ resume = false } = {}) {
     const providerArg = process.argv.find((a) => a.startsWith('--provider='));
     const providerFlag = providerArg ? ` ${providerArg}` : '';
     await runScript(`run.js${providerFlag}`);
+    await notify(
+      `✅ Letra generada: "${state.read()?.titulo || '(título desconocido)'}"\nRevisá song.txt (abierto en Notepad). Siguiente: llenar Suno.`,
+      { title: 'Paso 1 completo: letra lista', priority: 'default', tags: 'white_check_mark' }
+    );
   }
 
   if (!skipSunoFill || !skipFlowFill) {
@@ -897,6 +929,17 @@ async function runFlow({ resume = false } = {}) {
       console.log('  El pipeline sigue con los pasos manuales de siempre.');
     }
   } else if (!noAutoCreate) {
+    // ✋ Checkpoint humano: el formulario ya está lleno y los screenshots de
+    // verificación en disco. Create gasta créditos de Suno — no se clickea
+    // sin un ENTER de confirmación (salvo --no-pause). Complementa (no
+    // reemplaza) la verificación visual no-negociable de CLAUDE.md.
+    await checkpoint(
+      `Formulario de Suno lleno para "${state.read()?.titulo || '(sin título)'}".\n` +
+      'Verificá los screenshots antes de gastar créditos:\n' +
+      '  • suno-verify-overview.png (título/estilo/sliders)\n' +
+      '  • suno-verify-lyrics-top.png (letra desde Verse 1)',
+      'clickear Create en Suno (gasta créditos) y descargar los 2 MP3'
+    );
     console.log('\n=== Paso 3b/4: Create + generación + descarga (suno-create-dl.js) ===');
     console.log('  (Pasá --no-auto-create para saltar este paso y hacer Create a mano)\n');
     try {
@@ -938,6 +981,10 @@ async function runFlow({ resume = false } = {}) {
     await openFlowTabAndEnsureAssignment();
     await runScript('flow-submit.js');
     state.write({ stage: state.STAGES.FLOW_FILLED });
+    await notify(
+      '✅ Flow lleno (título/letra/notas). Siguiente: recomendación de audio + subida del MP3.',
+      { title: 'Paso 4 completo: Flow lleno', priority: 'default', tags: 'white_check_mark' }
+    );
   }
 
   // Esperar el análisis que quedó corriendo en paralelo (Paso 3c) antes de
@@ -985,6 +1032,16 @@ async function runFlow({ resume = false } = {}) {
       }
     }
 
+    // ✋ Checkpoint humano: escuchar/decidir antes de que el bot suba nada al
+    // Flow. Acá es donde Hector puede cambiar de versión antes de que se pise
+    // el campo de archivo (salvo --no-pause).
+    await checkpoint(
+      `Listo para subir la Versión ${versionToUpload} al Flow (${uploadReason}).\n` +
+      (hayVersionB
+        ? `Si preferís la otra, después de esta subida corré: node upload-to-flow.js --version ${versionToUpload === 'B' ? 'A' : 'B'}`
+        : 'Solo hay una versión descargada.'),
+      `subir la Versión ${versionToUpload} al Flow (SIN Submit to QA — eso es siempre manual)`
+    );
     console.log(`\n🚀 Subiendo automáticamente la Versión ${versionToUpload} al Flow (${uploadReason})...`);
     try {
       await runScript(`upload-to-flow.js --version ${versionToUpload}`);
@@ -994,9 +1051,17 @@ async function runFlow({ resume = false } = {}) {
       if (hayVersionB) {
         console.log(`   (Si preferís la otra: node upload-to-flow.js --version ${otra} — pisa la subida en el Flow.)`);
       }
+      await notify(
+        `✅ Versión ${versionToUpload} subida al Flow (${uploadReason}).\nFalta SOLO tu Submit to QA manual.`,
+        { title: 'MP3 subido al Flow', priority: 'high', tags: 'white_check_mark' }
+      );
     } catch (e) {
       console.log(`\n⚠️ La subida automática de la Versión ${versionToUpload} falló: ${e.message}`);
       console.log(`   Podés reintentar subir manualmente con: node upload-to-flow.js --version ${versionToUpload}`);
+      await notify(
+        `⚠️ La subida automática de la Versión ${versionToUpload} falló: ${e.message}\nReintento manual: node upload-to-flow.js --version ${versionToUpload}`,
+        { title: 'Upload al Flow falló', priority: 'high', tags: 'warning' }
+      );
     }
   } else {
     console.log(
@@ -1194,6 +1259,87 @@ async function runFlow({ resume = false } = {}) {
 }
 
 // ─── MODO --poll: vigía de cola ───────────────────────────────────────────────
+// ─── Modo --dry-run: ensayo completo sin gastar nada ─────────────────────────
+// Corre run.js con el mock local (cero API de Claude/Gemini), NO toca Chrome,
+// Suno ni el Flow (esos pasos se simulan), pero ejercita DE VERDAD las dos
+// cosas que hay que poder probar sin una canción real: los checkpoints de
+// verificación humana (ENTER) y las notificaciones ntfy (marcadas [DRY-RUN]).
+// song.txt se respalda antes y se restaura SIEMPRE al final — el mock jamás
+// debe pisar la letra de una canción real en curso (mismo criterio que run.js
+// aplica a state.json y a la caché en --dry-run).
+async function runDryRun() {
+  console.log('🧪 MODO DRY-RUN — ensayo completo: mock local, cero API, cero Chrome/Suno/Flow.');
+  console.log(`📝 Log de esta corrida: ${RUN_LOG_PATH}\n`);
+
+  const SONG_TXT = path.join(__dirname, 'song.txt');
+  const BACKUP = SONG_TXT + '.dry-run-backup';
+  const hadRealSong = fs.existsSync(SONG_TXT);
+  if (hadRealSong) {
+    fs.copyFileSync(SONG_TXT, BACKUP);
+    console.log('🛟 song.txt actual respaldado (se restaura al final del ensayo).\n');
+  }
+
+  try {
+    console.log('=== Paso 0/4: preflight (informativo — en dry-run no aborta) ===');
+    try {
+      runPreflight();
+    } catch (e) {
+      console.log(`  (preflight lanzó "${e.message}" — se ignora en dry-run)`);
+    }
+
+    console.log('\n=== Paso 1/4: generando letra MOCK (run.js --dry-run, cero API) ===\n');
+    await runScript('run.js --dry-run');
+
+    // Verificación real: el mock tiene que ser parseable por los mismos
+    // regex que usan suno-fill.js y flow-submit.js — si esto falla, el
+    // pipeline real también fallaría después de gastar la llamada al LLM.
+    const mock = fs.readFileSync(SONG_TXT, 'utf-8');
+    const mockOk = /\*\*Título:\*\*\s*.+/i.test(mock) && /\[Verse 1\]/i.test(mock) && /\*\*Estilo Suno:\*\*\s*.+/i.test(mock);
+    if (!mockOk) throw new Error('El song.txt mock no pasa los parsers de suno-fill/flow-submit.');
+    console.log('  ✅ song.txt mock parseable por suno-fill.js y flow-submit.js.');
+    await notify('[DRY-RUN] ✅ Letra mock generada y parseada OK. Siguiente: checkpoint de Suno.', {
+      title: '[DRY-RUN] Paso 1 completo', priority: 'default', tags: 'test_tube',
+    });
+
+    console.log('\n=== Paso 2/4: SIMULADO — sesión de Suno (no se toca Chrome) ===');
+    console.log('=== Paso 3/4: SIMULADO — llenado del formulario de Suno ===');
+    await checkpoint(
+      '[DRY-RUN] Simulación: el formulario de Suno estaría lleno y los screenshots en disco.\n' +
+      'En una corrida real acá verificás suno-verify-overview.png y suno-verify-lyrics-top.png.',
+      '[DRY-RUN] simular el click en Create (no gasta créditos)'
+    );
+
+    console.log('=== Paso 3b/4: SIMULADO — Create + generación + descarga de MP3s ===');
+    console.log('=== Paso 3c/4: SIMULADO — verify-audio.js (Whisper/CLAP) ===');
+    console.log('=== Paso 4/4: SIMULADO — flow-submit.js (título/letra/notas en el Flow) ===');
+    await checkpoint(
+      '[DRY-RUN] Simulación: listo para subir la Versión B al Flow (recomendación simulada).',
+      '[DRY-RUN] simular la subida del MP3 (no toca el Flow — y NUNCA haría Submit to QA)'
+    );
+
+    await notify('[DRY-RUN] 🧪 Ensayo completo OK: letra mock, 2 checkpoints ENTER y notificaciones funcionando.', {
+      title: '[DRY-RUN] Pipeline OK', priority: 'default', tags: 'test_tube',
+    });
+    console.log('\n══════════════════════════════════════════════════════');
+    console.log('🧪 DRY-RUN COMPLETO — todo el circuito respondió:');
+    console.log('   • run.js generó y validó la letra mock (cero API).');
+    console.log('   • Los 2 checkpoints de ENTER pausaron y reanudaron.');
+    console.log('   • Las notificaciones ntfy se dispararon (revisá el celular).');
+    console.log('   • Regla Dura #1 intacta: el Submit to QA no existe en el código.');
+    console.log('══════════════════════════════════════════════════════');
+  } finally {
+    if (hadRealSong) {
+      fs.copyFileSync(BACKUP, SONG_TXT);
+      fs.unlinkSync(BACKUP);
+      console.log('\n🛟 song.txt real restaurado (el mock del ensayo no queda en disco).');
+    } else if (fs.existsSync(SONG_TXT)) {
+      // No había song.txt antes del ensayo — no dejar un mock con pinta de real.
+      fs.unlinkSync(SONG_TXT);
+      console.log('\n🧹 song.txt mock eliminado (no había canción en curso antes del ensayo).');
+    }
+  }
+}
+
 async function runPoll(rawArgs) {
   function ts() { return new Date().toLocaleTimeString('es', { hour12: false }); }
   function log(msg) { console.log(`[${ts()}] ${msg}`); }
@@ -1306,11 +1452,14 @@ async function runPoll(rawArgs) {
   const isDone = rawArgs.includes('--done');
   const isPoll = rawArgs.includes('--poll');
   const isResume = rawArgs.includes('--resume');
+  const isDryRun = rawArgs.includes('--dry-run');
 
   if (isDone) {
     await runDone();
   } else if (isPoll) {
     await runPoll(rawArgs);
+  } else if (isDryRun) {
+    await runDryRun();
   } else {
     try {
       await runFlow({ resume: isResume });
@@ -1334,5 +1483,9 @@ async function runPoll(rawArgs) {
   setTimeout(() => process.exit(0), 250);
 })().catch((err) => {
   console.error('Orquestación falló:', err);
-  process.exit(1);
+  // Aviso push del fallo fatal — notify tiene timeout interno de 8s y nunca
+  // rechaza, así que el exit no puede quedar colgado por esto.
+  notify(`❌ El pipeline se cayó: ${err.message || err}\nRevisá la terminal y el log: ${RUN_LOG_PATH}\nReanudar: node start-flow.js --resume`, {
+    title: 'Pipeline caído', priority: 'urgent', tags: 'rotating_light',
+  }).finally(() => process.exit(1));
 });
