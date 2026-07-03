@@ -80,9 +80,17 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
 
 8. **(automático)** Mientras tanto `start-flow.js` queda esperando (hasta 30 min
    desde la asignación, con un piso de 10 min de ventana real) y detecta el Submit
-   solo. Mientras espera muestra un timer en consola cada 30s y avisa por ntfy al
-   celular cuando se alcanza el rango seguro de Submit (25 min) y cuando se está
-   por exceder (30 min). Pollea "Recent completions" en `/artists/flow/create`
+   solo. Al arrancar la espera hace un **pre-chequeo del botón "Submit to QA"**
+   (solo verificación, jamás click — Regla Dura #1): si no está visible avisa por
+   consola + ntfy para descubrir un cambio de UI temprano. Mientras espera muestra
+   un **countdown en vivo por segundo** en la terminal (con `\r`, no infla el
+   run-log; el registro en disco sigue siendo la línea [Timer] de cada 30s), hace
+   **keep-alive de sesión** (scroll de 1px ida y vuelta en la pestaña del Flow
+   cada 5 min, para que la sesión no caduque mientras Gabo escucha/revisa) y tiene
+   **failsafe de suspensión**: si el reloj salta >2 min entre iteraciones (PC
+   suspendida), avisa por consola + ntfy urgent con el tiempo REAL transcurrido.
+   Avisa por ntfy al celular cuando se alcanza el rango seguro de Submit (25 min)
+   y cuando se está por exceder (30 min). Pollea "Recent completions" en `/artists/flow/create`
    usando una **pestaña dedicada en background** (nunca recarga la pestaña donde
    Gabo trabaja), verifica que el título de la primera card coincida con
    state.json (sin título en state.json NO auto-detecta — evitaría registrar la
@@ -171,6 +179,9 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
 - `suno-open-for-login.js` — Chrome standalone para login
 - `flow-submit.js` — llenado de Título/Letra/Notas en el Flow (`#title`/`#lyrics`/`#notes`),
   nunca clickea Complete Song/Submit to QA. Mismo fallback interactivo que suno-fill.js.
+  Si state.json marca `isRedo` Y el título coincide con song.txt, la nota es
+  "Redo Fix, corregido" (acordado con QC) — siempre APPENDEADA debajo del feedback
+  existente en el campo, nunca reemplazándolo.
 - `setup-whisper.js` — instala/verifica Python, faster-whisper, ffmpeg. Correr una vez.
 - `verify-audio.js` — analiza los 2 MP3 (duración + Whisper + comparación letra + nombres
   ausentes). INFORMA, no decide, no sube nada. Requiere setup-whisper.js previo. Con

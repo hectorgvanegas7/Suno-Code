@@ -13,6 +13,7 @@ const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 const { pauseForHumanInteraction, isPortUp } = require('./lib/playwright-helpers');
+const state = require('./lib/pipeline-state');
 
 const SONG_PATH = path.join(__dirname, 'song.txt');
 const DEBUG_PORT = 9333;
@@ -150,7 +151,16 @@ async function findNotesField(page) {
   if (!titulo || !lyrics || !notes) {
     throw new Error('No se pudo parsear título, letra o NOTES de song.txt — ¿archivo corrupto o truncado?');
   }
-  const flowNotes = buildFlowNotes(notes);
+  let flowNotes = buildFlowNotes(notes);
+  // REDO: nota simplificada acordada con QC. Solo se confía en state.json si
+  // el título coincide con song.txt (nunca asumir que state es de esta canción
+  // — ver lib/pipeline-state.js). Se APPENDEA debajo del feedback existente en
+  // el campo, jamás lo reemplaza (el campo #notes es compartido con QC).
+  const st = state.read();
+  if (st && st.isRedo && st.titulo === titulo) {
+    flowNotes = 'Redo Fix, corregido';
+    console.log('  REDO detectado (state.json) — nota para el Flow: "Redo Fix, corregido" (se agrega debajo del feedback existente).');
+  }
   console.log('  Título:', titulo);
   console.log('  Lyrics length:', lyrics.length, 'chars');
   console.log('  Notes (para el Flow):', flowNotes);

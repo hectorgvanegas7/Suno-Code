@@ -1112,6 +1112,29 @@ async function runFlow({ resume = false } = {}) {
     const ctx = browser.contexts()[0];
     workPage = ctx ? ctx.pages().find((p) => p.url().includes('cancioneterna.com')) : null;
 
+    // Pre-chequeo del botón "Submit to QA" (SOLO verificación — este código
+    // JAMÁS lo clickea, Regla Dura #1): confirmar AHORA que existe y está
+    // visible, para enterarse de un cambio de UI del Flow al minuto 5 y no
+    // descubrirlo al minuto 28 con la ventana encima.
+    if (workPage) {
+      try {
+        const submitBtn = workPage.getByRole('button', { name: /submit to qa|complete song/i }).first();
+        const submitVisible = await submitBtn.isVisible({ timeout: 5000 }).catch(() => false);
+        if (submitVisible) {
+          console.log('  ✅ Pre-chequeo: el botón "Submit to QA" está visible y listo para TU click.');
+        } else {
+          console.log('  ⚠️ Pre-chequeo: NO se encuentra el botón "Submit to QA" visible en la pestaña del Flow.');
+          console.log('     ¿Cambió la UI, falta scrollear, o la asignación no está cargada? Revisalo ANTES de que corra la ventana.');
+          await notify(
+            '⚠️ Pre-chequeo: no se ve el botón "Submit to QA" en el Flow. Revisá la pestaña antes de que pase la ventana de submit.',
+            { title: 'Pre-chequeo Submit falló', priority: 'high', tags: 'warning' }
+          ).catch(() => {});
+        }
+      } catch (e) {
+        console.log(`  ⚠️ Pre-chequeo del botón Submit no se pudo ejecutar (${e.message}) — seguí igual, es solo un aviso.`);
+      }
+    }
+
     if (workPage) {
       await workPage.evaluate((url) => {
         let iframe = document.getElementById('poll-iframe-hidden');
@@ -1178,23 +1201,72 @@ async function runFlow({ resume = false } = {}) {
   let lastLogTime = 0;
   let notifiedSafe = false;
   let notifiedDanger = false;
+  let notifiedSuspend = false;
+
+  // Keep-alive de sesión: scroll de 1px (ida y vuelta) en la pestaña del Flow
+  // cada 5 min, para que la sesión no caduque por inactividad mientras Hector
+  // escucha los MP3 y revisa. No toca el formulario, no roba foco, no clickea.
+  const KEEP_ALIVE_MS = 5 * 60 * 1000;
+  let lastKeepAlive = Date.now();
+  // Failsafe de suspensión: el loop itera cada ~5s — si entre dos vueltas el
+  // reloj saltó minutos, la PC se suspendió y el tiempo REAL siguió corriendo.
+  let lastLoopTick = Date.now();
 
   if (pollTarget) {
+    // Countdown en vivo (cada segundo, en la MISMA línea de terminal con \r).
+    // process.stdout.write a propósito: el console.log parchado copia todo al
+    // run-log y 1800 líneas de ticker lo inflarían — el estado ya queda
+    // registrado con la línea [Timer] de cada 30s.
+    const ticker = setInterval(() => {
+      const mins = (Date.now() - startedTime) / 60000;
+      let msg;
+      if (mins < 25) msg = `⏳ ${mins.toFixed(1)} min — ventana de Submit (25-30 min) en ~${(25 - mins).toFixed(1)} min`;
+      else if (mins <= 30) msg = `✅ ${mins.toFixed(1)} min — VENTANA ABIERTA: hacé Submit to QA cuando estés conforme`;
+      else msg = `⚠️ ${mins.toFixed(1)} min — pasado el rango: hacé Submit to QA YA`;
+      process.stdout.write(`\r[Countdown] ${msg}      `);
+    }, 1000);
+    if (typeof ticker.unref === 'function') ticker.unref();
+
     while (Date.now() < deadline) {
       const elapsedMs = Date.now() - startedTime;
       const elapsedMin = elapsedMs / 60000;
+      const now = Date.now();
+
+      // Failsafe de suspensión (aviso — el Submit sigue siendo tuyo, así que
+      // acá no hay nada que "cancelar": solo enterarte del tiempo real).
+      if (now - lastLoopTick > 120000 && !notifiedSuspend) {
+        notifiedSuspend = true;
+        const jumpMin = ((now - lastLoopTick) / 60000).toFixed(1);
+        console.log(`\n⚠️ Salto de reloj detectado (~${jumpMin} min sin ejecutar): la PC parece haberse suspendido.`);
+        console.log(`   Tiempo REAL desde la asignación: ${elapsedMin.toFixed(1)} min — tenelo en cuenta antes de tu Submit.`);
+        await notify(
+          `⚠️ La PC se suspendió ~${jumpMin} min con la canción abierta. Tiempo real: ${elapsedMin.toFixed(1)} min desde la asignación. Revisá antes de hacer Submit.`,
+          { title: 'Salto de reloj detectado', priority: 'urgent', tags: 'zzz,warning' }
+        ).catch(() => {});
+      }
+      lastLoopTick = now;
+
+      // Keep-alive de sesión del Flow
+      if (workPage && now - lastKeepAlive >= KEEP_ALIVE_MS) {
+        lastKeepAlive = now;
+        try {
+          await workPage.evaluate(() => { window.scrollBy(0, 1); window.scrollBy(0, -1); });
+          console.log(`\n[Keep-alive] Sesión del Flow refrescada (scroll 1px) a los ${elapsedMin.toFixed(1)} min.`);
+        } catch {
+          // Pestaña cerrada o navegada — el chequeo de puerto de abajo decide si abortar.
+        }
+      }
 
       // Imprimir el estado del timer en consola cada 30 segundos
-      const now = Date.now();
       if (now - lastLogTime >= 30000) {
         lastLogTime = now;
         if (elapsedMin < 25) {
           const remainingMin = Math.ceil(25 - elapsedMin);
-          console.log(`[Timer] ⏳ Transcurrido: ${elapsedMin.toFixed(1)} min. Faltan ~${remainingMin} min para el Submit seguro (rango 25-30 min). NO hagas click todavía.`);
+          console.log(`\n[Timer] ⏳ Transcurrido: ${elapsedMin.toFixed(1)} min. Faltan ~${remainingMin} min para el Submit seguro (rango 25-30 min). NO hagas click todavía.`);
         } else if (elapsedMin <= 30) {
-          console.log(`[Timer] ✅ ¡TIEMPO SEGURO! Transcurrido: ${elapsedMin.toFixed(1)} min. Ya podés hacer click en "Submit to QA".`);
+          console.log(`\n[Timer] ✅ ¡TIEMPO SEGURO! Transcurrido: ${elapsedMin.toFixed(1)} min. Ya podés hacer click en "Submit to QA".`);
         } else {
-          console.log(`[Timer] ⚠️ RIESGO DE EXCEDER: Transcurrido: ${elapsedMin.toFixed(1)} min. ¡Hacé click en "Submit to QA" cuanto antes!`);
+          console.log(`\n[Timer] ⚠️ RIESGO DE EXCEDER: Transcurrido: ${elapsedMin.toFixed(1)} min. ¡Hacé click en "Submit to QA" cuanto antes!`);
         }
       }
 
@@ -1232,6 +1304,8 @@ async function runFlow({ resume = false } = {}) {
       }
       await new Promise((r) => setTimeout(r, pollIntervalMs));
     }
+    clearInterval(ticker);
+    process.stdout.write('\n'); // cerrar la línea del countdown antes de seguir logueando
     if (pollMode === 'iframe' && workPage) {
       await workPage.evaluate(() => {
         const iframe = document.getElementById('poll-iframe-hidden');
