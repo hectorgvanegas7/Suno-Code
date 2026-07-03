@@ -765,6 +765,10 @@ process.on('uncaughtException', async (err) => {
     }
   }
 })().catch((err) => {
-  console.error('Automation failed:', err);
+  if (err.noSong) {
+    console.log('No hay canciones urgentes en cola en este momento.');
+  } else {
+    console.error('Automation failed:', err);
+  }
   disconnectCdp().finally(() => exitAfterDelay(err.noSong ? 2 : 1));
 });
