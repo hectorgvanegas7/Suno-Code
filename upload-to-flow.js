@@ -20,6 +20,7 @@
 
 const { chromium } = require('playwright');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { findSunoMp3s } = require('./lib/audio-match');
 const { pauseForHumanInteraction, isPortUp } = require('./lib/playwright-helpers');
@@ -167,11 +168,51 @@ function parseArgs(argv) {
     }
   }
 
+  // Preparar el archivo a subir: QA quiere el nombre limpio (solo el título,
+  // sin fecha ni sufijo A/B interno) en la UI del Flow. Antes de confiar en el
+  // título de state.json para renombrar, lo cruzamos contra song.txt — si no
+  // coinciden (state.json desactualizado por un REDO o una corrida cortada a
+  // mitad de camino), NUNCA renombramos: se sube el archivo original tal cual,
+  // para no arriesgar un nombre incorrecto en el Flow (ver lib/pipeline-state.js).
+  let uploadPath = mp3Path;
+  try {
+    const current = state.read();
+    const songContent = fs.existsSync(SONG_PATH) ? fs.readFileSync(SONG_PATH, 'utf-8') : '';
+    const songTxtTitle = parseTitulo(songContent);
+
+    if (current && current.songId && current.titulo) {
+      if (songTxtTitle && songTxtTitle !== current.titulo) {
+        console.warn(`  ⚠️ Peligro: El título en state.json ("${current.titulo}") no coincide con song.txt ("${songTxtTitle}"). Se sube el archivo original sin renombrar.`);
+      } else {
+        const destDir = path.join(__dirname, 'mp3');
+        if (!fs.existsSync(destDir)) fs.mkdirSync(destDir);
+        const cleanTitle = current.titulo.replace(/[<>:"\/\\|?*]+/g, '').trim();
+
+        // Backup en mp3/ con Song ID — único por convención (CLAUDE.md), para
+        // que dos canciones con el mismo título nunca se pisen el archivo.
+        const backupName = `${current.songId} - ${cleanTitle}.mp3`;
+        fs.copyFileSync(mp3Path, path.join(destDir, backupName));
+        console.log(`  📁 Copia de respaldo guardada en: mp3/${backupName}`);
+
+        // Copia aparte con nombre 100% limpio (sin Song ID) SOLO para subir al
+        // Flow — en un temp, no en mp3/, para no repetir el riesgo de colisión
+        // por título duplicado en la carpeta de respaldo.
+        const uploadDestPath = path.join(os.tmpdir(), `${cleanTitle}.mp3`);
+        fs.copyFileSync(mp3Path, uploadDestPath);
+        uploadPath = uploadDestPath;
+      }
+    } else {
+      console.warn('  ⚠️ state.json incompleto o ausente. Se sube el archivo original sin renombrar.');
+    }
+  } catch (e) {
+    console.warn(`  ⚠️ No se pudo preparar el archivo con nombre limpio: ${e.message}`);
+  }
+
   // Subir el archivo
-  console.log(`\n⬆️  Subiendo: ${path.basename(mp3Path)}`);
+  console.log(`\n⬆️  Subiendo: ${path.basename(uploadPath)}`);
   try {
     if (fileInput) {
-      await fileInput.setInputFiles(mp3Path);
+      await fileInput.setInputFiles(uploadPath);
       await page.waitForTimeout(2000);
     }
   } catch (e) {
@@ -179,42 +220,19 @@ function parseArgs(argv) {
     await pauseForHumanInteraction('Ocurrió un error intentando subir el MP3. Por favor, súbelo manualmente al Flow y presiona ENTER al finalizar.');
   }
 
-  // Verificar que la UI muestre el archivo cargado
+  // Verificar que la UI muestre el archivo cargado — chequear el nombre que
+  // REALMENTE se subió (uploadPath), no el original: si se renombró, el Flow
+  // muestra el nombre limpio y buscar el original acá siempre daría falso negativo.
   const uploadConfirmed = await page.evaluate((filename) => {
     // Buscar el nombre del archivo en el DOM (suele aparecer cerca del input)
     const text = document.body.innerText || '';
     return text.includes(filename) || document.querySelector('audio[src]') !== null;
-  }, path.basename(mp3Path)).catch(() => false);
+  }, path.basename(uploadPath)).catch(() => false);
 
   await page.screenshot({ path: 'flow-upload-verify.png', fullPage: true });
 
   if (uploadConfirmed) {
     console.log('  ✅ Archivo visible en la UI del Flow.');
-
-    try {
-      const current = state.read();
-      const songContent = fs.existsSync(SONG_PATH) ? fs.readFileSync(SONG_PATH, 'utf-8') : '';
-      const songTxtTitle = parseTitulo(songContent);
-
-      if (current && current.songId && current.titulo) {
-        if (songTxtTitle && songTxtTitle !== current.titulo) {
-          console.warn(`  ⚠️ Peligro: El título en state.json ("${current.titulo}") no coincide con song.txt ("${songTxtTitle}"). Copia en mp3/ abortada para evitar renombrar incorrectamente.`);
-        } else {
-          const destDir = path.join(__dirname, 'mp3');
-          if (!fs.existsSync(destDir)) fs.mkdirSync(destDir);
-          const cleanTitle = current.titulo.replace(/[<>:"\/\\|?*]+/g, '').trim();
-          const newName = `${current.songId} - ${cleanTitle}.mp3`;
-          const destPath = path.join(destDir, newName);
-          fs.copyFileSync(mp3Path, destPath);
-          console.log(`  📁 Copia de respaldo organizada guardada en: mp3/${newName}`);
-        }
-      } else {
-        console.warn(`  ⚠️ state.json incompleto o ausente. Copia en mp3/ abortada.`);
-      }
-    } catch (e) {
-      console.error(`  ⚠️ No se pudo guardar la copia organizada en mp3/: ${e.message}`);
-    }
-
   } else {
     console.log('  ⚠️  No se pudo confirmar que el archivo quedó en la UI (revisá flow-upload-verify.png).');
   }

@@ -501,21 +501,32 @@ async function disconnectCdp() {
   }
 }
 
+// Windows (libuv): cerrar el socket CDP y llamar process.exit() en el mismo
+// tick puede crashear con "Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)"
+// — verificado empíricamente con el código de salida 2 (cola vacía). El delay
+// le da tiempo al event loop a limpiar el socket antes de forzar la salida.
+// Se aplica a los 4 puntos de salida que siguen a disconnectCdp(), no solo al
+// que lo disparó originalmente, porque el patrón (close + exit inmediato) es
+// el mismo en los cuatro.
+function exitAfterDelay(code) {
+  setTimeout(() => process.exit(code), 250);
+}
+
 // Ctrl+C y señales de terminación del SO: desconectar antes de salir.
 process.on('SIGINT', async () => {
   console.log('\nSeñal de interrupción recibida — desconectando de Chrome (queda abierto)...');
   await disconnectCdp();
-  process.exit(0);
+  exitAfterDelay(0);
 });
 process.on('SIGTERM', async () => {
   await disconnectCdp();
-  process.exit(0);
+  exitAfterDelay(0);
 });
 // Excepción no atrapada: desconectar antes de morir
 process.on('uncaughtException', async (err) => {
   console.error('Excepción no controlada:', err);
   await disconnectCdp();
-  process.exit(1);
+  exitAfterDelay(1);
 });
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -742,5 +753,5 @@ process.on('uncaughtException', async (err) => {
   }
 })().catch((err) => {
   console.error('Automation failed:', err);
-  disconnectCdp().finally(() => process.exit(err.noSong ? 2 : 1));
+  disconnectCdp().finally(() => exitAfterDelay(err.noSong ? 2 : 1));
 });

@@ -76,9 +76,11 @@
 // scripts solo se desconectan del socket CDP (browser.close() sobre
 // connectOverCDP desconecta, no mata Chrome — verificado en Playwright 1.61).
 //
-// El modo --poll usa el puerto 9334 (distinto del de Suno, 9333). Antes de lanzar
-// el flujo, cierra su Chrome y espera a que el puerto caiga — señal concreta de que
-// el proceso murió y el perfil quedó libre. Nunca un sleep fijo. Ver LESSONS.md.
+// El modo --poll reusa el MISMO puerto 9333 (unificado — antes usaba 9334 con
+// un Chrome propio que abría/cerraba en cada corrida). Ya no abre ni mata una
+// ventana aparte: se conecta a la instancia existente vía withCdp(), igual que
+// el resto del flujo. bringToFront() solo se llama al abrir la pestaña por
+// primera vez o al encontrar canción nueva, para no robar foco en cada poll.
 
 const { spawn } = require('child_process');
 const fs = require('fs');
@@ -92,7 +94,7 @@ const state = require('./lib/pipeline-state');
 const { LYRICS_TEXTAREA } = require('./lib/suno-selectors');
 
 const DEBUG_PORT = 9333;   // Chrome de Suno (ya corriendo para suno-fill y flow-submit)
-const POLL_PORT  = 9334;   // Chrome propio del modo --poll (se abre y cierra dentro del modo)
+const POLL_PORT  = 9333;   // Mismo puerto, reusamos el navegador abierto
 const FLOW_CREATE_URL = 'https://cancioneterna.com/artists/flow/create';
 const SCREENSHOTS_DIR = path.join(__dirname, 'screenshots');
 const CHROME_PATH = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
@@ -375,24 +377,10 @@ function launchPollerChrome() {
   ).unref();
 }
 
-// Mata el Chrome del poller filtrando por su puerto — nunca por imagen (mataría
-// el Chrome personal de Gabo). Usa PowerShell/CIM para filtrar por línea de cmd.
-function closePollerChrome() {
-  return new Promise((resolve) => {
-    const cmd =
-      `Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" | ` +
-      `Where-Object { $_.CommandLine -like '*--remote-debugging-port=${POLL_PORT}*' } | ` +
-      `ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`;
-    const child = spawn('powershell', ['-NoProfile', '-Command', cmd], { stdio: 'ignore' });
-    child.on('exit', () => resolve());
-    child.on('error', () => resolve());
-  });
-}
-
 // Un ciclo de poll: conecta al Chrome del poller, intenta asegurar asignación.
 // Devuelve { found: true, title } si agarró una canción, { found: false } si la cola está vacía.
 async function pollOnce(log) {
-  const browser = await chromium.connectOverCDP(`http://localhost:${POLL_PORT}`);
+  return await withCdp(async (browser) => {
   try {
     const contexts = browser.contexts();
     if (contexts.length === 0) return { found: false };
@@ -400,7 +388,9 @@ async function pollOnce(log) {
     let page = ctx.pages().find((p) => p.url().includes('cancioneterna.com'));
     const needNavigate = !page;
     if (!page) page = await ctx.newPage();
-    await page.bringToFront();
+    if (needNavigate) {
+      await page.bringToFront();
+    }
 
     if (page.url().includes('/sign-in')) {
       log('⚠️ El Flow pide login. Iniciá sesión en la ventana del poller y va a seguir solo.');
@@ -412,15 +402,22 @@ async function pollOnce(log) {
       if (result.entered !== true) return { found: false };
       let title = null;
       try { title = (await page.locator('#title').inputValue()).trim() || null; } catch {}
+      await page.close().catch(() => {});
       return { found: true, title };
     } catch {
       // enterFlowAndEnsureAssignment tira si no hay #lyrics NI botón Assign utilizable.
       // En sequía lo normal es que Assign no traiga nada: cola vacía, no error fatal.
       return { found: false };
     }
-  } finally {
-    await browser.close().catch(() => {});
+  } catch (err) {
+    // Error de conexión/CDP (ej. el browser cacheado se desconectó a mitad de
+    // poll) — antes burbujeaba hasta el catch de runPoll y quedaba logueado;
+    // withCdp lo intercepta acá, así que lo logueamos nosotros para no perder
+    // visibilidad de fallos recurrentes.
+    log(`⚠️ Error en pollOnce (no fatal, reintento luego): ${err.message}`);
+    return { found: false };
   }
+  });
 }
 
 // ─── Extracción de tiempo desde "Recent completions" ─────────────────────────
@@ -1004,10 +1001,19 @@ async function runFlow({ resume = false } = {}) {
     return;
   }
 
+  const startedAtStr = state.read()?.startedAt;
+  const startedTime = startedAtStr ? new Date(startedAtStr).getTime() : Date.now();
+  // Piso mínimo: si los pasos automáticos previos (Suno, --demucs) ya consumieron
+  // gran parte (o todo) del rango de 25-30 min desde la asignación, igual
+  // garantizamos una ventana real de detección — si no, con una corrida lenta
+  // el while de abajo podría arrancar ya vencido y nunca llegar a pollear.
+  const MIN_POLL_WINDOW_MS = 10 * 60 * 1000;
+  const deadline = Math.max(startedTime + 30 * 60 * 1000, Date.now() + MIN_POLL_WINDOW_MS);
+
   console.log('\n==================================================================');
   console.log('🛑 Hacé click en "Submit to QA" manualmente en el navegador.');
   console.log('⏳ El script detectará la finalización y registrará en Sheets automáticamente...');
-  console.log('   (Espera máxima: 15 min. Fallback manual: node start-flow.js --done)');
+  console.log('   (Espera máxima: 30 min desde asignación. Fallback manual: node start-flow.js --done)');
   console.log('==================================================================\n');
 
   // Pestaña dedicada para el poll (se abre una sola vez y se cierra al final).
@@ -1027,16 +1033,56 @@ async function runFlow({ resume = false } = {}) {
 
   let completion = null;
   const pollIntervalMs = 5000;
-  const deadline = Date.now() + 15 * 60 * 1000;
+  let lastLogTime = 0;
+  let notifiedSafe = false;
+  let notifiedDanger = false;
 
   if (pollPage) {
     while (Date.now() < deadline) {
+      const elapsedMs = Date.now() - startedTime;
+      const elapsedMin = elapsedMs / 60000;
+
+      // Imprimir el estado del timer en consola cada 30 segundos
+      const now = Date.now();
+      if (now - lastLogTime >= 30000) {
+        lastLogTime = now;
+        if (elapsedMin < 25) {
+          const remainingMin = Math.ceil(25 - elapsedMin);
+          console.log(`[Timer] ⏳ Transcurrido: ${elapsedMin.toFixed(1)} min. Faltan ~${remainingMin} min para el Submit seguro (rango 25-30 min). NO hagas click todavía.`);
+        } else if (elapsedMin <= 30) {
+          console.log(`[Timer] ✅ ¡TIEMPO SEGURO! Transcurrido: ${elapsedMin.toFixed(1)} min. Ya podés hacer click en "Submit to QA".`);
+        } else {
+          console.log(`[Timer] ⚠️ RIESGO DE EXCEDER: Transcurrido: ${elapsedMin.toFixed(1)} min. ¡Hacé click en "Submit to QA" cuanto antes!`);
+        }
+      }
+
+      // Notificaciones automáticas a ntfy (al celular)
+      if (elapsedMin >= 25 && !notifiedSafe) {
+        notifiedSafe = true;
+        console.log('\n🔔 [NOTIFICACIÓN] ¡TIEMPO SEGURO ALCANZADO! Enviando aviso...');
+        await notify(`✅ ¡Tiempo seguro alcanzado! (${elapsedMin.toFixed(1)} min). Ya podés hacer click en "Submit to QA".`, {
+          title: 'Cancion Eterna: Submit Seguro',
+          priority: 'high',
+          tags: 'bell,musical_note'
+        }).catch(() => {});
+      }
+
+      if (elapsedMin >= 30 && !notifiedDanger) {
+        notifiedDanger = true;
+        console.log('\n🔔 [NOTIFICACIÓN] ⚠️ RIESGO LÍMITE: Llevás más de 30 min. ¡Hacé click ya!');
+        await notify(`⚠️ Riesgo: Llevás ${elapsedMin.toFixed(1)} min. Hacé click en "Submit to QA" para no excederte del rango.`, {
+          title: 'Cancion Eterna: ¡Alerta Límite!',
+          priority: 'urgent',
+          tags: 'warning,exclamation'
+        }).catch(() => {});
+      }
+
       try {
         completion = await readRecentCompletion(currentTitulo, { page: pollPage });
         if (completion) break;
       } catch (e) {
         // Título aún no coincide / formulario aún sin enviar — seguir esperando.
-        // Pero si Chrome se cerró, no tiene sentido seguir 15 minutos a ciegas.
+        // Pero si Chrome se cerró, no tiene sentido seguir esperando a ciegas.
         if (!(await isPortUp(DEBUG_PORT))) {
           console.log('\n⚠️ Chrome se cerró — la auto-detección no puede continuar.');
           break;
@@ -1070,25 +1116,39 @@ async function runPoll(rawArgs) {
 
   const pollIdx = rawArgs.indexOf('--poll');
   const afterPoll = rawArgs[pollIdx + 1];
-  // Si el siguiente arg empieza con '-' es otra flag, no el intervalo
-  const intervalArg = (afterPoll && !afterPoll.startsWith('-')) ? afterPoll : '3';
-  const isSeconds = intervalArg.toLowerCase().endsWith('s');
-  const intervalMs = isSeconds
-    ? parseFloat(intervalArg) * 1000
-    : parseFloat(intervalArg) * 60 * 1000;
-  const intervalLabel = isSeconds ? `${parseFloat(intervalArg)}s` : `${parseFloat(intervalArg)} min`;
-
-  log(`Vigía de cola iniciado. Revisando cada ${intervalLabel}. (Ctrl+C para detener.)`);
-  log(`Log de esta corrida: ${RUN_LOG_PATH}`);
-
-  // Chequeo de seguridad: no arrancar si hay Suno vivo en el puerto de Suno.
-  if (await isSunoSessionLive()) {
-    log('⚠️ Hay una sesión de Suno abierta (puerto 9333). Cerrá esa ventana antes de usar el poller');
-    log('   para que no se pisen los perfiles de Chrome. Saliendo sin tocar nada.');
-    process.exit(1);
+  // Si el siguiente arg empieza con '-' es otra flag, no el intervalo. Por defecto 10-15s.
+  const intervalArg = (afterPoll && !afterPoll.startsWith('-')) ? afterPoll : '10-15s';
+  
+  let minMs, maxMs, isRange = false, intervalLabel;
+  
+  if (intervalArg.includes('-')) {
+    isRange = true;
+    const parts = intervalArg.split('-');
+    const minVal = parseFloat(parts[0]);
+    const maxPart = parts[1];
+    const isSec = maxPart.toLowerCase().endsWith('s');
+    const maxVal = parseFloat(maxPart);
+    
+    const factor = isSec ? 1000 : 60000;
+    minMs = minVal * factor;
+    maxMs = maxVal * factor;
+    intervalLabel = isSec ? `${minVal}-${maxVal}s` : `${minVal}-${maxVal} min`;
+  } else {
+    const isSeconds = intervalArg.toLowerCase().endsWith('s');
+    const val = parseFloat(intervalArg);
+    const factor = isSeconds ? 1000 : 60000;
+    minMs = val * factor;
+    maxMs = val * factor;
+    intervalLabel = isSeconds ? `${val}s` : `${val} min`;
   }
 
-  // Asegurar el Chrome del poller arriba en el puerto 9334.
+  log(`Vigía de cola iniciado. Revisando en rango ${intervalLabel}. (Ctrl+C para detener.)`);
+  log(`Log de esta corrida: ${RUN_LOG_PATH}`);
+
+
+
+  // Asegurar que haya un Chrome arriba en el puerto 9333 (propio o el de Suno,
+  // ahora es el mismo puerto). Si ya está arriba (ej. Suno abierto) no se lanza nada nuevo.
   if (!(await isPortUp(POLL_PORT))) {
     log('Abriendo la ventana de Chrome del poller...');
     launchPollerChrome();
@@ -1127,26 +1187,20 @@ async function runPoll(rawArgs) {
         process.exit(1);
       }
 
-      log('Cerrando la ventana del poller para liberar el perfil de Chrome...');
-      await closePollerChrome();
 
-      // Esperar señal concreta: puerto caído = proceso muerto = perfil desbloqueado.
-      // Nunca un sleep fijo — ver LESSONS.md.
-      for (let i = 0; i < 20 && (await isPortUp(POLL_PORT)); i++) {
-        await new Promise((r) => setTimeout(r, 500));
-      }
-      if (await isPortUp(POLL_PORT)) {
-        log('❌ El Chrome del poller no se cerró a tiempo. Cerrá Chrome manualmente y corrí: node start-flow.js');
-        process.exit(1);
-      }
 
-      log('Chrome cerrado. Arrancando el pipeline...\n');
+      log('Arrancando el pipeline...\n');
       await runFlow();
       return; // runFlow() ya loguea el resultado final
     }
 
-    log(`Aún no hay canciones. Próximo intento en ${intervalLabel}.`);
-    await new Promise((r) => setTimeout(r, intervalMs));
+    const currentIntervalMs = isRange
+      ? Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs
+      : minMs;
+    const nextLabel = (currentIntervalMs / 1000).toFixed(1) + 's';
+
+    log(`Aún no hay canciones. Próximo intento en ${nextLabel}.`);
+    await new Promise((r) => setTimeout(r, currentIntervalMs));
   }
 }
 
@@ -1185,8 +1239,8 @@ async function runPoll(rawArgs) {
       await runFlow({ resume: isResume });
     } catch (err) {
       if (err.noSong) {
-        console.log('\nNo hay canciones en cola. Entrando en modo poll automático (intervalo: 59s)...\n');
-        await runPoll(['--poll', '59s']);
+        console.log('\nNo hay canciones en cola. Entrando en modo poll automático (intervalo: 10-15s)...\n');
+        await runPoll(['--poll', '10-15s']);
       } else {
         throw err;
       }
@@ -1197,8 +1251,10 @@ async function runPoll(rawArgs) {
   // connectOverCDP mantiene vivo el event loop de Node (verificado en
   // Playwright 1.61) — sin esto el orquestador queda colgado al terminar.
   // browser.close() sobre CDP solo desconecta; Chrome queda abierto.
+  // El delay de 250ms antes de exit() evita el mismo crash de libuv en Windows
+  // que se vio en run.js (close() + process.exit() en el mismo tick) — ver run.js.
   if (cachedBrowser) await cachedBrowser.close().catch(() => {});
-  process.exit(0);
+  setTimeout(() => process.exit(0), 250);
 })().catch((err) => {
   console.error('Orquestación falló:', err);
   process.exit(1);
