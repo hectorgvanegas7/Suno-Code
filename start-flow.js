@@ -47,13 +47,14 @@
 //                                          Respalda y restaura song.txt para no
 //                                          pisar una canción real en curso.
 //
-//   node start-flow.js --no-pause       -> desactiva los checkpoints de
-//                                          verificación humana (ENTER antes del
-//                                          Create de Suno y antes de subir el MP3
-//                                          al Flow). Para corridas desatendidas.
-//                                          El Submit to QA sigue siendo manual
-//                                          SIEMPRE (Regla Dura #1) — esto no lo
-//                                          toca ni lo puede tocar.
+//   node start-flow.js --pause          -> activa checkpoints de verificación
+//                                          humana (ENTER antes del Create de Suno
+//                                          y antes de subir el MP3 al Flow), con
+//                                          beep + ntfy. Por DEFAULT están
+//                                          desactivados: la única interacción
+//                                          manual del flujo normal es el Submit
+//                                          to QA (Regla Dura #1 — eso es manual
+//                                          SIEMPRE, con o sin este flag).
 //
 // Cada corrida escribe TODA su salida (la propia + la de cada script hijo:
 // run.js, suno-fill.js, flow-submit.js, upload-to-flow.js) en un único archivo
@@ -112,13 +113,14 @@ const { LYRICS_TEXTAREA } = require('./lib/suno-selectors');
 
 const DEBUG_PORT = 9333;   // Chrome de Suno (ya corriendo para suno-fill y flow-submit)
 
-// Checkpoints de verificación humana (ENTER antes de actuar). Activos por
-// default — Hector quiere verificar TODO antes de que el bot actúe. Solo se
-// desactivan explícitamente con --no-pause (corridas desatendidas).
-const NO_PAUSE = process.argv.includes('--no-pause');
+// Checkpoints de verificación humana (ENTER antes de actuar). DESACTIVADOS
+// por default: Hector quiere el flujo original donde su ÚNICA interacción es
+// el Submit to QA manual (2026-07-03). Se activan solo con --pause explícito.
+// (--no-pause se acepta por compatibilidad, pero ya es el comportamiento default.)
+const PAUSE_MODE = process.argv.includes('--pause') && !process.argv.includes('--no-pause');
 async function checkpoint(summary, nextAction) {
-  if (NO_PAUSE) {
-    console.log(`\n(--no-pause: checkpoint salteado — ${nextAction})\n`);
+  if (!PAUSE_MODE) {
+    console.log(`\n▶️  ${nextAction} (sin pausa — corré con --pause si querés confirmar con ENTER acá)\n`);
     return;
   }
   await confirmToContinue(summary, { nextAction });
@@ -1397,7 +1399,9 @@ async function runDryRun() {
     console.log('\n══════════════════════════════════════════════════════');
     console.log('🧪 DRY-RUN COMPLETO — todo el circuito respondió:');
     console.log('   • run.js generó y validó la letra mock (cero API).');
-    console.log('   • Los 2 checkpoints de ENTER pausaron y reanudaron.');
+    console.log(PAUSE_MODE
+      ? '   • Los 2 checkpoints de ENTER pausaron y reanudaron (--pause).'
+      : '   • Checkpoints desactivados (default) — el flujo corre de un tirón hasta tu Submit. Probálos con --pause.');
     console.log('   • Las notificaciones ntfy se dispararon (revisá el celular).');
     console.log('   • Regla Dura #1 intacta: el Submit to QA no existe en el código.');
     console.log('══════════════════════════════════════════════════════');

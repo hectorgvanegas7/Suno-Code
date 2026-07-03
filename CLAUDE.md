@@ -115,11 +115,12 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
   abierto y el título coincide. Si falla, queda vacío para que Gabo lo llene a mano.
 - **La verificación visual antes de Create NO es opcional** — ya atrapó defectos
   reales (ej. el bloque "Advertencias" colándose dentro de la letra). Nunca saltearla.
-- **Checkpoints de verificación humana**: start-flow.js pausa con ENTER (beep +
-  ntfy) ANTES del Create de Suno (gasta créditos) y ANTES de subir el MP3 al
-  Flow. `confirmToContinue` en `lib/playwright-helpers.js` (checkpoint amistoso)
+- **Checkpoints de verificación humana (opt-in)**: con `--pause`, start-flow.js
+  pausa con ENTER (beep + ntfy) ANTES del Create de Suno y ANTES de subir el MP3
+  al Flow. Por default NO pausan (la única interacción manual es el Submit).
+  `confirmToContinue` en `lib/playwright-helpers.js` (checkpoint amistoso)
   convive con `pauseForHumanInteraction` (fallback de emergencia) — no
-  confundirlos. `--no-pause` los saltea; el Submit manual no se toca jamás.
+  confundirlos. El Submit manual no se toca jamás.
   Además, suno-fill.js ahora DETIENE (pausa interactiva) si la relectura del
   formulario no coincide con song.txt (secciones faltantes o final truncado),
   en vez de solo loguearlo y dejar que el Create gaste créditos en una letra rota.
@@ -228,11 +229,12 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
     VERDAD los checkpoints de ENTER y las notificaciones ntfy (marcadas
     [DRY-RUN]). Respalda song.txt antes y lo restaura SIEMPRE al final — el
     mock nunca pisa una canción real en curso.
-  - `node start-flow.js --no-pause` = desactiva los 2 checkpoints de verificación
-    humana (ENTER antes del Create de Suno y antes de subir el MP3 al Flow) para
-    corridas desatendidas. Por default los checkpoints están ACTIVOS: pausan,
-    hacen beep, avisan por ntfy y esperan ENTER. No afecta la Regla Dura #1
-    (el Submit to QA no existe en el código, con o sin flag).
+  - `node start-flow.js --pause` = activa los 2 checkpoints de verificación
+    humana (ENTER antes del Create de Suno y antes de subir el MP3 al Flow):
+    pausan, hacen beep, avisan por ntfy y esperan ENTER. Por DEFAULT están
+    DESACTIVADOS (decisión de Gabo 2026-07-03): la única interacción manual del
+    flujo normal es el Submit to QA. No afecta la Regla Dura #1 (el Submit to
+    QA no existe en el código, con o sin flag).
   - `node start-flow.js --done` = cierre: registra en la hoja + marca state.json.
   - `node start-flow.js --poll [N]` = vigía de cola. Default: intervalo aleatorio
     10-15s. Acepta minutos ("3"), segundos ("30s") o rangos ("10-15s", "1-2").
