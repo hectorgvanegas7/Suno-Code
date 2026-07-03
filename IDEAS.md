@@ -40,11 +40,11 @@ Este archivo recopila propuestas de arquitectura, robustez y ahorro de costos pa
 ## 5. Ideas post-refactor 2026-07-03 (checkpoints + dry-run del orquestador)
 *   **Checkpoint remoto desde el celular:** hoy los checkpoints piden ENTER en la terminal. ntfy.sh soporta publicar de vuelta al tópico — se puede escuchar el tópico y aceptar un "OK" desde la app del celular como confirmación, sin ir a la PC.
 *   **Screenshot adjunto en el ntfy del checkpoint:** ntfy soporta attachments (header `Attach`/PUT del archivo). Adjuntar `suno-verify-overview.png` al aviso del checkpoint pre-Create permitiría verificar la letra desde el celular.
-*   **Checksum de song.txt en state.json:** guardar un hash de song.txt al escribirlo; cada script que lo lea avisa si cambió inesperadamente. Habría detectado el clobbering del 2026-07-03 (un `run.js --dry-run` suelto pisó la letra real) en el acto.
-*   **Detector de drift de selectores:** script standalone que abre suno.com/create y verifica que TODOS los selectores de `lib/suno-selectors.js` sigan existiendo — aviso temprano de rediseños de Suno antes de que reviente a mitad de una canción.
-*   **Tests para los parsers de song.txt:** `parseSongFile` está duplicado-ish en suno-fill.js y flow-submit.js y solo se prueba en vivo. Extraerlo a `lib/` y cubrirlo en `test/` igual que song-validate.
+*   ✅ **Checksum de song.txt en state.json (implementado 2026-07-03):** `startNew()` en `lib/pipeline-state.js` guarda `songTxtHash` (sha256 corto) al generar. `suno-fill.js` y `flow-submit.js` llaman `state.checkSongTxtContent()` al leer song.txt y avisan (advertencia, no abort — Gabo puede editar a mano) si el hash no coincide. Cubierto en `test/pipeline-state.test.js` vía la función pura `songTxtMatchesState` (nunca toca el state.json real en los tests).
+*   **Detector de drift de selectores:** script standalone que abre suno.com/create y verifica que TODOS los selectores de `lib/suno-selectors.js` sigan existiendo — aviso temprano de rediseños de Suno antes de que reviente a mitad de una canción. (Sigue pendiente — requiere abrir una sesión real de Suno.)
+*   ✅ **Tests para los parsers de song.txt (implementado 2026-07-03):** `parseSongFile` (antes duplicado en suno-fill.js y flow-submit.js, y una tercera variante suelta en lib/sheets-core.js) se unificó en `lib/song-file.js`, cubierto por `test/song-file.test.js`.
 *   **Watchdog por paso:** timeout global configurable por etapa (ej. suno-create-dl > 15 min → ntfy urgent + pausa interactiva) para que un cuelgue silencioso nunca pase desapercibido.
-*   **Higiene automática:** rotar logs/ y screenshots/ de más de 30 días al final de cada corrida exitosa.
+*   ✅ **Higiene automática (implementado 2026-07-03):** `lib/hygiene.js` (`rotateOldRunFiles`) borra archivos de `logs/` y `screenshots/` de más de 30 días, llamado al final de un `--done` exitoso en `start-flow.js`. Cubierto en `test/hygiene.test.js` (carpeta temporal propia, nunca toca logs/screenshots reales).
 
 ## 6. Panel de Control de QA Local (Dashboard Express/React)
 *   **Consola de Aprobación Visual:**

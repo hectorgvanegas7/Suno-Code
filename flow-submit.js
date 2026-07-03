@@ -14,28 +14,11 @@ const fs = require('fs');
 const path = require('path');
 const { pauseForHumanInteraction, isPortUp } = require('./lib/playwright-helpers');
 const state = require('./lib/pipeline-state');
+const { parseSongFile } = require('./lib/song-file');
 
 const SONG_PATH = path.join(__dirname, 'song.txt');
 const DEBUG_PORT = 9333;
 const SCREENSHOT_PATH = path.join(__dirname, 'flow-submit-verify.png');
-
-function parseSongFile(content) {
-  const titulo = (content.match(/\*\*Título:\*\*\s*(.+)/i) || [])[1]?.trim();
-  const verseIndex = content.search(/\[Verse 1\]/i);
-  let lyricsEndIndex = content.indexOf('---', verseIndex);
-  if (lyricsEndIndex === -1) {
-    const qa = content.search(/\*\*QA Checklist:\*\*/i);
-    const adv = content.search(/\*\*Advertencias:\*\*/i);
-    const notes = content.search(/NOTES:/i);
-    lyricsEndIndex = [qa, adv, notes].filter(i => i !== -1).sort((a, b) => a - b)[0];
-  }
-  const lyrics = verseIndex !== -1
-    ? content.slice(verseIndex, lyricsEndIndex).trim()
-    : null;
-  const notesMatch = content.match(/NOTES:\s*([\s\S]+)/i);
-  const notes = notesMatch ? notesMatch[1].trim() : null;
-  return { titulo, lyrics, notes };
-}
 
 // Strips "Song ID: xxxx" when building the text for the Flow's Notes field.
 // The portal already has its own Song ID field — repeating it in Notes is redundant.
@@ -151,6 +134,10 @@ async function findNotesField(page) {
     throw new Error('No existe song.txt — corré primero node run.js (o node start-flow.js).');
   }
   const songContent = fs.readFileSync(SONG_PATH, 'utf-8');
+  const hashCheck = state.checkSongTxtContent(songContent);
+  if (!hashCheck.ok) {
+    console.warn(`⚠️  ${hashCheck.reason}`);
+  }
   const { titulo, lyrics, notes } = parseSongFile(songContent);
   if (!titulo || !lyrics || !notes) {
     throw new Error('No se pudo parsear título, letra o NOTES de song.txt — ¿archivo corrupto o truncado?');

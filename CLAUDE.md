@@ -157,9 +157,11 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
 - `lib/song-validate.js` — `hardValidate`, `validateContentForWrite`, `parseSections`,
   `extractField`: la validación estructural dura de la letra (movida desde `run.js` para
   poder testearla sin ejecutar el pipeline entero). Cubierta por
-  `test/song-validate.test.js` (`npm test`, 19 casos, 100% local sin API — incluye las
-  regresiones reales de LESSONS.md: límites de palabra con tildes, N/A condicional,
-  preámbulo antes de Título, símbolos no-✓ en el checklist, nombres multi-destinatario).
+  `test/song-validate.test.js`, parte de la suite completa (`npm test`, 53 casos entre
+  todos los `test/*.test.js`, 100% local sin API — incluye las regresiones reales de
+  LESSONS.md: límites de palabra con tildes, N/A condicional, preámbulo antes de
+  Título, símbolos no-✓ en el checklist, nombres multi-destinatario, respelling
+  fonético, hash de song.txt, rotación de logs, parseo de sesión).
   ⚠️ Cada regla nueva del `SYSTEM_PROMPT` de `run.js` debe chequearse contra este
   validador Y agregarse un caso al test.
 - `lib/llm-provider.js` — `generate(provider, surveyText, systemPrompt, isDryRun)`:
@@ -176,6 +178,23 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
   destinatario filtrando palabras de relleno (mis/hijos/y/...). Único lugar donde
   vive esta lógica — la usan `run.js` y `verify-audio.js`, nunca duplicarla de nuevo
   (ver el bug multi-destinatario en LESSONS.md, que fue justo por tener esto duplicado).
+  También `extractLyricNameVariants(lyricsText, firstNames)`: empareja el nombre de
+  encuesta con su variante fonética real en la letra (ej. "Jamie"→"Yeimi") para que
+  `missingNames` en `lib/audio-analysis.js` no marque como "ausente" un nombre que
+  Suno sí cantó, solo reescrito (ver LESSONS.md, auditoría 2026-07-03).
+- `lib/song-file.js` — `parseSongFile(content)`: parser único de song.txt
+  (título/voz/estilo/letra/notes/songId). Único lugar donde vive esta lógica —
+  la usan `suno-fill.js`, `flow-submit.js` y `lib/sheets-core.js`, nunca duplicarla
+  de nuevo (había 3 copias divergentes hasta la auditoría 2026-07-03, LESSONS.md).
+- `lib/session-time.js` — `parseSessionTime(text)`: parsea el texto de duración de
+  "Recent completions" ("26 min session", "1h 5min session", "1h session") a
+  `{ timeHHMM, totalTimeDecimal }`. Extraída de start-flow.js para poder testearla
+  (start-flow.js no es un módulo requireable). Ver LESSONS.md por el bug real que
+  tenía la rama de horas exactas (inalcanzable por el selector de DOM que la
+  alimentaba, arreglado en la misma auditoría 2026-07-03).
+- `lib/hygiene.js` — `rotateOldRunFiles()`: borra archivos de `logs/` y
+  `screenshots/` de más de 30 días. Se llama al final de un `start-flow.js --done`
+  exitoso (best-effort, nunca lanza ni bloquea el cierre de la canción).
 - `suno-fill.js` — llenado de Suno (canónico; suno-fill2.js fue fusionado y borrado).
   Si un selector de la UI falla, cae a `pauseForHumanInteraction` en vez de matar
   el proceso — ver `lib/playwright-helpers.js`.
@@ -309,6 +328,10 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
   scripts, para detectar si se está por procesar la canción equivocada. `upload-to-flow.js`
   y `start-flow.js` lo cruzan contra `song.txt`/`verify-report.json` antes de confiar
   en ellos — nunca asumir que un archivo en disco es de la canción actual solo porque existe.
+  También guarda `songTxtHash` (hash de song.txt al momento de `startNew()`);
+  `suno-fill.js` y `flow-submit.js` llaman `checkSongTxtContent()` al leer song.txt y
+  avisan (nunca abortan — Gabo puede editar a mano) si cambió sin explicación desde que
+  se generó — pensado para detectar un `--dry-run` suelto pisando la letra real.
 - `lib/sheets-core.js` — lógica de registro en la hoja, importable (la usa sheets.js y
   el modo --done de start-flow).
 - `lib/preflight.js` — health-check (API key, credenciales, deps) antes de arrancar.

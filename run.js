@@ -29,6 +29,7 @@ const pipelineState = require('./lib/pipeline-state');
 const { getSurveyHash, readCache, writeCache } = require('./lib/cache-helpers');
 const { hardValidate, validateContentForWrite, extractField, convertJsonToMarkdown, isSafeToPatch } = require('./lib/song-validate');
 const { patchSongLines } = require('./lib/song-corrector');
+const { extractFirstNames } = require('./lib/text-helpers');
 
 const args = process.argv.slice(2);
 const isDryRun = args.includes('--dry-run');
@@ -649,8 +650,11 @@ process.on('uncaughtException', async (err) => {
     const surveyContent = fs.readFileSync(SURVEY_PATH, 'utf-8');
 
     // --- Pre-validación rápida de la encuesta ---
-    const recipientMatch = surveyContent.match(/(?:What's their name|recipient(?:'s)? name)\?:\s*(.+)/i);
-    if (!recipientMatch || !recipientMatch[1].trim() || recipientMatch[1].trim() === 'N/A') {
+    // Reusa extractFirstNames (lib/text-helpers.js) en vez de un regex propio:
+    // ese ya tolera apóstrofes rectos y curvos ("What's"/"What's") y filtra
+    // palabras de relleno — un regex separado acá había divergido y no
+    // reconocía el apóstrofe curvo, generando falsos positivos de "sin nombre".
+    if (extractFirstNames(surveyContent).length === 0) {
       console.warn('\n⚠️ ADVERTENCIA: La encuesta no tiene el nombre del destinatario ("What\'s their name?:").');
       console.warn('   Las reglas del prompt exigen un nombre. Esto provocará alucinaciones.');
     }

@@ -110,6 +110,8 @@ const { runPreflight } = require('./lib/preflight');
 const { notify } = require('./lib/ntfy');
 const state = require('./lib/pipeline-state');
 const { LYRICS_TEXTAREA } = require('./lib/suno-selectors');
+const { rotateOldRunFiles } = require('./lib/hygiene');
+const { parseSessionTime } = require('./lib/session-time');
 
 const DEBUG_PORT = 9333;   // Chrome de Suno (ya corriendo para suno-fill y flow-submit)
 
@@ -436,41 +438,9 @@ async function pollOnce(log) {
 // ─── Extracción de tiempo desde "Recent completions" ─────────────────────────
 
 // Parsea "26 min session", "1h 5min session", "26min", etc.
-// Devuelve { timeHHMM, totalTimeDecimal } o null si el formato no se reconoce.
-function parseSessionTime(text) {
-  if (!text) return null;
-  const hourMin = text.match(/(\d+)\s*h\s*(\d+)\s*min/i);
-  if (hourMin) {
-    const h = parseInt(hourMin[1], 10);
-    const m = parseInt(hourMin[2], 10);
-    const totalMin = h * 60 + m;
-    return {
-      timeHHMM: `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`,
-      totalTimeDecimal: Math.round((totalMin / 60) * 100) / 100,
-    };
-  }
-  const minOnly = text.match(/(\d+)\s*min/i);
-  if (minOnly) {
-    const totalMin = parseInt(minOnly[1], 10);
-    const h = Math.floor(totalMin / 60);
-    const m = totalMin % 60;
-    return {
-      timeHHMM: `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`,
-      totalTimeDecimal: Math.round((totalMin / 60) * 100) / 100,
-    };
-  }
-  // "1h session" / "2 h session" — horas exactas sin minutos (sin esto, una
-  // sesión de exactamente 1 hora tiraría "No se pudo parsear tiempo").
-  const hourOnly = text.match(/(\d+)\s*h(?:r|our)?s?\b/i);
-  if (hourOnly) {
-    const h = parseInt(hourOnly[1], 10);
-    return {
-      timeHHMM: `${String(h).padStart(2, '0')}:00`,
-      totalTimeDecimal: h,
-    };
-  }
-  return null;
-}
+// parseSessionTime vive en lib/session-time.js (extraída de acá para poder
+// testearla sin requerir este archivo, que no es un módulo — corre su
+// pipeline entero al cargarse).
 
 // Playwright no expone una clase común para distinguir Page de Frame en runtime:
 // un Frame tiene goto()/evaluate() igual que Page, pero NO tiene isClosed(),
@@ -550,7 +520,12 @@ async function readRecentCompletion(expectedTitulo, { page: providedPage = null 
       const titleEl = firstCard.querySelector('.font-medium.text-slate-900');
       const metaDiv = firstCard.querySelector('.text-xs.text-slate-500');
       const spans = metaDiv ? Array.from(metaDiv.querySelectorAll('span')) : [];
-      const sessionSpan = spans.find((s) => /\d+\s*(h\s*\d*\s*min|min)/i.test(s.textContent));
+      // Acepta "Xh Ymin", "Y min" y también horas exactas sin minutos
+      // ("1h session", "2 hours session") — sin la tercera alternativa,
+      // una sesión de exactamente N horas nunca matchea acá (queda
+      // sessionText null) y parseSessionTime()'s hourOnly branch (pensado
+      // justo para ese caso) nunca llega a ejecutarse.
+      const sessionSpan = spans.find((s) => /\d+\s*(h\s*\d*\s*min|min|h(?:r|our)?s?\b)/i.test(s.textContent));
 
       // Índice global para usarlo como nth() en Playwright
       const allCards = Array.from(document.querySelectorAll('.rounded-xl.border.border-slate-100'));
@@ -732,6 +707,15 @@ async function runDone(passedCompletion = null) {
     const remarkDraft = buildRemarkDraft();
     console.log('\n📝 Borrador de Remarks (no se escribe solo — copialo si querés usarlo):');
     console.log(`   "${remarkDraft}"`);
+
+    // ── Higiene: rotar logs/ y screenshots/ de más de 30 días ───────────────
+    // Solo al final de una corrida exitosa (acá, no en --dry-run). Best-effort:
+    // nunca debe interrumpir el cierre de la canción ya registrada.
+    try {
+      rotateOldRunFiles();
+    } catch (e) {
+      console.warn(`⚠️  Higiene de logs/screenshots falló (no crítico): ${e.message}`);
+    }
 
   } else if (result.reason === 'duplicate') {
     console.log('\n(No se registró de nuevo — ya estaba en la hoja.)');

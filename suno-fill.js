@@ -3,26 +3,10 @@ const fs = require('fs');
 const path = require('path');
 const { safeClick, setSliderValue, expandIfCollapsed, withReloadRetry, connectToSunoTab, pauseForHumanInteraction, isPortUp } = require('./lib/playwright-helpers');
 const { LYRICS_TEXTAREA, TITLE_INPUT, STYLE_TEXTAREA, MORE_OPTIONS_TOGGLE_TEXT, WEIRDNESS_SLIDER_LABEL, STYLE_INFLUENCE_SLIDER_LABEL, EXPAND_LYRICS_BOX_LABEL } = require('./lib/suno-selectors');
+const { parseSongFile } = require('./lib/song-file');
+const state = require('./lib/pipeline-state');
 
 const SONG_PATH = path.join(__dirname, 'song.txt');
-
-function parseSongFile(content) {
-  const titulo = (content.match(/\*\*Título:\*\*\s*(.+)/i) || [])[1]?.trim();
-  const voz = (content.match(/\*\*Voz:\*\*\s*(.+)/i) || [])[1]?.trim();
-  const estilo = (content.match(/\*\*Estilo Suno:\*\*\s*(.+)/i) || [])[1]?.trim();
-  const verseIndex = content.search(/\[Verse 1\]/i);
-  let endIndex = content.indexOf('---', verseIndex);
-  if (endIndex === -1) {
-    const qa = content.search(/\*\*QA Checklist:\*\*/i);
-    const adv = content.search(/\*\*Advertencias:\*\*/i);
-    const notes = content.search(/NOTES:/i);
-    endIndex = [qa, adv, notes].filter(i => i !== -1).sort((a, b) => a - b)[0];
-  }
-  const lyrics = verseIndex !== -1
-    ? content.slice(verseIndex, endIndex).trim()
-    : null;
-  return { titulo, voz, estilo, lyrics };
-}
 
 // Fills every field of Suno's Advanced create form. All text-based selectors
 // live in here so that withReloadRetry can re-run this entire function from
@@ -117,6 +101,10 @@ async function fillSunoForm(page, titulo, voz, estilo, lyrics, genderTarget) {
     throw new Error('No existe song.txt — corré primero node run.js (o node start-flow.js).');
   }
   const songContent = fs.readFileSync(SONG_PATH, 'utf-8');
+  const hashCheck = state.checkSongTxtContent(songContent);
+  if (!hashCheck.ok) {
+    console.warn(`⚠️  ${hashCheck.reason}`);
+  }
   const { titulo, voz, estilo, lyrics } = parseSongFile(songContent);
   if (!titulo || !voz || !estilo || !lyrics) {
     const faltan = [

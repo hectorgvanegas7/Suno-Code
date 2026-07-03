@@ -25,13 +25,10 @@ const path = require('path');
 const { findSunoMp3s } = require('./lib/audio-match');
 const { pauseForHumanInteraction, isPortUp } = require('./lib/playwright-helpers');
 const state = require('./lib/pipeline-state');
+const { parseTituloFromSongFile: parseTitulo } = require('./lib/audio-analysis');
 
 const DEBUG_PORT = 9333;
 const SONG_PATH = path.join(__dirname, 'song.txt');
-
-function parseTitulo(content) {
-  return (content.match(/\*\*Título:\*\*\s*(.+)/i) || [])[1]?.trim() || null;
-}
 
 function parseArgs(argv) {
   const args = {};

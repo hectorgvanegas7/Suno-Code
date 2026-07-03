@@ -1,5 +1,66 @@
 # Lessons / gotchas
 
+## Auditoría de mejoras 2026-07-03: nombre fonético falso-"ausente", sesión de horas exactas rota, 3 parsers duplicados sin sincronizar
+
+Pase de mejoras sin gastar API ni tocar Suno/Flow en vivo (solo `npm test`).
+Cuatro hallazgos concretos, cada uno cubierto con test nuevo:
+
+**1. `missingNames` (verify-audio.js) marcaba "ausente" un nombre fonéticamente
+reescrito.** El PENDIENTE ya documentado más abajo en este archivo (ver
+entrada de memoria): el prompt reescribe el nombre para que Suno lo cante bien
+("Jamie" → "Yeimi"), pero `analyzeAudio()` solo comparaba contra el nombre
+crudo de la encuesta → falso "ausente" → auto-reroll quemado en vano (créditos
+reales de Suno). Fix: `extractLyricNameVariants()` (`lib/text-helpers.js`) lee
+la primera palabra de cada `[Chorus N]` de la letra ya generada. Para
+single-recipient (el caso común) no hay ambigüedad — cualquier apertura de
+Chorus ES el nombre de esa persona, así que se acepta sin exigir coincidencia
+de letra (la respelling real puede cambiar hasta la primera letra: J→Y).
+Para multi-destinatario, sin el flag `foneticaAplicada` disponible en
+song.txt, se usa la misma heurística de letra que ya usa `hardValidate()`.
+`analyzeAudio()` ahora acepta el nombre de encuesta O su variante de letra.
+
+**2. Sesión de horas exactas ("1h session", sin minutos) nunca llegaba a
+`parseSessionTime()`.** La función ya tenía una rama `hourOnly` (con comentario
+explícito "sin esto, una sesión de exactamente 1 hora tiraría error") pero el
+selector de DOM que la alimenta (`readRecentCompletion` en start-flow.js)
+filtraba spans con `/\d+\s*(h\s*\d*\s*min|min)/i` — exige la palabra "min"
+literal. Una card mostrando solo horas nunca matchea ese filtro, así que
+`sessionText` quedaba `null` y el código tiraba `'No se encontró texto de
+sesión'` ANTES de que `parseSessionTime` (o su rama hourOnly) llegara a
+ejecutarse nunca. La rama existía pero era inalcanzable. Fix: el selector de
+spans ahora también acepta `h(?:r|our)?s?\b` sin "min". De paso,
+`parseSessionTime` se extrajo a `lib/session-time.js` porque start-flow.js no
+es un módulo requireable (corre su pipeline entero al cargarse) — no se podía
+testear donde vivía.
+
+**3. Tres copias de `parseSongFile` divergentes.** Además de la duplicación ya
+conocida entre suno-fill.js y flow-submit.js, `lib/sheets-core.js` tenía una
+tercera versión (solo título + Song ID) que nunca se migró cuando se
+extrajeron las otras dos. Mismo patrón de bug que "Enter Flow + Assign"
+(2026-06-28, más abajo en este archivo): un fix aplicado a una copia no llega
+a las otras. Unificadas las tres en `lib/song-file.js` (superset:
+titulo/voz/estilo/lyrics/notes/songId). También se encontraron y unificaron:
+`parseTituloFromSongFile` duplicado en `upload-to-flow.js`, y
+`connectToSunoTab` duplicado en `lib/suno-create-dl.js` (con un `context` de
+retorno que ni se usaba en el call site).
+
+**4. `run.js`'s pre-check de "encuesta sin nombre de destinatario" tenía su
+propio regex** (`What's their name`, apóstrofe recto only) en vez de reusar
+`extractFirstNames()` de `lib/text-helpers.js` — que sí tolera apóstrofe curvo
+y ya está testeado. Un survey con apóstrofe curvo (copy-paste desde Word/Google
+Docs, pasa) disparaba un falso "⚠️ sin nombre" en cada corrida sin afectar la
+generación real (esa sí usaba `extractFirstNames` en `hardValidate`) — el
+warning simplemente mentía. Fix: `run.js` ahora reusa `extractFirstNames`
+directamente, eliminando el regex duplicado.
+
+**Takeaway:** ninguno de estos 4 se encontró corriendo el pipeline real — se
+encontraron leyendo el código y confirmando con greps/inspección (ej. el punto
+2 se confirmó viendo que el selector de línea 554 nunca produce "1h" sin
+"min"). Cuando una rama de código tiene un comentario que explica por qué
+existe pero nunca se ve activarse en la práctica, vale la pena rastrear hacia
+atrás qué la alimenta — puede estar muerta por un filtro anterior, no por el
+propio código.
+
 ## Suno le quitó el botón "Expand lyrics box" — screenshot de verificación quedaba stale en silencio (2026-07-02)
 
 Hector corrió `node start-flow.js` en real y `suno-fill.js` reventó esperando
