@@ -34,9 +34,10 @@
 //                                          hoja y marca el estado como completado.
 //                                          Se corre DESPUÉS de hacer Submit to QA.
 //
-//   node start-flow.js --poll [N]       -> vigía de cola: verifica cada N minutos
-//                                          (default 3) si cayó una canción.
-//                                          Acepta segundos con sufijo "s" (ej: 30s).
+//   node start-flow.js --poll [N]       -> vigía de cola: verifica si cayó una
+//                                          canción. Default: intervalo aleatorio
+//                                          10-15s. Acepta minutos ("3"), segundos
+//                                          ("30s") o rangos ("10-15s", "1-2").
 //
 // Cada corrida escribe TODA su salida (la propia + la de cada script hijo:
 // run.js, suno-fill.js, flow-submit.js, upload-to-flow.js) en un único archivo

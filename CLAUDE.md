@@ -78,8 +78,11 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
 7. **(manual)** Gabo hace Submit to QA en el Flow. Es la ÚNICA interacción
    manual del flujo normal.
 
-8. **(automático)** Mientras tanto `start-flow.js` queda esperando (máx. 15 min)
-   y detecta el Submit solo: pollea "Recent completions" en `/artists/flow/create`
+8. **(automático)** Mientras tanto `start-flow.js` queda esperando (hasta 30 min
+   desde la asignación, con un piso de 10 min de ventana real) y detecta el Submit
+   solo. Mientras espera muestra un timer en consola cada 30s y avisa por ntfy al
+   celular cuando se alcanza el rango seguro de Submit (25 min) y cuando se está
+   por exceder (30 min). Pollea "Recent completions" en `/artists/flow/create`
    usando una **pestaña dedicada en background** (nunca recarga la pestaña donde
    Gabo trabaja), verifica que el título de la primera card coincida con
    state.json (sin título en state.json NO auto-detecta — evitaría registrar la
@@ -115,9 +118,12 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
   bloque entero se saltaba en silencio). Si volvés a ver `suno-verify-lyrics-
   expanded.png` generarse, es que Suno restauró el botón — ambos caminos conviven
   en el código.
-- **No correr run.js mientras una sesión de Suno está abierta** — comparten el
-  mismo perfil de Chrome (`ChromeAutomationProfile`, `Profile 1`) y la conducta
-  singleton de Chrome puede cerrar/hijackear la ventana de la otra. Secuenciá o avisá.
+- **Todo el pipeline comparte UNA sola instancia de Chrome en el puerto 9333**
+  (`ChromeAutomationProfile`, `Profile 1`): run.js, suno-fill, flow-submit,
+  upload y el poller se conectan por CDP a la misma; el primero que la necesita
+  la lanza. Ya no existe el conflicto viejo de dos Chromes peleándose el perfil
+  (el poller usaba el 9334 con ventana propia) — nunca reintroducir una segunda
+  instancia sobre el mismo perfil.
 - **Clockify** = solo reuniones, nunca canciones. **Flow Screenshot** = siempre
   obligatorio. **Clockify Screenshot** = solo si hubo reuniones ese día.
 
@@ -140,6 +146,9 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
   unifica las llamadas a Anthropic (`claude-sonnet-5`) y Gemini (`gemini-3.5-flash`)
   en un solo lugar. En `isDryRun` devuelve siempre el mismo texto mock, sin llamar a
   ninguna API — así `run.js` no necesita Chrome ni credenciales para probarse.
+  Reintenta hasta 3 veces con backoff exponencial los errores transitorios (red,
+  5xx, 429); los errores de configuración (API key faltante) y el resto de los
+  4xx fallan al instante sin reintentar.
 - `lib/cache-helpers.js` — caché local en `.cache/<hash-de-encuesta>.json` de
   respuestas del LLM que pasaron QA. Se salta por completo en `--dry-run` (nunca lee
   ni escribe) para que un test con mock no contamine la caché de una encuesta real.
@@ -164,9 +173,12 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
   siempre (Whisper small en CPU). Escribe `verify-report.json` (resumen de ambas
   versiones + recomendación de `pickBestVersion` + timestamp) para que `start-flow.js`
   lo lea después. Ver LESSONS.md para instalación (torch CUDA, demucs).
-- `upload-to-flow.js` — sube el MP3 elegido al Flow y guarda una copia de respaldo en
-  `mp3/[Song ID] - [Título].mp3` (solo si el título de song.txt coincide con
-  state.json). SE DETIENE sin Submit to QA (Regla Dura #1).
+- `upload-to-flow.js` — sube el MP3 elegido al Flow con nombre limpio (QA quiere
+  ver solo el título en la UI, sin fecha ni sufijo A/B: se sube una copia temporal
+  renombrada a `[Título].mp3`) y guarda una copia de respaldo en
+  `mp3/[Song ID] - [Título].mp3`. Ambas cosas solo si el título de song.txt
+  coincide con state.json — si no coinciden, sube el archivo original tal cual,
+  sin renombrar. SE DETIENE sin Submit to QA (Regla Dura #1).
   Uso: `node upload-to-flow.js --version A|B` o `--file "ruta.mp3"`.
 - `qa-dashboard.js` — Express local (puerto 3000). **Ya NO lo forkea
   `start-flow.js`** (la orquestación sube la Versión B automáticamente); quedó
@@ -178,9 +190,10 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
   - `node start-flow.js` = flujo completo (genera, llena Suno, Create, descarga MP3,
     corre verify-audio.js con `--demucs` en paralelo con el llenado del Flow, muestra
     la recomendación, sube automáticamente la versión recomendada (B por defecto si
-    no hay reporte confiable) y queda esperando hasta 15 min
+    no hay reporte confiable) y queda esperando hasta 30 min desde la asignación
     a detectar el Submit to QA manual — pestaña dedicada en background, título
-    verificado contra state.json — para cerrar solo (Sheets + Drive). Fallback:
+    verificado contra state.json, timer en consola + avisos ntfy a los 25 y 30
+    min — para cerrar solo (Sheets + Drive). Fallback:
     `start-flow.js --done` si la sesión se cortó antes o venció el timeout.
   - `node start-flow.js --no-auto-create` = igual pero sin Create/descarga automáticos.
   - `node start-flow.js --no-auto-verify` = igual pero sin correr verify-audio.js
@@ -192,7 +205,10 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
     descarga quedan manuales. Si `song.txt` no coincide con `state.json`, aborta con error
     en vez de mezclar canciones.
   - `node start-flow.js --done` = cierre: registra en la hoja + marca state.json.
-  - `node start-flow.js --poll [N]` = vigía de cola (cada N min, default 3; acepta "30s").
+  - `node start-flow.js --poll [N]` = vigía de cola. Default: intervalo aleatorio
+    10-15s. Acepta minutos ("3"), segundos ("30s") o rangos ("10-15s", "1-2").
+    Reusa el Chrome del puerto 9333 si ya está abierto (no lanza ventana propia).
+    Si el flujo normal arranca sin canciones en cola, cae solo a este modo.
   - `poll-flow.js` es ahora un redirect deprecated a `start-flow.js --poll`.
   - Cada corrida (normal o `--poll`) escribe toda su salida — la propia + la de cada
     script hijo (`run.js`, `suno-fill.js`, `flow-submit.js`, `upload-to-flow.js`) — en
