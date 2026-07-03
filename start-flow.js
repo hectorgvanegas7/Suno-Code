@@ -86,7 +86,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const { chromium } = require('playwright');
-const { isLoggedIn, clickByText, isPortUp, ensurePortIsFree } = require('./lib/playwright-helpers');
+const { isLoggedIn, clickByText, isPortUp } = require('./lib/playwright-helpers');
 const { enterFlowAndEnsureAssignment, FLOW_URL } = require('./lib/flow-helpers');
 const { runPreflight } = require('./lib/preflight');
 const { notify } = require('./lib/ntfy');
@@ -345,24 +345,6 @@ async function openFlowTabAndEnsureAssignment() {
 }
 
 // ─── Helpers del modo --poll ──────────────────────────────────────────────────
-
-// ¿Hay sesión de Suno viva en el puerto de Suno (9333)? Si la hay, NO es seguro
-// arrancar el poller — comparte el mismo perfil de Chrome y la conducta
-// singleton puede cerrar/hijackear la ventana de la otra instancia.
-async function isSunoSessionLive() {
-  if (!(await isPortUp(DEBUG_PORT))) return false;
-  try {
-    const browser = await getBrowser();
-    const contexts = browser.contexts();
-    if (contexts.length === 0) return false;
-    const ctx = contexts[0];
-    const sunoPage = ctx.pages().find((p) => p.url().includes('suno.com'));
-    if (!sunoPage) return false;
-    return await isLoggedIn(sunoPage);
-  } catch {
-    return false;
-  }
-}
 
 function launchPollerChrome() {
   spawn(
@@ -1099,7 +1081,7 @@ async function runFlow({ resume = false } = {}) {
     console.log(`   Tiempo de sesión: ${completion.sessionText}`);
     await runDone(completion);
   } else {
-    console.log('\n⚠️ No se detectó el clic en "Submit to QA" (timeout de 15 min o Chrome cerrado).');
+    console.log('\n⚠️ No se detectó el clic en "Submit to QA" (venció la espera de 30 min desde la asignación o Chrome se cerró).');
     console.log('   Si ya hiciste el Submit, registra la canción ejecutando:');
     console.log('   node start-flow.js --done');
     await notify(
@@ -1145,8 +1127,6 @@ async function runPoll(rawArgs) {
   log(`Vigía de cola iniciado. Revisando en rango ${intervalLabel}. (Ctrl+C para detener.)`);
   log(`Log de esta corrida: ${RUN_LOG_PATH}`);
 
-
-
   // Asegurar que haya un Chrome arriba en el puerto 9333 (propio o el de Suno,
   // ahora es el mismo puerto). Si ya está arriba (ej. Suno abierto) no se lanza nada nuevo.
   if (!(await isPortUp(POLL_PORT))) {
@@ -1180,15 +1160,10 @@ async function runPoll(rawArgs) {
         : 'Canción asignada y lista para procesar.';
       await notify(body, { title: 'Cancion Eterna', priority: 'high', tags: 'musical_note' });
 
-      // Segundo chequeo de Suno: puede haberse abierto mientras polleábamos.
-      if (await isSunoSessionLive()) {
-        log('⚠️ Hay una sesión de Suno abierta (puerto 9333). No es seguro arrancar el pipeline.');
-        log('   Cerrá esa ventana y corrí manualmente: node start-flow.js');
-        process.exit(1);
-      }
-
-
-
+      // Nota: con el puerto unificado (9333) la tab de Suno vive en el MISMO
+      // Chrome que usa el poller, así que ya no hay conflicto de perfiles —
+      // el viejo chequeo isSunoSessionLive() acá abortaba el pipeline justo
+      // en el caso normal (Suno logueado y listo) y se eliminó a propósito.
       log('Arrancando el pipeline...\n');
       await runFlow();
       return; // runFlow() ya loguea el resultado final

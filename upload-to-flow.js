@@ -183,6 +183,8 @@ function parseArgs(argv) {
     if (current && current.songId && current.titulo) {
       if (songTxtTitle && songTxtTitle !== current.titulo) {
         console.warn(`  ⚠️ Peligro: El título en state.json ("${current.titulo}") no coincide con song.txt ("${songTxtTitle}"). Se sube el archivo original sin renombrar.`);
+      } else if (!current.titulo.replace(/[<>:"\/\\|?*]+/g, '').trim()) {
+        console.warn('  ⚠️ El título quedó vacío al sanitizarlo — se sube el archivo original sin renombrar.');
       } else {
         const destDir = path.join(__dirname, 'mp3');
         if (!fs.existsSync(destDir)) fs.mkdirSync(destDir);

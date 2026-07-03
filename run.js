@@ -742,7 +742,10 @@ process.on('uncaughtException', async (err) => {
     // ahora el navegador queda abierto a propósito, así que casi siempre se
     // salta; la limpieza ocurre en las corridas donde Chrome no quedó abierto).
     try {
-      if (!isDryRun && (await isPortUp(9333))) {
+      // El chequeo del puerto vale también en --dry-run: el dry run no abre
+      // Chrome, pero puede haber uno abierto de una sesión real — borrarle la
+      // caché del perfil con el navegador vivo rompe archivos en uso.
+      if (await isPortUp(9333)) {
         console.log('\n(Chrome sigue abierto — se omite la limpieza de caché del perfil.)');
       } else {
         cleanProfileCacheIfNeeded();
