@@ -78,9 +78,12 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
 7. **(manual)** Gabo hace Submit to QA en el Flow. Es la ÚNICA interacción
    manual del flujo normal.
 
-8. **(automático)** Mientras tanto `start-flow.js` queda esperando (hasta 30 min
-   desde la asignación, con un piso de 10 min de ventana real) y detecta el Submit
-   solo. Al arrancar la espera hace un **pre-chequeo del botón "Submit to QA"**
+8. **(automático)** Mientras tanto `start-flow.js` queda esperando SIN límite de
+   tiempo (pedido de Gabo 2026-07-03 — corta solo al detectar el Submit o si
+   Chrome se cierra; fallback: `--done`) y detecta el Submit solo. Muestra un
+   **candado visual** en la pestaña de trabajo (badge rojo "🔒 AÚN NO" + botón
+   Submit atenuado hasta el minuto 25, verde después — cosmético y fail-open:
+   nunca clickea nada, un F5 lo limpia, y se restaura al salir del loop). Al arrancar la espera hace un **pre-chequeo del botón "Submit to QA"**
    (solo verificación, jamás click — Regla Dura #1): si no está visible avisa por
    consola + ntfy para descubrir un cambio de UI temprano. Mientras espera muestra
    un **countdown en vivo por segundo** en la terminal (con `\r`, no infla el
@@ -235,6 +238,19 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
     DESACTIVADOS (decisión de Gabo 2026-07-03): la única interacción manual del
     flujo normal es el Submit to QA. No afecta la Regla Dura #1 (el Submit to
     QA no existe en el código, con o sin flag).
+  - `node start-flow.js --loop` = canciones en continuo: corre el flujo completo,
+    espera el Submit manual, cierra, y busca la siguiente (vigía si la cola está
+    vacía). Un ciclo fallido avisa por ntfy y el loop sigue. En --loop el
+    checkpoint pre-Create se saltea siempre (aunque haya --pause). La única
+    interacción por canción sigue siendo el Submit to QA.
+  - `--max-rerolls N` = tope del auto-reroll por mala pronunciación (default 2,
+    0 lo desactiva). Si verify-report.json dice que el nombre del destinatario
+    no se escucha en NINGUNA versión (missingNames en ambas, con probability de
+    palabra de Whisper < 0.65 contando como ausente), los MP3 rechazados van a
+    Downloads/suno/rejected/ (si el reroll falla se restauran), se re-clickea
+    Create sobre el mismo formulario y se re-analiza. Solo cuando Create corrió
+    en ESTA corrida — nunca en --resume. Cada reroll gasta ≈10 créditos y avisa
+    por ntfy; al agotarse, sube la mejor versión igual con aviso urgent.
   - `node start-flow.js --done` = cierre: registra en la hoja + marca state.json.
   - `node start-flow.js --poll [N]` = vigía de cola. Default: intervalo aleatorio
     10-15s. Acepta minutos ("3"), segundos ("30s") o rangos ("10-15s", "1-2").

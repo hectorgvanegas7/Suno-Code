@@ -860,10 +860,6 @@ async function runFlow({ resume = false } = {}) {
     const providerArg = process.argv.find((a) => a.startsWith('--provider='));
     const providerFlag = providerArg ? ` ${providerArg}` : '';
     await runScript(`run.js${providerFlag}`);
-    await notify(
-      `✅ Letra generada: "${state.read()?.titulo || '(título desconocido)'}"\nRevisá song.txt (abierto en Notepad). Siguiente: llenar Suno.`,
-      { title: 'Paso 1 completo: letra lista', priority: 'default', tags: 'white_check_mark' }
-    );
   }
 
   if (!skipSunoFill || !skipFlowFill) {
@@ -907,6 +903,17 @@ async function runFlow({ resume = false } = {}) {
   let hayVersionB = false; // si solo se descargó 1 versión, el upload debe ir a la A
   let verifyOk = false;
   let verifyPromise = null; // corre en paralelo con el Paso 4; se espera después
+
+  const isLoopMode = process.argv.includes('--loop');
+  // Auto-reroll por nombres mal pronunciados: cuántas veces re-clickear Create
+  // (≈10 créditos cada vez) si Whisper no detecta el nombre del destinatario en
+  // NINGUNA versión. Default 2; --max-rerolls N lo cambia (0 lo desactiva).
+  const maxRerollsIdx = process.argv.indexOf('--max-rerolls');
+  const MAX_REROLLS = maxRerollsIdx !== -1 && /^\d+$/.test(process.argv[maxRerollsIdx + 1] || '')
+    ? parseInt(process.argv[maxRerollsIdx + 1], 10)
+    : 2;
+  let createdThisRun = false; // el reroll solo aplica si Create corrió en ESTA corrida
+
   if (skipSunoFill) {
     // En resume no sabemos si el crash fue antes o después del click en Create.
     // Re-clickearlo podría gastar créditos por duplicado, así que solo se buscan
@@ -933,26 +940,26 @@ async function runFlow({ resume = false } = {}) {
   } else if (!noAutoCreate) {
     // ✋ Checkpoint humano: el formulario ya está lleno y los screenshots de
     // verificación en disco. Create gasta créditos de Suno — no se clickea
-    // sin un ENTER de confirmación (salvo --no-pause). Complementa (no
-    // reemplaza) la verificación visual no-negociable de CLAUDE.md.
-    await checkpoint(
-      `Formulario de Suno lleno para "${state.read()?.titulo || '(sin título)'}".\n` +
-      'Verificá los screenshots antes de gastar créditos:\n' +
-      '  • suno-verify-overview.png (título/estilo/sliders)\n' +
-      '  • suno-verify-lyrics-top.png (letra desde Verse 1)',
-      'clickear Create en Suno (gasta créditos) y descargar los 2 MP3'
-    );
+    // sin un ENTER de confirmación (salvo --no-pause o --loop).
+    if (!isLoopMode) {
+      await checkpoint(
+        `Formulario de Suno lleno para "${state.read()?.titulo || '(sin título)'}".\n` +
+        'Verificá los screenshots antes de gastar créditos:\n' +
+        '  • suno-verify-overview.png (título/estilo/sliders)\n' +
+        '  • suno-verify-lyrics-top.png (letra desde Verse 1)',
+        'clickear Create en Suno (gasta créditos) y descargar los 2 MP3'
+      );
+    } else {
+      console.log('\n  (Auto-descarga activa por --loop: omitiendo confirmación humana para gastar créditos)');
+    }
     console.log('\n=== Paso 3b/4: Create + generación + descarga (suno-create-dl.js) ===');
     console.log('  (Pasá --no-auto-create para saltar este paso y hacer Create a mano)\n');
     try {
       const { createAndDownload } = require('./lib/suno-create-dl');
       const { versionA, versionB } = await createAndDownload();
       mp3sDescargados = true;
+      createdThisRun = true;
       hayVersionB = !!versionB;
-      await notify(
-        `MP3s listos: "${state.read()?.titulo || 'canción'}".\nVersiones A y B en Downloads/suno/.\nCorré: node verify-audio.js`,
-        { title: 'Suno: generación completa', priority: 'high', tags: 'musical_note' }
-      );
       console.log('\n  ✅ Generación y descarga completas.');
       if (versionA) console.log(`     Versión A: ${versionA.path || versionA.label}`);
       if (versionB) console.log(`     Versión B: ${versionB.path || versionB.label}`);
@@ -983,10 +990,6 @@ async function runFlow({ resume = false } = {}) {
     await openFlowTabAndEnsureAssignment();
     await runScript('flow-submit.js');
     state.write({ stage: state.STAGES.FLOW_FILLED });
-    await notify(
-      '✅ Flow lleno (título/letra/notas). Siguiente: recomendación de audio + subida del MP3.',
-      { title: 'Paso 4 completo: Flow lleno', priority: 'default', tags: 'white_check_mark' }
-    );
   }
 
   // Esperar el análisis que quedó corriendo en paralelo (Paso 3c) antes de
@@ -996,14 +999,94 @@ async function runFlow({ resume = false } = {}) {
     verifyOk = await verifyPromise;
   }
 
+  const REPORT_PATH = path.join(__dirname, 'verify-report.json');
+  const currentTitulo = state.read()?.titulo || null;
+
+  // ── Paso 3d: Auto-reroll por mala pronunciación del nombre ─────────────────
+  // Si el análisis dice que el nombre del destinatario NO se escucha en ninguna
+  // de las versiones, se descartan esos MP3 (van a Downloads/suno/rejected/
+  // para que audio-match no los vuelva a agarrar), se re-clickea Create sobre
+  // el MISMO formulario (sigue lleno en Suno) y se re-analiza. Solo aplica si
+  // Create corrió en ESTA corrida — nunca en --resume, donde no sabemos si el
+  // formulario sigue lleno. Máximo MAX_REROLLS veces (≈10 créditos cada una).
+  function bothVersionsMissingNames() {
+    if (!fs.existsSync(REPORT_PATH)) return false;
+    try {
+      const report = JSON.parse(fs.readFileSync(REPORT_PATH, 'utf-8'));
+      if (!currentTitulo || report.titulo !== currentTitulo) return false;
+      const missingA = (report.reportA?.missingNames || []).length > 0;
+      // Con una sola versión descargada, la decisión recae solo en la A.
+      const missingB = report.reportB ? (report.reportB.missingNames || []).length > 0 : missingA;
+      return missingA && missingB;
+    } catch {
+      return false;
+    }
+  }
+
+  // Mueve los MP3 rechazados a <carpeta>/rejected/ y devuelve la lista de
+  // movimientos para poder DESHACERLOS si el reroll falla a mitad de camino
+  // (sin esto, un Create fallido dejaría el pipeline sin ningún MP3 que subir).
+  function quarantineRejectedMp3s() {
+    const moved = [];
+    try {
+      const report = JSON.parse(fs.readFileSync(REPORT_PATH, 'utf-8'));
+      for (const r of [report.reportA, report.reportB]) {
+        if (r?.path && fs.existsSync(r.path)) {
+          const rejectedDir = path.join(path.dirname(r.path), 'rejected');
+          fs.mkdirSync(rejectedDir, { recursive: true });
+          const dest = path.join(rejectedDir, `${Date.now()}-${path.basename(r.path)}`);
+          fs.renameSync(r.path, dest);
+          moved.push({ src: r.path, dest });
+          console.log(`  🗑️  Descartado (nombre mal pronunciado): ${path.basename(r.path)} → rejected/`);
+        }
+      }
+    } catch (e) {
+      console.log(`  ⚠️ No se pudieron apartar los MP3 rechazados: ${e.message}`);
+    }
+    return moved;
+  }
+
+  let rerollsUsados = 0;
+  while (createdThisRun && verifyOk && rerollsUsados < MAX_REROLLS && bothVersionsMissingNames()) {
+    rerollsUsados++;
+    console.log(`\n🔁 Auto-reroll ${rerollsUsados}/${MAX_REROLLS}: el nombre no se escucha bien en ninguna versión. Regenerando (gasta créditos)...`);
+    await notify(
+      `🔁 Reroll ${rerollsUsados}/${MAX_REROLLS} por mala pronunciación del nombre en "${currentTitulo}". Regenerando en Suno...`,
+      { title: 'Auto-Reroll Suno', priority: 'high', tags: 'arrows_counterclockwise' }
+    ).catch(() => {});
+    const moved = quarantineRejectedMp3s();
+    try {
+      const { createAndDownload } = require('./lib/suno-create-dl');
+      const { versionB } = await createAndDownload();
+      hayVersionB = !!versionB;
+      console.log('  ✅ Re-generación y descarga completas. Re-analizando audio...');
+      verifyOk = await runVerifyAudio({ fast: process.argv.includes('--fast-verify') });
+    } catch (e) {
+      console.log(`  ⚠️ El reroll falló (${e.message}) — restaurando los MP3 anteriores y siguiendo con lo que hay.`);
+      for (const m of moved) {
+        try { fs.renameSync(m.dest, m.src); } catch {}
+      }
+      await notify(
+        `⚠️ El reroll de "${currentTitulo}" falló (${String(e.message).slice(0, 120)}). Se sigue con las versiones anteriores.`,
+        { title: 'Auto-Reroll falló', priority: 'high', tags: 'warning' }
+      ).catch(() => {});
+      break;
+    }
+  }
+  if (rerollsUsados > 0 && bothVersionsMissingNames()) {
+    console.log(`\n⚠️ Rerolls agotados (${MAX_REROLLS}): el nombre sigue sin escucharse bien. Se sube la mejor versión igual — ESCUCHALA antes de tu Submit.`);
+    await notify(
+      `⚠️ Rerolls agotados en "${currentTitulo}": el nombre sigue mal pronunciado. Escuchá el MP3 antes de hacer Submit.`,
+      { title: 'Auto-Reroll agotado', priority: 'urgent', tags: 'warning' }
+    ).catch(() => {});
+  }
+
   // ── Paso 5: Recomendación + Upload automático de la MEJOR versión ──────────
   // Se sube la versión que recomienda verify-report.json (pickBestVersion:
   // duración, letra, clipping, corte abrupto, CLAP...). Solo se confía en el
   // reporte si el análisis de ESTA corrida terminó bien Y el título coincide
   // con state.json — nunca un reporte viejo o de otra canción. Sin reporte
   // confiable: B por defecto (A si solo se descargó una versión).
-  const REPORT_PATH = path.join(__dirname, 'verify-report.json');
-  const currentTitulo = state.read()?.titulo || null;
   if (mp3sDescargados) {
     let versionToUpload = hayVersionB ? 'B' : 'A';
     let uploadReason = hayVersionB
@@ -1053,10 +1136,6 @@ async function runFlow({ resume = false } = {}) {
       if (hayVersionB) {
         console.log(`   (Si preferís la otra: node upload-to-flow.js --version ${otra} — pisa la subida en el Flow.)`);
       }
-      await notify(
-        `✅ Versión ${versionToUpload} subida al Flow (${uploadReason}).\nFalta SOLO tu Submit to QA manual.`,
-        { title: 'MP3 subido al Flow', priority: 'high', tags: 'white_check_mark' }
-      );
     } catch (e) {
       console.log(`\n⚠️ La subida automática de la Versión ${versionToUpload} falló: ${e.message}`);
       console.log(`   Podés reintentar subir manualmente con: node upload-to-flow.js --version ${versionToUpload}`);
@@ -1088,17 +1167,15 @@ async function runFlow({ resume = false } = {}) {
 
   const startedAtStr = state.read()?.startedAt;
   const startedTime = startedAtStr ? new Date(startedAtStr).getTime() : Date.now();
-  // Piso mínimo: si los pasos automáticos previos (Suno, --demucs) ya consumieron
-  // gran parte (o todo) del rango de 25-30 min desde la asignación, igual
-  // garantizamos una ventana real de detección — si no, con una corrida lenta
-  // el while de abajo podría arrancar ya vencido y nunca llegar a pollear.
-  const MIN_POLL_WINDOW_MS = 10 * 60 * 1000;
-  const deadline = Math.max(startedTime + 30 * 60 * 1000, Date.now() + MIN_POLL_WINDOW_MS);
+  // Sin deadline (pedido de Gabo 2026-07-03): la espera del Submit es
+  // indefinida — corta solo cuando se detecta el Submit o se cierra Chrome.
+  // Fallback manual de siempre: node start-flow.js --done.
 
   console.log('\n==================================================================');
   console.log('🛑 Hacé click en "Submit to QA" manualmente en el navegador.');
   console.log('⏳ El script detectará la finalización y registrará en Sheets automáticamente...');
-  console.log('   (Espera máxima: 30 min desde asignación. Fallback manual: node start-flow.js --done)');
+  console.log('   (Espera SIN límite: corta al detectar tu Submit o si Chrome se cierra.');
+  console.log('    Fallback manual: node start-flow.js --done)');
   console.log('==================================================================\n');
 
   // Monitoreo invisible vía iframe en la misma pestaña de trabajo (no abre otra
@@ -1205,6 +1282,73 @@ async function runFlow({ resume = false } = {}) {
   let notifiedDanger = false;
   let notifiedSuspend = false;
 
+  // ── Candado visual anti-click-accidental ────────────────────────────────
+  // Badge en la esquina + Submit atenuado hasta el minuto 25, SIEMPRE en la
+  // pestaña de trabajo (workPage — donde Hector clickea; el diff original lo
+  // ponía en la pestaña de monitoreo en background, donde nadie lo ve).
+  // Fail-open por diseño: si el proceso muere, un F5 de la página lo limpia
+  // (los estilos inyectados no sobreviven una recarga ni un re-render de React),
+  // y al salir del loop se restaura explícitamente. El candado NO clickea nada.
+  let lockInjected = false;
+  let lockGreen = false;
+
+  async function setSubmitLock(mode) {
+    // mode: 'lock' (rojo, botón atenuado) | 'open' (verde, botón restaurado) | 'remove' (sin badge)
+    if (!workPage) return false;
+    try {
+      await workPage.evaluate((m) => {
+        let overlay = document.getElementById('c-lock');
+        const submitBtn = Array.from(document.querySelectorAll('button'))
+          .find((b) => /submit to qa|complete song/i.test(b.innerText));
+        if (m === 'remove') {
+          if (overlay) overlay.remove();
+          if (submitBtn) {
+            submitBtn.style.opacity = submitBtn.dataset.op || '';
+            submitBtn.style.pointerEvents = submitBtn.dataset.pe || '';
+          }
+          return;
+        }
+        if (!overlay) {
+          overlay = document.createElement('div');
+          overlay.id = 'c-lock';
+          overlay.style.cssText = 'position:fixed;bottom:20px;right:20px;padding:15px 25px;color:white;font-weight:bold;border-radius:8px;z-index:999999;pointer-events:none;';
+          document.body.appendChild(overlay);
+        }
+        if (m === 'lock') {
+          overlay.style.backgroundColor = 'rgba(220, 38, 38, 0.9)';
+          overlay.innerText = '🔒 AÚN NO (< 25 min)';
+          if (submitBtn) {
+            if (submitBtn.dataset.op === undefined) submitBtn.dataset.op = submitBtn.style.opacity;
+            if (submitBtn.dataset.pe === undefined) submitBtn.dataset.pe = submitBtn.style.pointerEvents;
+            submitBtn.style.opacity = '0.5';
+            submitBtn.style.pointerEvents = 'none';
+          }
+        } else { // 'open'
+          overlay.style.backgroundColor = 'rgba(22, 163, 74, 0.9)';
+          overlay.innerText = '✅ LISTO PARA TU SUBMIT';
+          if (submitBtn) {
+            submitBtn.style.opacity = submitBtn.dataset.op || '';
+            submitBtn.style.pointerEvents = submitBtn.dataset.pe || '';
+          }
+        }
+      }, mode);
+      return true;
+    } catch {
+      return false; // pestaña navegada/cerrada — no es fatal, el candado es cosmético
+    }
+  }
+
+  {
+    const elapsedSoFar = (Date.now() - startedTime) / 60000;
+    if (elapsedSoFar < 25) {
+      lockInjected = await setSubmitLock('lock');
+      if (lockInjected) console.log('  🔒 Candado visual activo en la pestaña del Flow hasta el minuto 25 (si este proceso muere, un F5 lo quita).');
+    } else {
+      lockGreen = true;
+      lockInjected = await setSubmitLock('open');
+    }
+  }
+
   // Keep-alive de sesión: scroll de 1px (ida y vuelta) en la pestaña del Flow
   // cada 5 min, para que la sesión no caduque por inactividad mientras Hector
   // escucha los MP3 y revisa. No toca el formulario, no roba foco, no clickea.
@@ -1229,7 +1373,7 @@ async function runFlow({ resume = false } = {}) {
     }, 1000);
     if (typeof ticker.unref === 'function') ticker.unref();
 
-    while (Date.now() < deadline) {
+    while (true) {
       const elapsedMs = Date.now() - startedTime;
       const elapsedMin = elapsedMs / 60000;
       const now = Date.now();
@@ -1247,6 +1391,12 @@ async function runFlow({ resume = false } = {}) {
         ).catch(() => {});
       }
       lastLoopTick = now;
+
+      // Candado visual: pasa a verde y restaura el botón al minuto 25
+      if (lockInjected && elapsedMin >= 25 && !lockGreen) {
+        lockGreen = true;
+        await setSubmitLock('open');
+      }
 
       // Keep-alive de sesión del Flow
       if (workPage && now - lastKeepAlive >= KEEP_ALIVE_MS) {
@@ -1275,21 +1425,19 @@ async function runFlow({ resume = false } = {}) {
       // Notificaciones automáticas a ntfy (al celular)
       if (elapsedMin >= 25 && !notifiedSafe) {
         notifiedSafe = true;
-        console.log('\n🔔 [NOTIFICACIÓN] ¡TIEMPO SEGURO ALCANZADO! Enviando aviso...');
-        await notify(`✅ ¡Tiempo seguro alcanzado! (${elapsedMin.toFixed(1)} min). Ya podés hacer click en "Submit to QA".`, {
-          title: 'Cancion Eterna: Submit Seguro',
+        await notify(`✅ Tiempo Seguro (25m) — Ya podés hacer click en Submit.`, {
+          title: `[Lista] ${currentTitulo}`,
           priority: 'high',
-          tags: 'bell,musical_note'
+          tags: 'white_check_mark'
         }).catch(() => {});
       }
 
       if (elapsedMin >= 30 && !notifiedDanger) {
         notifiedDanger = true;
-        console.log('\n🔔 [NOTIFICACIÓN] ⚠️ RIESGO LÍMITE: Llevás más de 30 min. ¡Hacé click ya!');
-        await notify(`⚠️ Riesgo: Llevás ${elapsedMin.toFixed(1)} min. Hacé click en "Submit to QA" para no excederte del rango.`, {
-          title: 'Cancion Eterna: ¡Alerta Límite!',
+        await notify(`⚠️ Riesgo (>30m) — Hacé Submit de inmediato.`, {
+          title: `[Límite] ${currentTitulo}`,
           priority: 'urgent',
-          tags: 'warning,exclamation'
+          tags: 'warning'
         }).catch(() => {});
       }
 
@@ -1308,6 +1456,7 @@ async function runFlow({ resume = false } = {}) {
     }
     clearInterval(ticker);
     process.stdout.write('\n'); // cerrar la línea del countdown antes de seguir logueando
+    if (lockInjected) await setSubmitLock('remove'); // nunca dejar el botón atenuado al salir
     if (pollMode === 'iframe' && workPage) {
       await workPage.evaluate(() => {
         const iframe = document.getElementById('poll-iframe-hidden');
@@ -1324,7 +1473,7 @@ async function runFlow({ resume = false } = {}) {
     console.log(`   Tiempo de sesión: ${completion.sessionText}`);
     await runDone(completion);
   } else {
-    console.log('\n⚠️ No se detectó el clic en "Submit to QA" (venció la espera de 30 min desde la asignación o Chrome se cerró).');
+    console.log('\n⚠️ No se detectó el clic en "Submit to QA" (Chrome se cerró).');
     console.log('   Si ya hiciste el Submit, registra la canción ejecutando:');
     console.log('   node start-flow.js --done');
     await notify(
@@ -1484,7 +1633,7 @@ async function runPoll(rawArgs) {
       const body = pollResult.title
         ? `Canción asignada: "${pollResult.title}"`
         : 'Canción asignada y lista para procesar.';
-      await notify(body, { title: 'Cancion Eterna', priority: 'high', tags: 'musical_note' });
+      await notify(body, { title: 'Canción Asignada', priority: 'default', tags: 'musical_note' });
 
       // Nota: con el puerto unificado (9333) la tab de Suno vive en el MISMO
       // Chrome que usa el poller, así que ya no hay conflicto de perfiles —
@@ -1531,6 +1680,7 @@ async function runPoll(rawArgs) {
   const isPoll = rawArgs.includes('--poll');
   const isResume = rawArgs.includes('--resume');
   const isDryRun = rawArgs.includes('--dry-run');
+  const isLoop = rawArgs.includes('--loop');
 
   if (isDone) {
     await runDone();
@@ -1538,6 +1688,46 @@ async function runPoll(rawArgs) {
     await runPoll(rawArgs);
   } else if (isDryRun) {
     await runDryRun();
+  } else if (isLoop) {
+    // ── Modo --loop: canciones en continuo ──────────────────────────────────
+    // Cada ciclo corre el flujo COMPLETO (runFlow ya incluye el cierre: detecta
+    // tu Submit manual y registra en Sheets/Drive — por eso acá NO se llama a
+    // runDone() de nuevo: hacerlo arriesgaría un registro doble). Sin canciones
+    // en cola cae al vigía (runPoll), que al asignar una corre runFlow entero
+    // y retorna. Un ciclo que falla avisa por ntfy y el loop sigue con la
+    // próxima — solo Ctrl+C (o cerrar Chrome sin reabrir) lo frena.
+    // La ÚNICA interacción por canción sigue siendo tu Submit to QA.
+    console.log('🔁 Modo --loop: canciones en continuo. Tu única interacción por canción es el Submit to QA. Ctrl+C para salir.\n');
+    let ciclo = 0;
+    while (true) {
+      ciclo++;
+      try {
+        await runFlow({ resume: false });
+      } catch (err) {
+        if (err.noSong) {
+          console.log('\nNo hay canciones en cola — vigía activa (10-15s) hasta que caiga la próxima...\n');
+          try {
+            await runPoll(['--poll', '10-15s']);
+          } catch (pollErr) {
+            console.error(`\n❌ --loop: el vigía/pipeline falló: ${pollErr.message}`);
+            await notify(
+              `❌ --loop: el ciclo ${ciclo} falló (${String(pollErr.message).slice(0, 140)}). Reintento en 60s. Ctrl+C para frenar.`,
+              { title: 'Loop: ciclo falló', priority: 'urgent', tags: 'rotating_light' }
+            ).catch(() => {});
+            await new Promise((r) => setTimeout(r, 60000));
+          }
+        } else {
+          console.error(`\n❌ --loop: el ciclo ${ciclo} falló: ${err.message}`);
+          await notify(
+            `❌ --loop: el ciclo ${ciclo} falló (${String(err.message).slice(0, 140)}). Reintento con la próxima canción en 60s. Ctrl+C para frenar.`,
+            { title: 'Loop: ciclo falló', priority: 'urgent', tags: 'rotating_light' }
+          ).catch(() => {});
+          await new Promise((r) => setTimeout(r, 60000));
+        }
+      }
+      console.log(`\n🔁 --loop: ciclo ${ciclo} terminado. Buscando la siguiente canción en 5s...`);
+      await new Promise((r) => setTimeout(r, 5000));
+    }
   } else {
     try {
       await runFlow({ resume: isResume });

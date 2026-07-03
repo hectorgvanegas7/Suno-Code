@@ -11,11 +11,15 @@ function parseSongFile(content) {
   const voz = (content.match(/\*\*Voz:\*\*\s*(.+)/i) || [])[1]?.trim();
   const estilo = (content.match(/\*\*Estilo Suno:\*\*\s*(.+)/i) || [])[1]?.trim();
   const verseIndex = content.search(/\[Verse 1\]/i);
-  const advertenciasIndex = content.search(/\*\*Advertencias:\*\*/i);
-  const notesIndex = content.search(/NOTES:/i);
-  const endIndex = [advertenciasIndex, notesIndex].filter((i) => i !== -1).sort((a, b) => a - b)[0];
+  let endIndex = content.indexOf('---', verseIndex);
+  if (endIndex === -1) {
+    const qa = content.search(/\*\*QA Checklist:\*\*/i);
+    const adv = content.search(/\*\*Advertencias:\*\*/i);
+    const notes = content.search(/NOTES:/i);
+    endIndex = [qa, adv, notes].filter(i => i !== -1).sort((a, b) => a - b)[0];
+  }
   const lyrics = verseIndex !== -1
-    ? content.slice(verseIndex, endIndex === undefined ? undefined : endIndex).trim()
+    ? content.slice(verseIndex, endIndex).trim()
     : null;
   return { titulo, voz, estilo, lyrics };
 }

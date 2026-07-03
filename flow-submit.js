@@ -22,11 +22,15 @@ const SCREENSHOT_PATH = path.join(__dirname, 'flow-submit-verify.png');
 function parseSongFile(content) {
   const titulo = (content.match(/\*\*Título:\*\*\s*(.+)/i) || [])[1]?.trim();
   const verseIndex = content.search(/\[Verse 1\]/i);
-  const advertenciasIndex = content.search(/\*\*Advertencias:\*\*/i);
-  const notesIndex = content.search(/NOTES:/i);
-  const lyricsEndIndex = [advertenciasIndex, notesIndex].filter((i) => i !== -1).sort((a, b) => a - b)[0];
+  let lyricsEndIndex = content.indexOf('---', verseIndex);
+  if (lyricsEndIndex === -1) {
+    const qa = content.search(/\*\*QA Checklist:\*\*/i);
+    const adv = content.search(/\*\*Advertencias:\*\*/i);
+    const notes = content.search(/NOTES:/i);
+    lyricsEndIndex = [qa, adv, notes].filter(i => i !== -1).sort((a, b) => a - b)[0];
+  }
   const lyrics = verseIndex !== -1
-    ? content.slice(verseIndex, lyricsEndIndex === undefined ? undefined : lyricsEndIndex).trim()
+    ? content.slice(verseIndex, lyricsEndIndex).trim()
     : null;
   const notesMatch = content.match(/NOTES:\s*([\s\S]+)/i);
   const notes = notesMatch ? notesMatch[1].trim() : null;
