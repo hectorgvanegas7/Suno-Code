@@ -1,10 +1,11 @@
 const { chromium } = require('playwright');
 const { connectToSunoTab } = require('./lib/playwright-helpers');
 
-// Clickea "Create song" dos veces (Suno genera 2 versiones por canción).
-// Entre clics esperamos a que el botón vuelva a estar accionable en vez de un
-// timeout fijo a ciegas — si Suno está lento, 3s fijos podían no alcanzar y el
-// segundo clic se perdía.
+// Clickea "Create song" UNA SOLA VEZ — Suno v5.5 genera 2 versiones por click.
+// El doble click era el diseño correcto para la versión vieja de Suno; hoy
+// genera 4 canciones y quema créditos de más (mismo criterio que
+// lib/suno-create-dl.js, que es el camino automático; este script es el
+// fallback manual y tiene que comportarse igual).
 (async () => {
   const { browser, page } = await connectToSunoTab(chromium);
 
@@ -12,27 +13,7 @@ const { connectToSunoTab } = require('./lib/playwright-helpers');
   await createBtn.first().waitFor({ state: 'visible', timeout: 15000 });
 
   await createBtn.first().click();
-  console.log('Primer clic en Create realizado.');
-
-  // Esperar a que el botón esté de nuevo listo para el segundo clic.
-  await page.waitForTimeout(1500);
-  try {
-    await createBtn.first().waitFor({ state: 'visible', timeout: 8000 });
-    await page.waitForFunction(
-      () => {
-        const btn = [...document.querySelectorAll('button')].find((b) =>
-          /create song/i.test(b.textContent || '')
-        );
-        return btn && !btn.disabled;
-      },
-      { timeout: 8000 }
-    ).catch(() => {});
-  } catch {
-    /* si no reaparece, intentamos el segundo clic igual */
-  }
-
-  await createBtn.first().click();
-  console.log('Segundo clic en Create realizado.');
+  console.log('Click en Create realizado (Suno genera 2 versiones con un solo click).');
   await page.waitForTimeout(1500);
 
   await page.screenshot({ path: 'suno-after-create.png' });
