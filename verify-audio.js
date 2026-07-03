@@ -29,7 +29,7 @@ const fs = require('fs');
 const path = require('path');
 const { findSunoMp3s, SUNO_DIR } = require('./lib/audio-match');
 const { extractFirstNames } = require('./lib/text-helpers');
-const { analyzeAudio, prepareVocals, cleanupVocalsTmp, transcribeFiles, runClapScore, stripStructuralTags, printReport, pickBestVersion, parseLyricsFromSongFile, parseTituloFromSongFile, getDurationAsync, formatDuration, formatElapsed, SONG_PATH } = require('./lib/audio-analysis');
+const { analyzeAudio, prepareVocals, cleanupVocalsTmp, transcribeFiles, runClapScoreWithVocalIsolation, stripStructuralTags, printReport, pickBestVersion, parseLyricsFromSongFile, parseTituloFromSongFile, getDurationAsync, formatDuration, formatElapsed, SONG_PATH } = require('./lib/audio-analysis');
 const { notify } = require('./lib/ntfy');
 
 function parseArgs(argv) {
@@ -121,6 +121,7 @@ function parseArgs(argv) {
     const prepA = await prepareVocals(versionA.path, useDemucs);
     const prepB = await prepareVocals(versionB.path, useDemucs);
     let batch;
+    let clapBatch;
     try {
       const cleanLyrics = stripStructuralTags(lyricsText);
       batch = transcribeFiles([prepA.targetPath, prepB.targetPath], {
@@ -128,17 +129,22 @@ function parseArgs(argv) {
         device: useDemucs ? 'cuda' : null,
         initialPrompt: useDemucs && cleanLyrics ? cleanLyrics : null,
       });
+
+      // CLAP: evaluar calidad perceptual de ambas versiones (modelo se carga 1
+      // vez). vocal_clarity/emotion sobre la voz aislada de prepA/prepB si
+      // demucs corrió, el resto sobre el mix. Tiene que correr ANTES del
+      // finally — cleanupVocalsTmp borra el .wav de voz que prepX.targetPath
+      // señala.
+      console.log('🎧 Evaluando calidad de audio con CLAP...');
+      clapBatch = runClapScoreWithVocalIsolation(
+        [versionA.path, versionB.path],
+        [prepA.demucs.used ? prepA.targetPath : null, prepB.demucs.used ? prepB.targetPath : null],
+        { device: useDemucs ? 'cuda' : null },
+      );
     } finally {
       cleanupVocalsTmp(prepA);
       cleanupVocalsTmp(prepB);
     }
-
-    // CLAP: evaluar calidad perceptual de ambas versiones (modelo se carga 1 vez)
-    console.log('🎧 Evaluando calidad de audio con CLAP...');
-    const clapBatch = runClapScore(
-      [versionA.path, versionB.path],
-      { device: useDemucs ? 'cuda' : null },
-    );
 
     reportA = await analyzeAudio(versionA.path, {
       label: 'Versión A',

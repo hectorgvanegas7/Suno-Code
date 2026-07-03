@@ -442,17 +442,25 @@ function parseSessionTime(text) {
   return null;
 }
 
+// Playwright no expone una clase común para distinguir Page de Frame en runtime:
+// un Frame tiene goto()/evaluate() igual que Page, pero NO tiene isClosed(),
+// reload(), mouse ni screenshot(). Usamos la ausencia de isClosed como firma.
+function isPlaywrightFrame(obj) {
+  return !!obj && typeof obj.goto === 'function' && typeof obj.evaluate === 'function' && typeof obj.isClosed !== 'function';
+}
+
 // Conecta al Chrome del puerto de debug, navega a /artists/flow/create y extrae
 // la primera card de "Recent completions": título, texto de sesión, time y screenshot.
 // Lanza si no puede conectar, si el DOM no tiene la sección, si el título no
 // coincide con expectedTitulo (cuando se pasa), o si el tiempo no se puede parsear.
 // El screenshot falla sin lanzar (error logueado, screenshotPath queda null).
 //
-// options.page: pestaña dedicada a reutilizar. El loop de auto-detección del
-// Submit la pasa SIEMPRE — sin esto, cada poll navegaba/recargaba la MISMA
-// pestaña donde Hector está por hacer click en "Submit to QA" (cada 5s), lo
-// que puede robarle el click o interrumpir el formulario. Con una pestaña
-// dedicada en background, la pestaña de trabajo no se toca nunca.
+// options.page: pestaña (Page) o iframe de monitoreo (Frame) a reutilizar. El
+// loop de auto-detección del Submit la pasa SIEMPRE — sin esto, cada poll
+// navegaba/recargaba la MISMA pestaña donde Hector está por hacer click en
+// "Submit to QA" (cada 5s), lo que puede robarle el click o interrumpir el
+// formulario. Con un target dedicado en background, la pestaña de trabajo
+// nunca se navega.
 async function readRecentCompletion(expectedTitulo, { page: providedPage = null } = {}) {
   if (!(await isPortUp(DEBUG_PORT))) {
     throw new Error(`Chrome no está en el puerto ${DEBUG_PORT}`);
@@ -463,17 +471,28 @@ async function readRecentCompletion(expectedTitulo, { page: providedPage = null 
     if (contexts.length === 0) throw new Error("No hay contextos de navegador disponibles");
     const context = contexts[0];
 
-    let page = providedPage && !providedPage.isClosed()
+    const frameMode = isPlaywrightFrame(providedPage);
+    let page = providedPage && (frameMode || !providedPage.isClosed())
       ? providedPage
       : context.pages().find((p) => p.url().includes('cancioneterna.com'));
     const openedNew = !page;
     if (!page) page = await context.newPage();
+    const rootPage = frameMode ? page.page() : page;
 
     // Navegar / refrescar a /create (la vista que muestra "Recent completions")
     if (!page.url().includes('/artists/flow/create')) {
       await page.goto(FLOW_CREATE_URL, { waitUntil: 'domcontentloaded' });
-    } else {
+    } else if (!frameMode) {
       await page.reload({ waitUntil: 'domcontentloaded' });
+    } else {
+      // Frame no tiene reload(). Disparar location.reload() desde adentro del
+      // propio frame casi siempre tira "Execution context was destroyed" en
+      // Playwright/CDP porque Chromium destruye el realm de JS ANTES de que
+      // la respuesta del evaluate() vuelva — no es un error real, la
+      // navegación sí ocurre igual. Se traga acá (no en el call site) porque
+      // pasa en la inmensa mayoría de los polls, no es una excepción rara.
+      await page.evaluate(() => window.location.reload()).catch(() => {});
+      await page.waitForLoadState('domcontentloaded').catch(() => {});
     }
     await page.waitForSelector('h3:has-text("Recent completions")', { timeout: 15000 });
     // Optimización de ejecución AGY: Asegura que React renderizó las cards de completados antes de evaluate
@@ -545,7 +564,8 @@ async function readRecentCompletion(expectedTitulo, { page: providedPage = null 
       const cardLocator = page.locator('.rounded-xl.border.border-slate-100').nth(cardData.cardIndex);
       await cardLocator.scrollIntoViewIfNeeded();
       await page.waitForTimeout(250);
-      await page.mouse.move(0, 0);
+      // El mouse es una sola API global de la pestaña, no existe por-frame.
+      await rootPage.mouse.move(0, 0);
       await page.waitForTimeout(50);
 
       const cardHandle = await cardLocator.elementHandle();
@@ -561,11 +581,26 @@ async function readRecentCompletion(expectedTitulo, { page: providedPage = null 
 
       await page.waitForTimeout(200);
 
+      // Si "page" es el Frame del iframe de monitoreo, position:fixed(0,0) la
+      // pinea al viewport INTERNO del frame, no al de la pestaña — hay que
+      // sumarle el offset del propio <iframe> en la página raíz para que el
+      // clip apunte al lugar correcto. page.screenshot() siempre se llama
+      // sobre rootPage porque Frame no tiene .screenshot().
+      let clipX = 0;
+      let clipY = 0;
+      if (frameMode) {
+        const frameElementHandle = await page.frameElement();
+        const iframeBox = await frameElementHandle.boundingBox();
+        if (!iframeBox) throw new Error('No se pudo ubicar el iframe de monitoreo en la página');
+        clipX = iframeBox.x;
+        clipY = iframeBox.y;
+      }
+
       // Timeout corto (5s) por si la ventana está minimizada y Chrome suspende el render
-      const imgBuffer = await page.screenshot({
+      const imgBuffer = await rootPage.screenshot({
         animations: 'disabled',
         timeout: 5000,
-        clip: { x: 0, y: 0, width: rect.width, height: rect.height }
+        clip: { x: clipX, y: clipY, width: rect.width, height: rect.height }
       });
 
       await cardHandle.evaluate((el, orig) => el.setAttribute('style', orig), rect.origStyle);
@@ -999,19 +1034,78 @@ async function runFlow({ resume = false } = {}) {
   console.log('   (Espera máxima: 30 min desde asignación. Fallback manual: node start-flow.js --done)');
   console.log('==================================================================\n');
 
-  // Pestaña dedicada para el poll (se abre una sola vez y se cierra al final).
-  // Después de crearla se devuelve el foco a la pestaña de trabajo del Flow.
-  let pollPage = null;
+  // Monitoreo invisible vía iframe en la misma pestaña de trabajo (no abre otra
+  // pestaña ni interrumpe). Si el iframe no se puede armar o el sitio bloquea
+  // el framing (X-Frame-Options / CSP frame-ancestors), cae a una pestaña
+  // dedicada en background — la técnica vieja, pero preferible a quedarse sin
+  // monitoreo en silencio durante 30 min.
+  let pollTarget = null; // Frame (iframe) o Page (fallback de pestaña)
+  let pollMode = null; // 'iframe' | 'tab'
+  let workPage = null;
   try {
     const browser = await getBrowser();
     const ctx = browser.contexts()[0];
-    const workPage = ctx ? ctx.pages().find((p) => p.url().includes('cancioneterna.com')) : null;
-    pollPage = await ctx.newPage();
-    await pollPage.goto(FLOW_CREATE_URL, { waitUntil: 'domcontentloaded' }).catch(() => {});
-    if (workPage) await workPage.bringToFront().catch(() => {});
+    workPage = ctx ? ctx.pages().find((p) => p.url().includes('cancioneterna.com')) : null;
+
+    if (workPage) {
+      await workPage.evaluate((url) => {
+        let iframe = document.getElementById('poll-iframe-hidden');
+        if (!iframe) {
+          iframe = document.createElement('iframe');
+          iframe.id = 'poll-iframe-hidden';
+          iframe.name = 'poll-iframe-hidden';
+          // Tamaño real (no 1x1): un iframe de 1x1px renderiza su documento
+          // interno en un viewport de 1x1, así que cualquier screenshot de
+          // una card adentro saldría vacío/recortado. opacity casi nula +
+          // z-index negativo + pointer-events:none lo mantiene invisible e
+          // inerte para Hector sin sacrificar el layout interno.
+          iframe.style.cssText = 'position: fixed; top: 0; left: 0; width: 1280px; height: 900px; border: 0; opacity: 0.01; pointer-events: none; z-index: -9999;';
+          document.body.appendChild(iframe);
+        }
+        iframe.src = url;
+      }, FLOW_CREATE_URL);
+
+      // Reintentos cortos (hasta ~10s) en vez de una espera fija de 2s: el
+      // frame suele adjuntarse casi al instante, pero un timeout fijo que
+      // falle una sola vez apagaría el monitoreo entero sin aviso. Además de
+      // encontrar el frame, confirmamos que realmente cargó "Recent
+      // completions" — si el sitio bloqueara el framing, el frame existiría
+      // pero quedaría en blanco/error para siempre.
+      const attachDeadline = Date.now() + 10000;
+      while (Date.now() < attachDeadline && !pollTarget) {
+        const frame = workPage.frames().find((f) => f.name() === 'poll-iframe-hidden');
+        if (frame) {
+          const ready = await frame
+            .waitForSelector('h3:has-text("Recent completions")', { timeout: 1500 })
+            .then(() => true)
+            .catch(() => false);
+          if (ready) pollTarget = frame;
+        }
+        if (!pollTarget) await new Promise((r) => setTimeout(r, 300));
+      }
+
+      if (pollTarget) {
+        pollMode = 'iframe';
+      } else {
+        console.log('  ⚠️ El iframe de monitoreo no cargó "Recent completions" (¿el sitio bloquea framing?). Cayendo a pestaña dedicada en background...');
+        await workPage.evaluate(() => {
+          const iframe = document.getElementById('poll-iframe-hidden');
+          if (iframe) iframe.remove();
+        }).catch(() => {});
+      }
+    }
+
+    if (!pollTarget) {
+      // Última opción: pestaña dedicada (abre una segunda pestaña, pero
+      // preferible a no monitorear nada durante 30 min).
+      const pollPage = await ctx.newPage();
+      await pollPage.goto(FLOW_CREATE_URL, { waitUntil: 'domcontentloaded' }).catch(() => {});
+      if (workPage) await workPage.bringToFront().catch(() => {});
+      pollTarget = pollPage;
+      pollMode = 'tab';
+    }
   } catch (e) {
-    console.log(`  ⚠️ No se pudo abrir la pestaña de monitoreo (${e.message}). Cerrá con --done.`);
-    pollPage = null;
+    console.log(`  ⚠️ No se pudo armar el monitoreo automático (${e.message}). Cerrá con --done.`);
   }
 
   let completion = null;
@@ -1020,7 +1114,7 @@ async function runFlow({ resume = false } = {}) {
   let notifiedSafe = false;
   let notifiedDanger = false;
 
-  if (pollPage) {
+  if (pollTarget) {
     while (Date.now() < deadline) {
       const elapsedMs = Date.now() - startedTime;
       const elapsedMin = elapsedMs / 60000;
@@ -1061,7 +1155,7 @@ async function runFlow({ resume = false } = {}) {
       }
 
       try {
-        completion = await readRecentCompletion(currentTitulo, { page: pollPage });
+        completion = await readRecentCompletion(currentTitulo, { page: pollTarget });
         if (completion) break;
       } catch (e) {
         // Título aún no coincide / formulario aún sin enviar — seguir esperando.
@@ -1073,7 +1167,14 @@ async function runFlow({ resume = false } = {}) {
       }
       await new Promise((r) => setTimeout(r, pollIntervalMs));
     }
-    await pollPage.close().catch(() => {});
+    if (pollMode === 'iframe' && workPage) {
+      await workPage.evaluate(() => {
+        const iframe = document.getElementById('poll-iframe-hidden');
+        if (iframe) iframe.remove();
+      }).catch(() => {});
+    } else if (pollMode === 'tab') {
+      await pollTarget.close().catch(() => {});
+    }
   }
 
   if (completion) {

@@ -6,39 +6,8 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { hardValidate, validateContentForWrite, parseSections } = require('../lib/song-validate');
+const { hardValidate, validateContentForWrite, parseSections, isSafeToPatch } = require('../lib/song-validate');
 
-// Checklist con los 20 ítems reales del RESPONSE FORMAT (run.js), todos ✓
-// salvo el condicional de multi-destinatario, que va en N/A por default
-// (single-recipient es el caso común).
-function buildChecklist({ multiRecipientLine = 'Destinatarios múltiples balanceados (si aplica): N/A' } = {}) {
-  return [
-    '**QA Checklist:**',
-    '- 6 secciones en orden: ✓',
-    '- 4 líneas por sección: ✓',
-    '- Nombre = primera palabra Chorus 1 y 2: ✓',
-    '- Nombre solo una vez por chorus: ✓',
-    '- Nombre ausente en Verse 1: ✓',
-    '- Chorus 1 ≠ Chorus 2: ✓',
-    '- Verse 2 con escena concreta: ✓',
-    '- Bridge con detalle más vulnerable: ✓',
-    '- Nada inventado: ✓',
-    '- Trato consistente en toda la letra: ✓',
-    '- Números, meses y siglas completos: ✓',
-    '- Título no cantable: ✓',
-    '- Sin guiones largos / punto y coma / dos puntos: ✓',
-    '- Sin líneas consecutivas con misma palabra inicial: ✓',
-    '- Todas las líneas con sentido lógico: ✓',
-    '- Estilo Suno incluye seseo + acento latinoamericano: ✓',
-    '- Sin diálogos citados textualmente de la encuesta: ✓',
-    `- ${multiRecipientLine}`,
-    '- POV consistente / voz de Dios si es "para mí": ✓',
-    '- Sin acróstico en el nombre: ✓',
-  ].join('\n');
-}
-
-// Respuesta base 100% válida para un destinatario único ("Frank"), trato tú.
-// Cada override reemplaza una sección puntual para probar un caso de fallo.
 function buildResponse({
   trato = 'tú',
   estiloSuno = 'Balada, piano suave, Latin American Spanish, neutral accent, seseo',
@@ -48,33 +17,53 @@ function buildResponse({
   verse2 = ['Después de un turno largo volvías feliz', 'Sacabas fuerzas para hacernos reír', 'Cada tropiezo lo hiciste sentir', 'Como un paso más hacia el porvenir'],
   bridge = ['Aquella noche me tomaste la mano', 'Y prometiste cuidar cada verano', 'Ese instante quedó grabado cercano', 'Fue la prueba de un amor soberano'],
   outro = ['Hoy te prometo un cariño sincero', 'Serás mi guía por todo el sendero', 'Con esta canción te digo primero', 'Te voy a amar por siempre entero'],
-  checklist = buildChecklist(),
+  checklist = {},
   preamble = '',
   advertencias = 'Ninguna',
 } = {}) {
-  const lyrics = [
-    '[Verse 1]', ...verse1,
-    '', '[Chorus 1]', ...chorus1,
-    '', '[Verse 2]', ...verse2,
-    '', '[Chorus 2]', ...chorus2,
-    '', '[Bridge]', ...bridge,
-    '', '[Outro]', ...outro,
-  ].join('\n');
+  const baseChecklist = {
+    "6_secciones_en_orden": true,
+    "4_lineas_por_seccion": true,
+    "nombre_primera_palabra_chorus": true,
+    "nombre_solo_una_vez_por_chorus": true,
+    "nombre_ausente_en_verse_1": true,
+    "chorus_1_distinto_chorus_2": true,
+    "verse_2_con_escena_concreta": true,
+    "bridge_con_detalle_vulnerable": true,
+    "nada_inventado": true,
+    "trato_consistente": true,
+    "numeros_meses_completos": true,
+    "titulo_no_cantable": true,
+    "sin_puntuacion_prohibida": true,
+    "sin_lineas_consecutivas_misma_palabra": true,
+    "todas_lineas_con_sentido": true,
+    "estilo_suno_incluye_seseo": true,
+    "sin_dialogos_textuales": true,
+    "destinatarios_multiples_balanceados": true,
+    "pov_consistente": true,
+    "sin_acrostico": true
+  };
 
-  return `${preamble}**Título:** Mi Canción Eterna
-**Voz:** Masculina
-**Trato:** ${trato}
-**Estilo Suno:** ${estiloSuno}
+  const finalChecklist = { ...baseChecklist, ...checklist };
 
----
+  const json = {
+    titulo: "Mi Canción Eterna",
+    voz: "Masculina",
+    trato,
+    estiloSuno,
+    letras: {
+      "Verse 1": verse1,
+      "Chorus 1": chorus1,
+      "Verse 2": verse2,
+      "Chorus 2": chorus2,
+      "Bridge": bridge,
+      "Outro": outro
+    },
+    qaChecklist: finalChecklist,
+    advertencias
+  };
 
-${lyrics}
-
----
-
-${checklist}
-
-**Advertencias:** ${advertencias}`;
+  return preamble + JSON.stringify(json, null, 2);
 }
 
 const SURVEY_SINGLE = "What's their name?: Frank";
@@ -106,49 +95,41 @@ test('mezcla de trato real (vos con usted declarado) sí se detecta', () => {
   assert.ok(failures.some((f) => f.startsWith('Mezcla de trato')), 'debería detectar la mezcla de trato real');
 });
 
-test('"N/A" en ítem condicional "(si aplica)" es válido, no cuenta como fallo', () => {
+test('ítem true condicional "(si aplica)" pasa', () => {
   const response = buildResponse({
-    checklist: buildChecklist({ multiRecipientLine: 'Destinatarios múltiples balanceados (si aplica): N/A' }),
+    checklist: { "destinatarios_multiples_balanceados": true },
   });
   const { valid, failures } = hardValidate(response, SURVEY_SINGLE);
-  assert.equal(valid, true, `no debería fallar por N/A condicional: ${failures.join(' | ')}`);
+  assert.equal(valid, true, `no debería fallar por true condicional: ${failures.join(' | ')}`);
 });
 
-test('texto antes de "**Título:**" (preámbulo filtrado) falla la validación', () => {
+test('texto antes del JSON (preámbulo filtrado) falla la validación', () => {
   const response = buildResponse({
     preamble: 'I need to fully restructure this song because the original had extra sections.\n\n',
   });
   const { valid, failures } = hardValidate(response, SURVEY_SINGLE);
   assert.equal(valid, false);
   assert.ok(
-    failures.some((f) => f.includes('texto antes de "**Título:**"')),
+    failures.some((f) => f.includes('texto antes del JSON')),
     `esperaba fallo de preámbulo, fallos: ${failures.join(' | ')}`
   );
 });
 
-test('línea de checklist marcada con "⚠️ REVISAR MANUALMENTE" en vez de ✗ cuenta como fallo', () => {
-  const badChecklist = buildChecklist().replace(
-    '- Sin diálogos citados textualmente de la encuesta: ✓',
-    '- Sin diálogos citados textualmente de la encuesta: ⚠️ REVISAR MANUALMENTE (cita textual detectada)'
-  );
-  const response = buildResponse({ checklist: badChecklist });
+test('línea de checklist marcada con false cuenta como fallo', () => {
+  const response = buildResponse({ checklist: { "sin_dialogos_textuales": false } });
   const { valid, failures } = hardValidate(response, SURVEY_SINGLE);
   assert.equal(valid, false);
   assert.ok(
-    failures.some((f) => f.includes('Claude marcó fallo') && f.includes('REVISAR MANUALMENTE')),
-    `esperaba fallo por símbolo no-✓, fallos: ${failures.join(' | ')}`
+    failures.some((f) => f.includes('Claude marcó fallo en checklist') && f.includes('sin_dialogos_textuales')),
+    `esperaba fallo por false, fallos: ${failures.join(' | ')}`
   );
 });
 
-test('cualquier línea de checklist sin ✓ literal (ni N/A condicional) cuenta como fallo', () => {
-  const badChecklist = buildChecklist().replace(
-    '- Título no cantable: ✓',
-    '- Título no cantable: revisar de nuevo'
-  );
-  const response = buildResponse({ checklist: badChecklist });
+test('cualquier línea de checklist en false cuenta como fallo', () => {
+  const response = buildResponse({ checklist: { "titulo_no_cantable": false } });
   const { valid, failures } = hardValidate(response, SURVEY_SINGLE);
   assert.equal(valid, false);
-  assert.ok(failures.some((f) => f.includes('Título no cantable')), `fallos: ${failures.join(' | ')}`);
+  assert.ok(failures.some((f) => f.includes('titulo_no_cantable')), `fallos: ${failures.join(' | ')}`);
 });
 
 test('extracción de nombres multi-destinatario: "Mis hijos Christopher y Soraya" no confunde "mis" con un nombre', () => {
@@ -159,13 +140,130 @@ test('extracción de nombres multi-destinatario: "Mis hijos Christopher y Soraya
   const response = buildResponse({
     chorus1,
     chorus2,
-    checklist: buildChecklist({ multiRecipientLine: 'Destinatarios múltiples balanceados (si aplica): ✓' }),
+    checklist: { "destinatarios_multiples_balanceados": true },
   });
   const { failures } = hardValidate(response, SURVEY_MULTI);
   const nameFailures = failures.filter((f) => f.toLowerCase().includes('mis') || f.includes('primera palabra'));
   assert.deepEqual(nameFailures, [], `no debería confundir "mis" con un nombre, fallos: ${nameFailures.join(' | ')}`);
   assert.ok(!failures.some((f) => f.includes('Christopher') && f.includes('no aparece')), 'Christopher debe reconocerse como presente');
   assert.ok(!failures.some((f) => f.includes('Soraya') && f.includes('no aparece')), 'Soraya debe reconocerse como presente');
+});
+
+test('2 destinatarios: ambos nombres en el mismo coro viola la regla posicional (Chorus 1 = Nombre 1, Chorus 2 = Nombre 2)', () => {
+  const response = buildResponse({
+    chorus1: ['Christopher y Soraya, los dos son mi calor', 'Sos ejemplo de esfuerzo y de valor', 'Cada día me llenás de honor', 'Gracias por su enorme corazón'],
+    chorus2: ['Ustedes dos iluminan el hogar', 'Con su fuerza me enseñaron a soñar', 'Nunca van a dejar de brillar', 'Los dos son mi razón de celebrar'],
+    checklist: { "destinatarios_multiples_balanceados": true },
+  });
+  const { valid, failures } = hardValidate(response, SURVEY_MULTI);
+  assert.equal(valid, false);
+  assert.ok(failures.some((f) => f.includes('mismo coro')), `debería detectar ambos nombres en el mismo coro, fallos: ${failures.join(' | ')}`);
+  assert.ok(failures.some((f) => f.includes('línea') && f.toLowerCase().includes('christopher') && f.toLowerCase().includes('soraya')), `debería detectar los dos nombres juntos en una línea, fallos: ${failures.join(' | ')}`);
+});
+
+test('4 destinatarios: cada nombre en línea 3 de su sección designada pasa sin fallos de posición', () => {
+  // Mismo patrón que el MOCK_RESPONSE real de lib/llm-provider.js (Scarlet/
+  // Emanuel/Nestor/Erick) — Verse 1 → Nombre 1, Chorus 1 → Nombre 2, Verse 2 →
+  // Nombre 3, Chorus 2 → Nombre 4, todos en línea 3 de su sección.
+  const survey4 = "What's their name?: Ana, Beto, Caro y Dani";
+  const response = buildResponse({
+    verse1: ['Una tarde tranquila el cielo se abrió', 'Recuerdo esa risa que jamás cambió', 'Ana, llegaste como un regalo del cielo', 'Algo en mi pecho supo que eras bueno'],
+    chorus1: ['Hoy le pido a Dios que los cuide a los cuatro', 'Que la vida les regrese bendiciones', 'Beto, tu fuerza siempre fue un milagro', 'Y esa fuerza guía mis oraciones'],
+    verse2: ['Después de un turno largo volvías feliz', 'Sacabas fuerzas para hacernos reír', 'Caro, tu risa alegre lo dice', 'Como un paso más hacia el porvenir'],
+    chorus2: ['Estoy orgullosa de cada camino tomado', 'De ver cómo cada día se acercan más', 'Dani, desde chiquito diste guerra a tu lado', 'Y hoy veo en tu alegría tu disfraz'],
+    checklist: { "destinatarios_multiples_balanceados": true },
+  });
+  const { failures } = hardValidate(response, survey4);
+  const positionFailures = failures.filter((f) => f.includes('línea 3') || f.includes('no aparece'));
+  assert.deepEqual(positionFailures, [], `no debería marcar fallos posicionales para el patrón de 4 nombres, fallos: ${positionFailures.join(' | ')}`);
+});
+
+test('4 destinatarios: nombre fuera de la línea 3 de su sección designada sí se detecta', () => {
+  const survey4 = "What's their name?: Ana, Beto, Caro y Dani";
+  const response = buildResponse({
+    // "Ana" nunca aparece en Verse 1 — debería fallar la regla de 4 nombres.
+    verse1: ['Una tarde tranquila el cielo se abrió', 'Recuerdo esa risa que jamás cambió', 'El tiempo pasaba lento y sereno', 'Algo en mi pecho supo que eras bueno'],
+    chorus1: ['Hoy le pido a Dios que los cuide a los cuatro', 'Que la vida les regrese bendiciones', 'Beto, tu fuerza siempre fue un milagro', 'Y esa fuerza guía mis oraciones'],
+    verse2: ['Después de un turno largo volvías feliz', 'Sacabas fuerzas para hacernos reír', 'Caro, tu risa alegre lo dice', 'Como un paso más hacia el porvenir'],
+    chorus2: ['Estoy orgullosa de cada camino tomado', 'De ver cómo cada día se acercan más', 'Dani, desde chiquito diste guerra a tu lado', 'Y hoy veo en tu alegría tu disfraz'],
+    checklist: { "destinatarios_multiples_balanceados": true },
+  });
+  const { valid, failures } = hardValidate(response, survey4);
+  assert.equal(valid, false);
+  assert.ok(failures.some((f) => f.includes('[Verse 1]') && f.includes('línea 3') && f.toLowerCase().includes('ana')), `debería detectar que Ana falta en la línea 3 de Verse 1, fallos: ${failures.join(' | ')}`);
+});
+
+test('5+ destinatarios con nombres largos y terminados en vocal acentuada (José, Bernabé) se detectan sin falsos negativos', () => {
+  // Bug real encontrado al escribir este test: \b nativo de JS no trata á/é/
+  // í/ó/ú/ñ como caracteres de palabra, así que un nombre que TERMINA en vocal
+  // acentuada (José, Bernabé) nunca matcheaba con \bJosé\b — la validación
+  // reportaba "el nombre no aparece" aunque estuviera ahí. Fix: nameRegex()
+  // en song-validate.js pasó a lookbehind/lookahead contra el alfabeto
+  // español, igual que el chequeo de trato más abajo en el mismo archivo.
+  const survey6 = "What's their name?: Maximiliano, Guadalupe, Bernabé, Estefanía, José y Jonathan";
+  const response = buildResponse({
+    verse1: ['Una tarde tranquila el cielo se abrió', 'Recuerdo esa risa que jamás cambió', 'Maximiliano, llegaste como un regalo', 'Algo en mi pecho supo que eras bueno'],
+    chorus1: ['Hoy le pido a Dios que los cuide a todos', 'Que la vida les regrese bendiciones', 'Guadalupe, tu fuerza fue un milagro', 'Y esa fuerza guía mis oraciones'],
+    verse2: ['Después de un turno largo volvías feliz', 'Sacabas fuerzas para hacernos reír', 'Bernabé, tu risa alegre lo dice', 'Como un paso más hacia el porvenir'],
+    chorus2: ['Estoy orgullosa de cada camino tomado', 'De ver cómo cada día se acercan más', 'Estefanía, desde chica diste guerra', 'Y hoy veo en tu alegría tu disfraz'],
+    bridge: ['Perdónenme si alguna vez sintieron', 'que les faltó algo más en el camino', 'José, tu nombre vive en cada verso', 'guarden esta canción como un destino'],
+    outro: ['Los amo más que a mi propia vida', 'eso nunca en la vida cambiará', 'Jonathan, mi amor siempre en tu partida', 'esta canción por siempre les quedará'],
+    checklist: { "destinatarios_multiples_balanceados": true },
+  });
+  const { failures } = hardValidate(response, survey6);
+  const nameFailures = failures.filter((f) => f.includes('no aparece') || f.includes('mismo coro') || f.includes('menciona más de un destinatario'));
+  assert.deepEqual(nameFailures, [], `no debería marcar fallos de nombre para 6 destinatarios bien distribuidos, fallos: ${nameFailures.join(' | ')}`);
+});
+
+test('encuesta larga y verbosa (miles de caracteres) no rompe extractFirstNames ni el parseo del JSON de respuesta', () => {
+  const relleno = 'Recordamos tantos momentos juntos, risas, viajes, tardes de domingo en familia, '.repeat(80);
+  const surveyLarga = [
+    "What's their name?: José y María",
+    `Their beautiful qualities: ${relleno}`,
+    `Special moments together: ${relleno}`,
+    `Special message: ${relleno}`,
+  ].join('\n');
+
+  const advertenciasLarga = 'Se aplicó re-escritura fonética menor para mejorar la pronunciación de Suno. '.repeat(20);
+
+  const response = buildResponse({
+    chorus1: ['José, hoy te canto con todo mi amor', 'Gracias por darme siempre tu calor', 'Cada momento contigo brilla mejor', 'Eres mi orgullo y mi mayor honor'],
+    chorus2: ['María, admiro tu fuerza y tu bondad', 'Marcaste mi vida con sinceridad', 'Nunca dudé de tu generosidad', 'Sos ejemplo puro de humanidad'],
+    checklist: { "destinatarios_multiples_balanceados": true },
+    advertencias: advertenciasLarga,
+  });
+
+  const { valid, failures, parsedJson } = hardValidate(response, surveyLarga);
+  assert.equal(valid, true, `una encuesta/respuesta verbosa no debería romper el parseo ni la validación, fallos: ${failures.join(' | ')}`);
+  assert.equal(parsedJson.advertencias, advertenciasLarga, 'el JSON debería parsearse completo, sin truncar el campo largo');
+});
+
+test('patchableIssues: dígito y puntuación prohibida se ubican con sección+línea exactas', () => {
+  const response = buildResponse({
+    verse2: ['Llegaste un 2008 lleno de ilusión', 'Sin saber; que cambiarías mi vida', 'Cada tropiezo lo hiciste sentir', 'Como un paso más hacia el porvenir'],
+  });
+  const { patchableIssues } = hardValidate(response, SURVEY_SINGLE);
+  const digitIssue = patchableIssues.find((p) => p.kind === 'digit');
+  const punctIssue = patchableIssues.find((p) => p.kind === 'punctuation');
+  assert.ok(digitIssue, 'debería reportar un patchableIssue de tipo digit');
+  assert.equal(digitIssue.section, 'Verse 2');
+  assert.equal(digitIssue.lineIndex, 0);
+  assert.ok(punctIssue, 'debería reportar un patchableIssue de tipo punctuation');
+  assert.equal(punctIssue.section, 'Verse 2');
+  assert.equal(punctIssue.lineIndex, 1);
+});
+
+test('isSafeToPatch: true solo cuando TODOS los fallos son de categorías parcheables', () => {
+  assert.equal(isSafeToPatch(['Número en dígitos encontrado: "2008" — debe estar en palabras']), true);
+  assert.equal(isSafeToPatch([
+    'Puntuación prohibida encontrada: ";" — usar solo comas',
+    'Frase incoherente detectada: "genuyo"',
+  ]), true);
+  assert.equal(isSafeToPatch([]), false, 'sin fallos no debería activar el camino de parche (nada que parchear)');
+  assert.equal(isSafeToPatch([
+    'Número en dígitos encontrado: "2008" — debe estar en palabras',
+    'El nombre "ana" no aparece en la letra, pero es uno de los destinatarios declarados',
+  ]), false, 'un solo fallo no-parcheable (nombre) debe bloquear todo el camino de parche, aunque el resto sí sean parcheables');
 });
 
 test('nombre incorrecto en Chorus 1 (single-recipient) sí se detecta', () => {
@@ -214,7 +312,9 @@ test('puntuación prohibida (em dash / punto y coma / dos puntos) se detecta', (
 });
 
 test('sección faltante (solo 5 de 6) se detecta con mensaje de orden', () => {
-  const brokenResponse = buildResponse().replace('[Bridge]\nAquella noche me tomaste la mano\nY prometiste cuidar cada verano\nEse instante quedó grabado cercano\nFue la prueba de un amor soberano\n\n', '');
+  const baseJson = JSON.parse(buildResponse());
+  delete baseJson.letras['Bridge'];
+  const brokenResponse = JSON.stringify(baseJson);
   const { valid, failures } = hardValidate(brokenResponse, SURVEY_SINGLE);
   assert.equal(valid, false);
   assert.ok(failures.some((f) => f.includes('Se encontraron 5 secciones')), `fallos: ${failures.join(' | ')}`);
@@ -239,23 +339,20 @@ test('estilo Suno sin "seseo" se detecta', () => {
 test('validateContentForWrite: respuesta cortada justo después de "**Título:**" se detecta como truncación', () => {
   // Simula el caso real de LESSONS.md: la respuesta corta a mitad de generación
   // (stop_reason: max_tokens) y no queda nada después del label.
-  const truncated = '**Título:**';
+  const truncated = '{"titulo": "Mi Canci';
   const { ok, failures } = validateContentForWrite(truncated);
   assert.equal(ok, false);
   assert.ok(failures.some((f) => f.includes('Falta **Título:**')), `fallos: ${failures.join(' | ')}`);
 });
 
 test('validateContentForWrite: contenido completo pasa', () => {
-  const full = buildResponse();
-  const tituloIndex = full.search(/\*\*Título:\*\*/i);
-  const checklistIndex = full.search(/\*\*QA Checklist:\*\*/i);
-  const lyricsContent = full.slice(tituloIndex, checklistIndex);
-  const { ok, failures } = validateContentForWrite(lyricsContent);
+  const full = JSON.parse(buildResponse());
+  const { ok, failures } = validateContentForWrite(full);
   assert.equal(ok, true, `fallos: ${failures.join(' | ')}`);
 });
 
 test('parseSections respeta el orden y separa líneas correctamente', () => {
-  const { sections, errors } = parseSections(buildResponse());
+  const { sections, errors } = parseSections(JSON.parse(buildResponse()));
   assert.deepEqual(errors, []);
   assert.equal(sections['Verse 1'].length, 4);
   assert.equal(sections['Chorus 1'][0].startsWith('Frank'), true);

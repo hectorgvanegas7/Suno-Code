@@ -2,19 +2,31 @@
 # lib/clap_score.py — Evalúa calidad de audio con CLAP (Contrastive Language-Audio
 # Pretraining) y devuelve JSON. 100% local, cero API de nube.
 #
-# Uso: python clap_score.py <audio...> [--device cuda|cpu] [--model MODEL_ID]
+# Uso: python clap_score.py <audio...> [--device cuda|cpu] [--model MODEL_ID] [--dims a,b,c]
 #   - Positionals que terminan en .mp3/.wav/.m4a/.flac/.ogg son audios.
 #   - Con VARIOS audios el modelo se carga UNA sola vez (mismo patrón que transcribe.py).
 #   - Sin --device: cpu (seguro). Con --device cuda: intenta CUDA y si falla,
 #     reintenta automáticamente en CPU (warning a stderr, JSON limpio a stdout).
 #   - --model: ID de HuggingFace (default: laion/clap-htsat-unfused).
+#   - --dims: subconjunto de dimensiones a calcular, separadas por coma (default:
+#     las 5). clap_score y el weighted-average se calculan solo sobre esas
+#     dimensiones. Pensado para callers que corren CLAP dos veces sobre distintas
+#     fuentes (ej. voz aislada vs mix completo) y después recombinan resultados.
+#   - --jobs-stdin: en vez de leer archivos/--dims de argv, lee por stdin un
+#     array JSON de jobs — [{"file": "...", "dims": ["vocal_clarity", ...]}] —
+#     y los procesa todos con el modelo cargado UNA sola vez, incluso si cada
+#     job pide un subconjunto de --dims distinto (ej. mix + voz aislada de A y
+#     B en una sola invocación en vez de dos). Ignora los positionals/--dims de
+#     argv en este modo. "dims" es opcional por job (default: las 5).
 #
 # Output (stdout, una sola línea JSON):
 #   - 1 audio  → objeto único (backward-compatible con callers de 1 archivo).
 #   - N audios → { "batch": true, "results": [{ ... }] }.
 #   Cada resultado incluye:
-#     clap_score:  0-100 (promedio ponderado de dimensiones)
-#     dimensions:  { vocal_clarity, production, emotion, artifacts, ending }
+#     clap_score:  0-100 (promedio ponderado de las dimensiones activas)
+#     dimensions:  { vocal_clarity, production, emotion, artifacts, ending } (o subset con --dims)
+#     weights:     peso usado por cada dimensión activa — para recombinar sin
+#                  duplicar la tabla de pesos en otro lenguaje
 #     model, device, chunks_analyzed, duration_seconds
 #   Si falla globalmente, imprime {"error": "mensaje"} y sale con código 1.
 #
@@ -87,6 +99,8 @@ def parse_args(argv):
         "audio_paths": [],
         "device": "cpu",
         "model_id": "laion/clap-htsat-unfused",
+        "dims": None,  # None = las 5 dimensiones (default, compatible con callers viejos)
+        "jobs_stdin": False,
     }
     i = 0
     while i < len(argv):
@@ -96,6 +110,12 @@ def parse_args(argv):
         elif argv[i] == "--model" and i + 1 < len(argv):
             args["model_id"] = argv[i + 1]
             i += 2
+        elif argv[i] == "--dims" and i + 1 < len(argv):
+            args["dims"] = [d.strip() for d in argv[i + 1].split(",") if d.strip()]
+            i += 2
+        elif argv[i] == "--jobs-stdin":
+            args["jobs_stdin"] = True
+            i += 1
         elif argv[i].lower().endswith(AUDIO_EXTENSIONS):
             args["audio_paths"].append(argv[i])
             i += 1
@@ -223,16 +243,30 @@ def compute_embeddings(model, processor, audio_chunks, text_prompts, device):
     return audio_embed.float(), text_embeds.float()
 
 
-def score_one(model, processor, audio_path, device):
-    """Evalúa un archivo de audio. Devuelve dict con scores o error."""
+def score_one(model, processor, audio_path, device, dims=None):
+    """Evalúa un archivo de audio. `dims`: lista opcional de nombres de
+    DIMENSIONS a calcular (None = las 5). Útil para evaluar solo vocal_clarity/
+    emotion sobre un stem de voz aislada, o solo production/artifacts/ending
+    sobre el mix completo (esas 3 evalúan la mezcla, no tienen sentido sobre
+    una pista de voz sola). Devuelve dict con scores, pesos usados, o error."""
     import torch
+
+    if dims is not None:
+        unknown = [d for d in dims if d not in DIMENSIONS]
+        if unknown:
+            raise ValueError(f"Dimensiones desconocidas: {', '.join(unknown)} (válidas: {', '.join(DIMENSIONS)})")
+        active_dimensions = {k: v for k, v in DIMENSIONS.items() if k in dims}
+        if not active_dimensions:
+            raise ValueError("--dims no dejó ninguna dimensión activa")
+    else:
+        active_dimensions = DIMENSIONS
 
     chunks, duration_sec = load_audio_chunks(audio_path)
 
     # Recopilar todos los prompts (positivos y negativos intercalados)
     all_prompts = []
     dim_order = []
-    for dim_name, dim_cfg in DIMENSIONS.items():
+    for dim_name, dim_cfg in active_dimensions.items():
         all_prompts.append(dim_cfg["positive"])
         all_prompts.append(dim_cfg["negative"])
         dim_order.append(dim_name)
@@ -262,16 +296,22 @@ def score_one(model, processor, audio_path, device):
             dim_score = 50  # Indeterminado → neutro
 
         dimensions[dim_name] = dim_score
-        weight = DIMENSIONS[dim_name]["weight"]
+        weight = active_dimensions[dim_name]["weight"]
         weighted_sum += dim_score * weight
         weight_total += weight
 
-    # Score global = promedio ponderado
+    # Score global = promedio ponderado (solo de las dimensiones activas)
     clap_score = round(weighted_sum / weight_total) if weight_total > 0 else 50
+
+    # weights viaja en la respuesta para que quien combine resultados de varias
+    # corridas (ej. mix + voz aislada) recalcule el promedio ponderado global
+    # sin tener que duplicar esta tabla de pesos en otro lenguaje.
+    weights = {dim_name: active_dimensions[dim_name]["weight"] for dim_name in dim_order}
 
     return {
         "clap_score": clap_score,
         "dimensions": dimensions,
+        "weights": weights,
         "chunks_analyzed": len(chunks),
         "duration_seconds": round(duration_sec, 1),
     }
@@ -289,7 +329,20 @@ def main():
         sys.exit(1)
 
     args = parse_args(sys.argv[1:])
-    if not args["audio_paths"]:
+
+    jobs = None
+    if args["jobs_stdin"]:
+        try:
+            jobs = json.loads(sys.stdin.read())
+            if not isinstance(jobs, list) or not jobs:
+                raise ValueError("el JSON de stdin debe ser una lista no vacía de jobs")
+            for j in jobs:
+                if not isinstance(j, dict) or "file" not in j:
+                    raise ValueError('cada job necesita al menos {"file": "..."}')
+        except Exception as e:
+            print(json.dumps({"error": f"--jobs-stdin: JSON inválido en stdin: {e}"}))
+            sys.exit(1)
+    elif not args["audio_paths"]:
         print(
             json.dumps(
                 {
@@ -326,7 +379,8 @@ def main():
         sys.exit(1)
 
     # Verificar que los archivos existen antes de cargar el modelo
-    for ap in args["audio_paths"]:
+    files_to_check = [j["file"] for j in jobs] if jobs is not None else args["audio_paths"]
+    for ap in files_to_check:
         if not os.path.isfile(ap):
             print(json.dumps({"error": f"Archivo no encontrado: {ap}"}))
             sys.exit(1)
@@ -343,14 +397,22 @@ def main():
     load_ms = int((time.time() - load_start) * 1000)
     print(f"   CLAP modelo cargado en {load_ms}ms", file=sys.stderr)
 
-    # Procesar cada archivo
-    single = len(args["audio_paths"]) == 1
-    results = []
+    # Procesar cada archivo. En --jobs-stdin cada job puede pedir un subconjunto
+    # de dimensiones distinto (ej. mix completo vs voz aislada) sin pagar una
+    # carga de modelo por cada uno — el modelo ya se cargó una sola vez arriba,
+    # independientemente de cuántos --dims distintos haya en la lista de jobs.
+    if jobs is not None:
+        single = len(jobs) == 1
+        audio_and_dims = [(j["file"], j.get("dims")) for j in jobs]
+    else:
+        single = len(args["audio_paths"]) == 1
+        audio_and_dims = [(p, args["dims"]) for p in args["audio_paths"]]
 
-    for audio_path in args["audio_paths"]:
+    results = []
+    for audio_path, dims in audio_and_dims:
         started = time.time()
         try:
-            result = score_one(model, processor, audio_path, actual_device)
+            result = score_one(model, processor, audio_path, actual_device, dims=dims)
         except Exception as e:
             result = {"error": str(e)}
         result["file"] = audio_path
@@ -359,8 +421,10 @@ def main():
         result["device"] = actual_device
         results.append(result)
 
-    # Output JSON
-    if single:
+    # Output JSON. --jobs-stdin siempre devuelve forma batch (el caller —
+    # runClapScoreJobs en Node— siempre espera results[], nunca el objeto
+    # único de compatibilidad de 1 solo archivo del modo CLI clásico).
+    if single and jobs is None:
         out = results[0]
         print(json.dumps(out, ensure_ascii=False))
         if "error" in out and "clap_score" not in out:

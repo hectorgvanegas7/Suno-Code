@@ -27,7 +27,8 @@ const { enterFlowAndEnsureAssignment } = require('./lib/flow-helpers');
 const { generate } = require('./lib/llm-provider');
 const pipelineState = require('./lib/pipeline-state');
 const { getSurveyHash, readCache, writeCache } = require('./lib/cache-helpers');
-const { hardValidate, validateContentForWrite, extractField } = require('./lib/song-validate');
+const { hardValidate, validateContentForWrite, extractField, convertJsonToMarkdown, isSafeToPatch } = require('./lib/song-validate');
+const { patchSongLines } = require('./lib/song-corrector');
 
 const args = process.argv.slice(2);
 const isDryRun = args.includes('--dry-run');
@@ -282,76 +283,46 @@ If still failing after 3 attempts, deliver with: ⚠️ REVISAR MANUALMENTE: [li
 
 ### RESPONSE FORMAT
 
-Respond with exactly this format — no extra text before or after:
+Respond with EXACTLY this JSON format and nothing else. Do not wrap in markdown code blocks like \`\`\`json ... \`\`\`. Output raw JSON only:
 
-**Título:** [song title]
-**Voz:** [Masculina / Femenina]
-**Trato:** [tú / usted / vos]
-**Estilo Suno:** [style prompt written entirely in English, always ending with "Latin American Spanish, neutral accent, seseo"]
-
----
-
-[Verse 1]
-line 1
-line 2
-line 3
-line 4
-
-[Chorus 1]
-line 1
-line 2
-line 3
-line 4
-
-[Verse 2]
-line 1
-line 2
-line 3
-line 4
-
-[Chorus 2]
-line 1
-line 2
-line 3
-line 4
-
-[Bridge]
-line 1
-line 2
-line 3
-line 4
-
-[Outro]
-line 1
-line 2
-line 3
-line 4
-
----
-
-**QA Checklist:**
-- 6 secciones en orden: ✓/✗
-- 4 líneas por sección: ✓/✗
-- Nombre = primera palabra Chorus 1 y 2: ✓/✗
-- Nombre solo una vez por chorus: ✓/✗
-- Nombre ausente en Verse 1: ✓/✗
-- Chorus 1 ≠ Chorus 2: ✓/✗
-- Verse 2 con escena concreta: ✓/✗
-- Bridge con detalle más vulnerable: ✓/✗
-- Nada inventado: ✓/✗
-- Trato consistente en toda la letra: ✓/✗
-- Números, meses y siglas completos: ✓/✗
-- Título no cantable: ✓/✗
-- Sin guiones largos / punto y coma / dos puntos: ✓/✗
-- Sin líneas consecutivas con misma palabra inicial: ✓/✗
-- Todas las líneas con sentido lógico: ✓/✗
-- Estilo Suno incluye seseo + acento latinoamericano: ✓/✗
-- Sin diálogos citados textualmente de la encuesta: ✓/✗
-- Destinatarios múltiples balanceados (si aplica): ✓/✗
-- POV consistente / voz de Dios si es "para mí": ✓/✗
-- Sin acróstico en el nombre: ✓/✗
-
-**Advertencias:** [any phonetic re-spelling used, or other concerns for manual review — write "Ninguna" if none]`;
+{
+  "titulo": "[song title]",
+  "voz": "[Masculina / Femenina]",
+  "trato": "[tú / usted / vos]",
+  "estiloSuno": "[style prompt written entirely in English, always ending with 'Latin American Spanish, neutral accent, seseo']",
+  "letras": {
+    "Verse 1": ["line 1", "line 2", "line 3", "line 4"],
+    "Chorus 1": ["line 1", "line 2", "line 3", "line 4"],
+    "Verse 2": ["line 1", "line 2", "line 3", "line 4"],
+    "Chorus 2": ["line 1", "line 2", "line 3", "line 4"],
+    "Bridge": ["line 1", "line 2", "line 3", "line 4"],
+    "Outro": ["line 1", "line 2", "line 3", "line 4"]
+  },
+  "qaChecklist": {
+    "6_secciones_en_orden": true,
+    "4_lineas_por_seccion": true,
+    "nombre_primera_palabra_chorus": true,
+    "nombre_solo_una_vez_por_chorus": true,
+    "nombre_ausente_en_verse_1": true,
+    "chorus_1_distinto_chorus_2": true,
+    "verse_2_con_escena_concreta": true,
+    "bridge_con_detalle_vulnerable": true,
+    "nada_inventado": true,
+    "trato_consistente": true,
+    "numeros_meses_completos": true,
+    "titulo_no_cantable": true,
+    "sin_puntuacion_prohibida": true,
+    "sin_lineas_consecutivas_misma_palabra": true,
+    "todas_lineas_con_sentido": true,
+    "estilo_suno_incluye_seseo": true,
+    "sin_dialogos_textuales": true,
+    "destinatarios_multiples_balanceados": true,
+    "pov_consistente": true,
+    "sin_acrostico": true
+  },
+  "foneticaAplicada": true,
+  "advertencias": "[any phonetic re-spelling used, or other concerns for manual review — write 'Ninguna' if none]"
+}`;
 
 async function readSongId(page) {
   try {
@@ -404,8 +375,8 @@ async function readSurveyResponses(page) {
   });
 }
 
-async function generateSongWithProvider(surveyText, targetProvider) {
-  return await generate(targetProvider, surveyText, SYSTEM_PROMPT, isDryRun);
+async function generateSongWithProvider(surveyText, targetProvider, maxTokens) {
+  return await generate(targetProvider, surveyText, SYSTEM_PROMPT, isDryRun, { maxTokens });
 }
 
 // ─── VALIDACIÓN ESTRUCTURAL DURA ──────────────────────────────────────────────
@@ -449,42 +420,79 @@ Run the full validation checklist on the improved lyrics before delivering. If a
 }
 
 const MAX_GENERATION_ATTEMPTS = 3;
+const DEFAULT_MAX_TOKENS = 8192;
+const MAX_TOKENS_ESCALATION_STEP = 4000;
+const MAX_TOKENS_CEILING = 16000; // por encima de esto conviene streaming, que generate() no usa (fetch simple)
 
 async function generateSongWithSelfCorrection(surveyContent, baseUserMessageOverride) {
   const baseUserMessage = baseUserMessageOverride || `Here is the survey for this song:\n\n${surveyContent}`;
   let userMessage = baseUserMessage;
   let lastResponse = null;
   let lastFailures = [];
+  let maxTokens = DEFAULT_MAX_TOKENS;
 
   for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt++) {
-    console.log(`\nGenerando letra con ${provider} (intento ${attempt}/${MAX_GENERATION_ATTEMPTS})...`);
-    lastResponse = await generateSongWithProvider(userMessage, provider);
+    console.log(`\nGenerando letra con ${provider} (intento ${attempt}/${MAX_GENERATION_ATTEMPTS}, max_tokens=${maxTokens})...`);
+    const { text, stopReason } = await generateSongWithProvider(userMessage, provider, maxTokens);
+    lastResponse = text;
 
-    const { valid, failures } = hardValidate(lastResponse, surveyContent);
+    const { valid, failures, parsedJson, patchableIssues } = hardValidate(lastResponse, surveyContent);
     lastFailures = failures;
 
     if (valid) {
       console.log('✅ Validación estructural + QA: todos los ítems pasaron.');
-      return { fullResponse: lastResponse, passedQA: true };
+      return { fullResponse: lastResponse, parsedJson, passedQA: true };
     }
 
     console.log(`❌ Fallos en intento ${attempt}:`);
     lastFailures.forEach((line) => console.log(`  • ${line.trim()}`));
 
-    // Construir mensaje correctivo específico para el siguiente intento
-    const correctiveNotes = [
-      `CORRECCIONES OBLIGATORIAS para el siguiente intento (${attempt + 1}/${MAX_GENERATION_ATTEMPTS}):`,
-      ...lastFailures.map((f) => `- ${f}`),
-    ].join('\n');
+    // Corrector barato: si TODOS los fallos son mecánicos y localizables
+    // (dígito, puntuación, frase incoherente, palabra repetida — ver
+    // isSafeToPatch en lib/song-validate.js), probamos parchear solo esas
+    // líneas con un modelo barato (Haiku) antes de pagar un regen completo
+    // con el modelo caro. No cuenta como uno de los MAX_GENERATION_ATTEMPTS
+    // — es un side-quest opcional; si falla o no deja todo limpio, el flujo
+    // sigue exactamente como si no hubiera pasado nada.
+    if (parsedJson && isSafeToPatch(lastFailures) && patchableIssues.length > 0) {
+      console.log(`\n💊 Fallos 100% parcheables (${patchableIssues.length} línea[s]) — probando corrección barata antes de regenerar todo...`);
+      try {
+        const patchedJson = await patchSongLines(parsedJson, patchableIssues);
+        const patchedText = JSON.stringify(patchedJson);
+        const revalidated = hardValidate(patchedText, surveyContent);
+        if (revalidated.valid) {
+          console.log('✅ Parche barato resolvió todos los fallos — se evitó un regen completo con el modelo caro.');
+          return { fullResponse: patchedText, parsedJson: revalidated.parsedJson, passedQA: true };
+        }
+        console.log(`⚠️ El parche no dejó todo limpio (${revalidated.failures.length} fallo[s] restante[s]) — sigue el flujo normal.`);
+      } catch (e) {
+        console.log(`⚠️ Corrector barato falló (${e.message}) — sigue el flujo normal.`);
+      }
+    }
 
     if (attempt < MAX_GENERATION_ATTEMPTS) {
-      console.log(`\n⚠️ Regenerando con instrucciones correctivas...\n`);
-      userMessage = `${baseUserMessage}\n\n${correctiveNotes}`;
+      if (stopReason === 'max_tokens') {
+        // No es contenido incorrecto — se quedó sin presupuesto de tokens
+        // (letra cortada, o el thinking se lo comió). Las instrucciones
+        // correctivas no arreglan esto; hace falta más espacio.
+        maxTokens = Math.min(maxTokens + MAX_TOKENS_ESCALATION_STEP, MAX_TOKENS_CEILING);
+        console.log(`\n⚠️ stop_reason=max_tokens — subiendo max_tokens a ${maxTokens} y reintentando (sin instrucciones correctivas, el contenido no llegó a evaluarse)...\n`);
+      } else {
+        // Construir mensaje correctivo específico para el siguiente intento
+        const correctiveNotes = [
+          `CORRECCIONES OBLIGATORIAS para el siguiente intento (${attempt + 1}/${MAX_GENERATION_ATTEMPTS}):`,
+          ...lastFailures.map((f) => `- ${f}`),
+        ].join('\n');
+        console.log(`\n⚠️ Regenerando con instrucciones correctivas...\n`);
+        userMessage = `${baseUserMessage}\n\n${correctiveNotes}`;
+      }
     }
   }
 
   console.log(`\n⚠️ No se logró pasar la validación después de ${MAX_GENERATION_ATTEMPTS} intentos. Se guardará con advertencia.`);
-  return { fullResponse: lastResponse, passedQA: false };
+  // Parseo de best-effort si falló, para que validateContentForWrite no rompa del todo
+  const { parsedJson } = hardValidate(lastResponse, surveyContent);
+  return { fullResponse: lastResponse, parsedJson, passedQA: false };
 }
 
 // ─── DESCONEXIÓN GARANTIZADA DE LA SESIÓN CDP ─────────────────────────────────
@@ -649,35 +657,26 @@ process.on('uncaughtException', async (err) => {
     const surveyHash = getSurveyHash(surveyContent);
     const cachedResponse = !isDryRun ? readCache(surveyHash) : null;
 
-    let fullResponse, passedQA;
+    let fullResponse, parsedJson, passedQA;
 
     if (cachedResponse && !isRedo) {
       console.log('♻️  Usando letra en caché local (se omitió la llamada al LLM)...');
       fullResponse = cachedResponse.fullResponse;
+      parsedJson = cachedResponse.parsedJson;
       passedQA = cachedResponse.passedQA;
     } else {
       const result = await generateSongWithSelfCorrection(surveyContent, baseUserMessage);
       fullResponse = result.fullResponse;
+      parsedJson = result.parsedJson;
       passedQA = result.passedQA;
       if (passedQA && !isDryRun) {
         writeCache(surveyHash, result);
       }
     }
-    // Si quedó razonamiento/preámbulo antes de "**Título:**" (ej. cuando se
-    // agota MAX_GENERATION_ATTEMPTS y se guarda con advertencia), arrancar
-    // desde ahí — nunca guardar ese texto en song.txt.
-    const tituloIndex = fullResponse.search(/\*\*Título:\*\*/i);
-    const responseFromTitulo = tituloIndex > 0 ? fullResponse.slice(tituloIndex) : fullResponse;
-
-    const checklistIndex = responseFromTitulo.search(/\*\*QA Checklist:\*\*/i);
-    const lyricsContent = (checklistIndex === -1 ? responseFromTitulo : responseFromTitulo.slice(0, checklistIndex))
-      .replace(/-{3,}\s*$/, '')
-      .trim();
-
     // Validación obligatoria antes de escribir: si la respuesta no tiene título ni
     // secciones, es truncación o chain-of-thought crudo — no guardar como song.txt
     // válido ni seguir hacia suno-fill.
-    const writeCheck = validateContentForWrite(lyricsContent);
+    const writeCheck = validateContentForWrite(parsedJson);
     if (!writeCheck.ok) {
       console.error('\n❌ VALIDACIÓN PRE-ESCRITURA FALLÓ — respuesta sin estructura mínima:');
       writeCheck.failures.forEach((f) => console.error(`  • ${f}`));
@@ -698,13 +697,6 @@ process.on('uncaughtException', async (err) => {
       throw new Error('Validación pre-escritura falló — respuesta corrupta o truncada.');
     }
 
-    // Advertencias es el último campo de la respuesta — puede tener varias líneas
-    // (ej. varios bullets), así que capturamos hasta el final en vez de una sola línea.
-    const advertenciasMatch = fullResponse.match(/\*\*Advertencias:\*\*\s*([\s\S]+)/i);
-    const advertencias = advertenciasMatch ? advertenciasMatch[1].trim() : null;
-    const advertenciasLine =
-      advertencias && !/^ninguna\.?$/i.test(advertencias) ? `**Advertencias:** ${advertencias}\n\n` : '';
-
     const now = new Date();
     const dateStr = `${now.getMonth() + 1}.${String(now.getDate()).padStart(2, '0')}.${now.getFullYear()}`;
     const notesLine = `NOTES: ${dateStr}. Hector. PS0180. Letra + Suno. Song ID: ${songId}`;
@@ -713,7 +705,7 @@ process.on('uncaughtException', async (err) => {
       ? ''
       : `⚠️ ADVERTENCIA: no pasó la validación después de ${MAX_GENERATION_ATTEMPTS} intentos. Revisar manualmente.\n\n`;
 
-    const songContent = `${warningBanner}${lyricsContent}\n\n${advertenciasLine}${notesLine}`;
+    const songContent = `${warningBanner}${convertJsonToMarkdown(parsedJson)}\n\n${notesLine}`;
 
     fs.writeFileSync(SONG_PATH, songContent, 'utf-8');
     console.log(`\nCanción guardada en ${SONG_PATH}`);
