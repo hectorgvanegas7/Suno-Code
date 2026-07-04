@@ -12,39 +12,13 @@
 const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
-const { pauseForHumanInteraction, isPortUp } = require('./lib/playwright-helpers');
+const { pauseForHumanInteraction, isPortUp, connectToFlowTab } = require('./lib/playwright-helpers');
 const state = require('./lib/pipeline-state');
-const { parseSongFile } = require('./lib/song-file');
+const { parseSongFile, buildRedoAwareNotes } = require('./lib/song-file');
 
 const SONG_PATH = path.join(__dirname, 'song.txt');
 const DEBUG_PORT = 9333;
 const SCREENSHOT_PATH = path.join(__dirname, 'flow-submit-verify.png');
-
-// Strips "Song ID: xxxx" when building the text for the Flow's Notes field.
-// The portal already has its own Song ID field — repeating it in Notes is redundant.
-// song.txt keeps the full NOTES line (with Song ID) for internal tracking.
-function buildFlowNotes(rawNotes) {
-  return rawNotes.replace(/\s*Song ID:\s*\S+/i, '').trim();
-}
-
-async function connectToFlowTab(debugPort = DEBUG_PORT) {
-  const browser = await chromium.connectOverCDP(`http://localhost:${debugPort}`);
-  const contexts = browser.contexts();
-  if (contexts.length === 0) {
-    throw new Error("No hay contextos de navegador disponibles");
-  }
-  const context = contexts[0];
-  const pages = context.pages();
-  const page = pages.find((p) => p.url().includes('cancioneterna.com'));
-  if (!page) {
-    const openUrls = pages.map((p) => p.url()).join(', ') || '(ninguna)';
-    throw new Error(
-      `No se encontró ninguna tab de cancioneterna.com en el Chrome del puerto ${debugPort}. Tabs abiertas: ${openUrls}`
-    );
-  }
-  await page.bringToFront();
-  return { browser, page };
-}
 
 // Pone el valor en un <input>/<textarea> controlado por React usando el
 // native setter del prototipo (evita que React ignore .value = x directo),
@@ -142,15 +116,16 @@ async function findNotesField(page) {
   if (!titulo || !lyrics || !notes) {
     throw new Error('No se pudo parsear título, letra o NOTES de song.txt — ¿archivo corrupto o truncado?');
   }
-  let flowNotes = buildFlowNotes(notes);
-  // REDO: nota simplificada acordada con QC. Solo se confía en state.json si
-  // el título coincide con song.txt (nunca asumir que state es de esta canción
-  // — ver lib/pipeline-state.js). Se APPENDEA debajo del feedback existente en
-  // el campo, jamás lo reemplaza (el campo #notes es compartido con QC).
+  // Nota estándar SIEMPRE presente ("<fecha>. Hector. PS0180. Letra + Suno.")
+  // + "Redo Fix, corregido" agregado DEBAJO si es REDO — ver
+  // buildRedoAwareNotes en lib/song-file.js. Solo se confía en state.json si
+  // el título coincide con song.txt (nunca asumir que state es de esta
+  // canción — ver lib/pipeline-state.js).
   const st = state.read();
-  if (st && st.isRedo && st.titulo === titulo) {
-    flowNotes = 'Redo Fix, corregido';
-    console.log('  REDO detectado (state.json) — nota para el Flow: "Redo Fix, corregido" (se agrega debajo del feedback existente).');
+  const isRedo = !!(st && st.isRedo && st.titulo === titulo);
+  const flowNotes = buildRedoAwareNotes(notes, { isRedo });
+  if (isRedo) {
+    console.log('  REDO detectado (state.json) — se agrega "Redo Fix, corregido" debajo de la nota estándar.');
   }
   console.log('  Título:', titulo);
   console.log('  Lyrics length:', lyrics.length, 'chars');
@@ -160,7 +135,7 @@ async function findNotesField(page) {
     throw new Error(`❌ Chrome no está escuchando en el puerto ${DEBUG_PORT}. ¿Olvidaste iniciarlo con la flag de debugging?`);
   }
 
-  const { browser, page } = await connectToFlowTab();
+  const { browser, page } = await connectToFlowTab(chromium, DEBUG_PORT);
   console.log('Conectado a:', page.url());
 
   try {

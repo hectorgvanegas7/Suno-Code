@@ -1,5 +1,178 @@
 # Lessons / gotchas
 
+## STYLE_TEXTAREA roto: Suno rotó el placeholder de ejemplo, ya no contiene "style" (2026-07-04)
+
+Primer uso real del flujo "Antigravity ejecuta reconocimiento acotado,
+Claude revisa y aplica el fix" (ver memoria `feedback_antigravity_as_tool`).
+Antigravity corrió un detector de drift de selectores (solo lectura, sin
+clicks) contra una sesión real de Suno y reportó `STYLE_TEXTAREA` roto. Se
+verificó en vivo (Chrome abierto de nuevo, mismo patrón CDP): el placeholder
+del textarea de estilo pasó de tener la palabra "style" literal a un ejemplo
+rotativo de géneros ("concertina, cafe music, british invasion, strong
+vocal, hand drum") — el regex viejo (`textarea[placeholder*="style" i], ...`)
+dejó de matchear cualquier cosa.
+
+**Fix:** el textarea vive dentro de un wrapper con
+`data-testid="create-form-styles-wrapper"` que SÍ es estable (no depende del
+placeholder de ejemplo). Confirmado en vivo que resuelve a exactamente 1
+elemento, el correcto. `STYLE_TEXTAREA` ahora ancla ahí en vez del
+placeholder.
+
+**Takeaway sobre selectores de UI de terceros:** cualquier selector basado
+en placeholder/texto de ejemplo es más frágil que uno basado en
+`data-testid`/`aria-label` estructural — Suno puede rotar el texto de
+ejemplo (probablemente A/B testing o solo variedad) sin que sea un
+"rediseño" real. Cuando un selector de este tipo se rompe, buscar primero un
+contenedor/wrapper con testid estable antes de escribir otro regex de texto
+que puede volver a romperse con la próxima rotación.
+
+**Sobre el flujo con Antigravity:** se mantuvo dentro de las reglas (cero
+clicks, cero ediciones de lógica de negocio, solo generó 2 archivos nuevos +
+un reporte). El único ajuste de housekeeping necesario: `scratch_check.js`
+(su script de diagnóstico ad-hoc) no matcheaba el patrón `scratch-*` del
+`.gitignore` (guion bajo vs. guion medio) — borrado tras extraer el dato que
+tenía adentro. `selector-drift-report.md` se agregó al `.gitignore` (es una
+foto de un momento del DOM, se pisa en cada corrida — mismo criterio que
+`verify-report.json`).
+
+## Nota del Flow perdía la línea estándar en cada REDO (2026-07-03/04)
+
+`flow-submit.js` construía la nota estándar ("`<fecha>. Hector. PS0180. Letra
++ Suno.`", de la línea NOTES de song.txt) y después, si `state.json` marcaba
+`isRedo`, la REEMPLAZABA por completo con solo `'Redo Fix, corregido'` —
+perdiendo la fecha/Hector/PS0180 en cada REDO real (confirmado en vivo: el
+campo de Notas del Flow quedó con únicamente "Redo Fix, corregido" para "Mil
+Veces Tú"). El formato correcto (pedido directo de Hector) es la nota
+estándar SIEMPRE, con "Redo Fix, corregido" agregado DEBAJO cuando aplica.
+
+**Fix:** `buildRedoAwareNotes(rawNotes, { isRedo })` en `lib/song-file.js`
+(nueva, junto a `buildFlowNotes` — antes vivía inline en flow-submit.js, no
+testeable). Cubierta en `test/song-file.test.js`.
+
+## Investigación de mojibake en CLAP + crash de Whisper en vivo (2026-07-03/04) — fix defensivo aplicado, causa exacta no 100% confirmada
+
+En el mismo run real, `verify-audio.js --demucs` reportó dos fallos:
+Whisper crasheó con un traceback de Python (mensaje truncado en el log a
+"File \"...cancionete", inútil para diagnosticar), y CLAP no encontró el
+archivo porque el nombre le llegó como `Mil Veces TÃº.mp3` en vez de
+`Mil Veces Tú.mp3` (mojibake clásico de UTF-8 mal decodificado como
+Latin-1/cp1252).
+
+**Intento de reproducir, honestamente reportado:** correr `transcribe.py`
+directo (CPU/small y CUDA/large-v3) contra el mismo MP3 real terminó OK, sin
+crash — así que el bug de Whisper no está en `transcribe.py` en sí, sino
+específicamente en el camino `--demucs` (archivo intermedio `vocals.wav` en
+un temp dir que se borra en el `finally`, no se pudo reproducir después).
+Un test aislado de round-trip stdin (Node spawnSync → Python `json.loads`)
+con el mismo nombre acentuado **no reprodujo el mojibake** en este sistema —
+sugiere que este Python ya usa UTF-8 por default acá (probable modo UTF-8 de
+Python moderno), así que la causa exacta del mojibake visto en vivo sigue sin
+confirmarse al 100%.
+
+**Fix aplicado de todas formas (defensivo, sin downside):** `PYTHON_UTF8_ENV`
+en `lib/audio-analysis.js` — `PYTHONUTF8=1` + `PYTHONIOENCODING=utf-8` en el
+`env` de ambos `spawnSync` (Whisper y CLAP). Es la práctica estándar para
+subprocesos Python en Windows con nombres de archivo con tildes/ñ, y no
+depende de qué versión de Python esté instalada. Si el mojibake vuelve a
+aparecer, la siguiente hipótesis a probar es normalización Unicode NFC/NFD
+(un "ú" precompuesto vs. descompuesto puede fallar un `os.path.exists()` en
+Windows aunque se vea idéntico).
+
+**Mejora real y confirmada, de paso:** los mensajes de error de Whisper/CLAP
+mostraban la PRIMERA línea del stderr (`"Traceback (most recent call
+last):"`, inútil) en vez de la última (el tipo+mensaje real de la excepción).
+Nueva `lastMeaningfulLine()` en `lib/audio-analysis.js` — usada en ambos
+lugares, cubierta en `test/audio-analysis.test.js`. La próxima vez que esto
+falle, el log va a decir algo diagnosticable en vez de un traceback cortado
+a la mitad.
+
+## Descarga de A y B en serie desperdiciaba hasta 8 min por versión sin necesidad (2026-07-03/04)
+
+Corrida en vivo real: la Versión A se descargó rápido, pero B esperó los 8
+minutos completos y falló — visible dos veces en la misma noche. Root cause
+de diseño (no un bug de UI): `createAndDownload` procesaba cada versión de
+punta a punta antes de pasar a la siguiente — clickear "MP3 Audio" para B ni
+arrancaba hasta que la descarga ENTERA de A hubiera terminado (hasta 8 min).
+Pero Suno ya generó ambas cards en simultáneo — no hay ninguna razón real
+para esperarlas en serie, solo el click en sí es secuencial (misma pestaña,
+no se pueden abrir 2 menús a la vez).
+
+**Fix:** separado en dos fases en `lib/suno-create-dl.js`:
+1. `clickDownloadMp3` — solo clickea (secuencial, rápido, segundos).
+2. `awaitClickedDownload` — espera el archivo. Se corre en **paralelo** para
+   A y B con `Promise.allSettled` (cada watcher ya tiene su propio timeout de
+   8 min independiente, así que no se pisan entre sí).
+
+**Cuidado real encontrado al paralelizar:** el fallback manual
+(`pauseForHumanInteraction`, para cuando ni siquiera se pudo clickear)
+escucha `process.stdin.once('data', ...)` — si dos versiones caen a este
+fallback en paralelo, un solo ENTER del humano resolvería AMBAS esperas de
+golpe, aunque solo haya terminado una descarga manual. Por eso
+`awaitManualDownload` (el fallback) se mantiene deliberadamente SECUENCIAL en
+el caller, nunca dentro del `Promise.allSettled` — solo las descargas que sí
+se clickearon corren en paralelo entre sí.
+
+**Takeaway:** al paralelizar cualquier flujo que use `pauseForHumanInteraction`
+(o cualquier otro recurso global tipo stdin), separar primero qué parte
+comparte ese recurso — no todo lo que "podría" correr en paralelo es seguro
+de correr en paralelo.
+
+## Descarga de MP3 rota en vivo (2026-07-03, "Veinte Años Después"): timeout reintroducido a 3 min + bypass de red que agota el watcher compartido + Create duplicado por re-correr sin --resume
+
+Corrida real en vivo: las dos versiones fallaron la descarga automática.
+Investigado después (sin tocar nada hasta confirmar con evidencia), con Chrome
+y Node ya cerrados. Tres problemas independientes, todos con el mismo síntoma
+visible ("no está sirviendo como antes"):
+
+**1. `DOWNLOAD_WAIT_TIMEOUT_MS` bajado de 8 min a 3 min por una edición
+externa** (no de esta sesión — el diff apareció solo, probablemente otra
+herramienta/IDE tocando el repo en paralelo, ver el aviso de Antigravity en
+memoria). Es literalmente el mismo bug ya documentado y arreglado más abajo en
+este archivo ("Timeout de 90s esperando MP3 era demasiado corto para
+generación real", 2026-07-01) — reintroducido con un valor distinto. Prueba
+directa: el archivo real de la Versión A aterrizó en disco (confirmado con
+`Get-Item .LastWriteTimeUtc`) más tarde de lo que el timeout de 3 min permitía,
+así que el código lo dio por perdido antes de que terminara de escribirse.
+**Fix:** restaurado a 8 min (el valor de diseño original, documentado en la
+entrada de 2026-07-01).
+
+**2. Un mecanismo nuevo de "Bypass de Red"** (intercepta `clip.audio_url` de
+las respuestas `/api/` y lo inyecta como `<a download>` click) se había
+agregado sin estar en ninguna sesión previa registrada acá. Dos problemas:
+(a) es exactamente el patrón ya descartado el 2026-06-30 ("Flujo de descarga
+de Suno no tiene botón directo" — un `<a download>` hacia una URL cross-origin
+no garantiza que el navegador guarde el archivo si el servidor no manda
+`Content-Disposition: attachment`); (b) más grave: comparte el mismo
+`watcher`/timeout de `watchForNewMp3` con el flujo visual de fallback — si el
+bypass se queda esperando hasta agotar el `deadlineMs`, el watcher ya está
+`done`/cerrado cuando el código cae al flujo visual, así que aunque el click
+visual funcione después, el watcher ya no está escuchando y jamás detecta el
+archivo real. El fallback confiable nunca llegaba a tener una ventana de
+verdad. **Fix:** eliminado por completo — el único mecanismo soportado vuelve
+a ser el menú visual ⋯ → Download → MP3 Audio, con nota en el header del
+archivo para que no se reintente sin releer esto.
+
+**3. Cada vez que la descarga fallaba, correr `node start-flow.js` de nuevo
+(sin `--resume`) volvía a llenar Suno y clickear Create desde cero sobre la
+MISMA canción ya asignada** — confirmado con el contador real de créditos de
+Suno cayendo ~110 entre dos corridas consecutivas sobre el mismo Song ID.
+`run.js` siempre resetea `state.json` a stage `"generated"` al terminar
+(`startNew()`), así que no había ninguna señal que un re-run pudiera leer para
+darse cuenta de que ya había pasado por Suno-fill/Create antes. **Fix:**
+`runFlow()` en `start-flow.js` ahora guarda un snapshot de `state.json` ANTES
+de correr `run.js` (Paso 1); si después de que `run.js` termina el Song ID es
+el mismo Y el snapshot de ANTES ya estaba en `suno-filled`/`flow-filled`, la
+corrida se auto-degrada a comportamiento `--resume` desde esa etapa (nunca
+re-clickea Create). No aplica si el snapshot decía `completed` — ese caso es
+un REDO legítimo que sí necesita regenerar todo.
+
+**Takeaway:** cuando algo que "andaba bien" deja de andar, revisar primero si
+el código realmente cambió por fuera de esta sesión (`git diff`/timestamps)
+antes de asumir que el bug es nuevo — acá fueron 2 regresiones reales
+(timeout, bypass) más un gap de diseño viejo (sin protección contra Create
+duplicado) que solo se hizo visible cuando las descargas empezaron a fallar
+de verdad.
+
 ## Auditoría de mejoras 2026-07-03: nombre fonético falso-"ausente", sesión de horas exactas rota, 3 parsers duplicados sin sincronizar
 
 Pase de mejoras sin gastar API ni tocar Suno/Flow en vivo (solo `npm test`).

@@ -202,9 +202,16 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
 - `suno-open-for-login.js` — Chrome standalone para login
 - `flow-submit.js` — llenado de Título/Letra/Notas en el Flow (`#title`/`#lyrics`/`#notes`),
   nunca clickea Complete Song/Submit to QA. Mismo fallback interactivo que suno-fill.js.
-  Si state.json marca `isRedo` Y el título coincide con song.txt, la nota es
-  "Redo Fix, corregido" (acordado con QC) — siempre APPENDEADA debajo del feedback
-  existente en el campo, nunca reemplazándolo.
+  La nota SIEMPRE lleva el formato estándar de song.txt ("`<fecha>. Hector. PS0180.
+  Letra + Suno.`", tal cual viene de la línea `NOTES:`, sin el Song ID). Si
+  state.json marca `isRedo` Y el título coincide con song.txt, se agrega
+  "Redo Fix, corregido" DEBAJO de esa nota estándar (nunca en su lugar — bug real
+  arreglado 2026-07-03/04: antes la reemplazaba por completo, perdiendo la nota
+  estándar en cada REDO). Todo el bloque (estándar + redo si aplica) se APPENDEA
+  debajo del feedback existente en el campo del Flow, nunca lo reemplaza. Se
+  conecta a la tab del Flow con `connectToFlowTab` (`lib/playwright-helpers.js`,
+  compartida con `upload-to-flow.js` desde la auditoría 2026-07-03 — antes eran
+  dos copias divergentes).
 - `setup-whisper.js` — instala/verifica Python, faster-whisper, ffmpeg. Correr una vez.
 - `verify-audio.js` — analiza los 2 MP3 (duración + Whisper + comparación letra + nombres
   ausentes). INFORMA, no decide, no sube nada. Requiere setup-whisper.js previo. Con
@@ -306,7 +313,18 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
 - `lib/suno-selectors.js` — data-testid/aria-label/texto de la UI de Suno usados por
   `suno-fill.js`, `lib/suno-create-dl.js` y `start-flow.js`, centralizados acá (mismo
   patrón que `lib/flow-helpers.js`) para que un cambio de selector no quede
-  desincronizado entre archivos.
+  desincronizado entre archivos. `STYLE_TEXTAREA` se ancla a
+  `[data-testid="create-form-styles-wrapper"] textarea` desde el 2026-07-04 —
+  Suno rotó el placeholder de ejemplo (ya no contiene la palabra "style"),
+  detectado con `suno-selector-drift.js`.
+- `suno-selector-drift.js` — script standalone de SOLO LECTURA (nunca clickea nada,
+  nunca gasta créditos) que abre suno.com/create con el Chrome ya logueado
+  (puerto 9333) y verifica que todos los selectores de `lib/suno-selectors.js`
+  (+ Download/MP3 Audio del menú ⋯) sigan matcheando algo real. Corré
+  `node suno-selector-drift.js` después de cualquier sospecha de rediseño de
+  Suno — guarda `selector-drift-report.md` (gitignored, es una foto de un
+  momento) con el detalle. Originado por Antigravity (2026-07-04), revisado
+  y con el fix de `STYLE_TEXTAREA` aplicado tras confirmarlo en vivo.
 - `sheets.js` — wrapper standalone de `lib/sheets-core.js` (registro en Google Sheet)
 - `lib/playwright-helpers.js` — helpers de Playwright (clickByText, setSliderValue,
   expandIfCollapsed, connectToSunoTab, isLoggedIn). Además:

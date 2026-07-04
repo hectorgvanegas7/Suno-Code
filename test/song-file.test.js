@@ -6,7 +6,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { parseSongFile } = require('../lib/song-file');
+const { parseSongFile, buildFlowNotes, buildRedoAwareNotes } = require('../lib/song-file');
 
 function buildSongTxt({ withNotes = true, withDashSeparator = true } = {}) {
   const header = [
@@ -75,4 +75,24 @@ test('parseSongFile: contenido vacío/corrupto devuelve todos los campos null', 
   assert.equal(parsed.voz, null);
   assert.equal(parsed.estilo, null);
   assert.equal(parsed.lyrics, null);
+});
+
+test('buildFlowNotes: quita "Song ID: xxx" y deja la nota estándar', () => {
+  const raw = '7.03.2026. Hector. PS0180. Letra + Suno. Song ID: abc123';
+  assert.equal(buildFlowNotes(raw), '7.03.2026. Hector. PS0180. Letra + Suno.');
+});
+
+test('buildRedoAwareNotes: sin REDO devuelve solo la nota estándar', () => {
+  const raw = '7.03.2026. Hector. PS0180. Letra + Suno. Song ID: abc123';
+  assert.equal(buildRedoAwareNotes(raw, { isRedo: false }), '7.03.2026. Hector. PS0180. Letra + Suno.');
+});
+
+test('buildRedoAwareNotes: con REDO agrega "Redo Fix, corregido" DEBAJO de la nota estándar (no la reemplaza)', () => {
+  // Bug real arreglado 2026-07-03/04: antes isRedo reemplazaba la nota entera
+  // por solo "Redo Fix, corregido", perdiendo la fecha/Hector/PS0180.
+  const raw = '7.03.2026. Hector. PS0180. Letra + Suno. Song ID: abc123';
+  const result = buildRedoAwareNotes(raw, { isRedo: true });
+  assert.equal(result, '7.03.2026. Hector. PS0180. Letra + Suno.\n\nRedo Fix, corregido');
+  assert.match(result, /^7\.03\.2026\. Hector\. PS0180\. Letra \+ Suno\./);
+  assert.match(result, /Redo Fix, corregido$/);
 });

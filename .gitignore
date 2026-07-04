@@ -15,6 +15,7 @@ state.json
 verify-report.json
 title.txt
 chrome_log.txt
+selector-drift-report.md
 
 # Perfil de Chrome creado por accidente (bug de backslashes) — tiene cookies/sesiones
 UsershectoAppDataLocalChromeAutomationProfile/

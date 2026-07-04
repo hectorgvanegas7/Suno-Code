@@ -809,12 +809,6 @@ async function runFlow({ resume = false } = {}) {
     }
   }
   const skipGenerate = resumeStage !== null;
-  const skipSunoFill = resumeStage === state.STAGES.SUNO_FILLED || resumeStage === state.STAGES.FLOW_FILLED;
-  // Solo saltear el llenado del Flow si la canción ya está COMPLETED (subida
-  // + registrada). Para cualquier otra etapa, siempre re-abrir y asegurar que
-  // el Flow esté lleno para revisión manual — pero no tiene sentido
-  // re-rellenar título/letra/notas de una canción que ya se cerró del todo.
-  const skipFlowFill = resumeStage === state.STAGES.COMPLETED;
 
   console.log(`📝 Log de esta corrida: ${RUN_LOG_PATH}`);
   console.log('=== Paso 0/4: preflight ===');
@@ -841,10 +835,50 @@ async function runFlow({ resume = false } = {}) {
     console.log(`  song.txt OK: "${songTitulo || stTitulo}"`);
   } else {
     console.log('\n=== Paso 1/4: generando letra (run.js) ===\n');
+    const preRunState = state.read();
     const providerArg = process.argv.find((a) => a.startsWith('--provider='));
     const providerFlag = providerArg ? ` ${providerArg}` : '';
     await runScript(`run.js${providerFlag}`);
+
+    // ── Salvaguarda contra Create duplicado (gasta créditos reales) ─────────
+    // run.js siempre resetea state.json a stage "generated" al terminar
+    // (startNew()), así que si ANTES de correrlo la MISMA canción ya estaba
+    // en "suno-filled"/"flow-filled", es que una corrida anterior se cortó a
+    // mitad de camino (ej. falló la descarga y Gabo volvió a correr
+    // start-flow.js a mano en vez de --resume) — sin esto, Paso 3/3b
+    // re-llenarían Suno y re-clickearían Create sobre una canción que YA
+    // tenía versiones generadas, quemando créditos de más (visto en vivo:
+    // 2026-07-03, ~110 créditos gastados de más en "Veinte Años Después"
+    // entre dos corridas seguidas). COMPLETED no cuenta acá: si la misma
+    // canción vuelve a estar asignada después de completada, es un REDO
+    // legítimo que sí necesita generar y llenar todo de nuevo.
+    const postRunState = state.read();
+    if (
+      preRunState && postRunState &&
+      preRunState.songId === postRunState.songId &&
+      (preRunState.stage === state.STAGES.SUNO_FILLED || preRunState.stage === state.STAGES.FLOW_FILLED)
+    ) {
+      resumeStage = preRunState.stage;
+      console.warn(
+        `\n⚠️  SALVAGUARDA: "${postRunState.titulo}" (${postRunState.songId}) ya había llegado a la etapa ` +
+        `"${resumeStage}" antes de esta corrida — probablemente una corrida anterior se cortó a mitad de ` +
+        'camino. Para NUNCA re-clickear Create de más, esta corrida continúa como si fuera --resume desde ' +
+        'esa etapa. Si los MP3 no están en disco, Create y descarga quedan manuales (igual que --resume).\n'
+      );
+      await notify(
+        `⚠️ ${postRunState.titulo}: se evitó un Create duplicado — la canción ya estaba en etapa "${resumeStage}". Continuando como --resume.`,
+        { title: 'Salvaguarda: Create duplicado evitado', priority: 'default', tags: 'shield' }
+      ).catch(() => {});
+      state.write({ stage: resumeStage }); // restaurar la etapa real que run.js había pisado a "generated"
+    }
   }
+
+  const skipSunoFill = resumeStage === state.STAGES.SUNO_FILLED || resumeStage === state.STAGES.FLOW_FILLED;
+  // Solo saltear el llenado del Flow si la canción ya está COMPLETED (subida
+  // + registrada). Para cualquier otra etapa, siempre re-abrir y asegurar que
+  // el Flow esté lleno para revisión manual — pero no tiene sentido
+  // re-rellenar título/letra/notas de una canción que ya se cerró del todo.
+  const skipFlowFill = resumeStage === state.STAGES.COMPLETED;
 
   if (!skipSunoFill || !skipFlowFill) {
     if (await isPortUp(DEBUG_PORT)) {

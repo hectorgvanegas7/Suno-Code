@@ -23,7 +23,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { findSunoMp3s } = require('./lib/audio-match');
-const { pauseForHumanInteraction, isPortUp } = require('./lib/playwright-helpers');
+const { pauseForHumanInteraction, isPortUp, connectToFlowTab } = require('./lib/playwright-helpers');
 const state = require('./lib/pipeline-state');
 const { parseTituloFromSongFile: parseTitulo } = require('./lib/audio-analysis');
 
@@ -107,22 +107,15 @@ function parseArgs(argv) {
     throw new Error(`❌ Chrome no está escuchando en el puerto ${DEBUG_PORT}. ¿Olvidaste iniciarlo con la flag de debugging?`);
   }
 
-  // Conectar a Chrome existente
-  const browser = await chromium.connectOverCDP(`http://localhost:${DEBUG_PORT}`);
-  const contexts = browser.contexts();
-  if (contexts.length === 0) {
-    console.error("❌ No hay contextos de navegador disponibles.");
+  // Conectar a Chrome existente (helper compartido con flow-submit.js — ver
+  // lib/playwright-helpers.js y LESSONS.md, auditoría 2026-07-03)
+  let browser, page;
+  try {
+    ({ browser, page } = await connectToFlowTab(chromium, DEBUG_PORT));
+  } catch (e) {
+    console.error(`❌ ${e.message}`);
     process.exit(1);
   }
-  const context = contexts[0];
-  const pages = context.pages();
-  const page = pages.find((p) => p.url().includes('cancioneterna.com'));
-  if (!page) {
-    const urls = pages.map((p) => p.url()).join(', ') || '(ninguna)';
-    console.error(`❌ No se encontró tab de cancioneterna.com. Tabs: ${urls}`);
-    process.exit(1);
-  }
-  await page.bringToFront();
   console.log(`   Conectado: ${page.url()}`);
 
   // Buscar campo de archivo para MP3
