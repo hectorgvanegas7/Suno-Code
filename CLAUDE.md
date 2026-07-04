@@ -300,6 +300,16 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
   puntúa cada versión (duración, corte abrupto, clipping, fidelidad de letra, nombres
   ausentes, instrumental accidental, CLAP) y recomienda una — siempre orientativo,
   nunca decide solo.
+  `verifyNamePronunciation`: segunda opinión sobre la pronunciación del nombre del
+  destinatario. La transcripción principal corre con `initial_prompt`=letra completa
+  (modo `--demucs`) para evitar alucinaciones, pero eso sesga a Whisper a "escuchar"
+  la palabra esperada aunque el audio real tenga un sonido espurio (ver LESSONS.md).
+  Para cada nombre que SÍ se dio por presente, recorta (ffmpeg) la ventana de tiempo
+  de esa palabra y la re-transcribe SIN pista — si la segunda pasada no confirma el
+  nombre, lo marca en `report.nameAudioChecks` (informativo, no cambia `missingNames`)
+  y deja el clip de ~1-2s en `<carpeta del mp3>/name-check/` para confirmar de oído
+  en segundos en vez de la canción entera. Pesa ±15 pts en `pickBestVersion`, igual
+  filosofía que CLAP (señal nueva, no decide sola).
 - `lib/transcribe.py` — script Python que usa faster-whisper para transcribir.
 - `lib/clap_score.py` — script Python que evalúa calidad de audio con CLAP (modelo
   laion/clap-htsat-unfused). Recibe 1+ MP3, devuelve JSON con score 0-100 global y

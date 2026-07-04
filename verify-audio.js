@@ -201,6 +201,7 @@ function parseArgs(argv) {
         titleCantado: reportA.titleCantado,
         tagLeaking: reportA.tagLeaking,
         missingNames: reportA.missingNames,
+        nameAudioChecks: reportA.nameAudioChecks,
         clap: reportA.clap,
         summary: reportA.summary,
       },
@@ -215,6 +216,7 @@ function parseArgs(argv) {
         titleCantado: reportB.titleCantado,
         tagLeaking: reportB.tagLeaking,
         missingNames: reportB.missingNames,
+        nameAudioChecks: reportB.nameAudioChecks,
         clap: reportB.clap,
         summary: reportB.summary,
       } : null,
@@ -250,6 +252,8 @@ function parseArgs(argv) {
     if (report.abruptCutoff === true) parts.push('final abrupto');
     if (report.tagLeaking.length > 0) parts.push('tags cantados');
     if (report.missingNames && report.missingNames.length > 0) parts.push(`nombres ausentes: ${report.missingNames.join(',')}`);
+    const unconfirmed = (report.nameAudioChecks || []).filter((c) => c.confirmed === false);
+    if (unconfirmed.length > 0) parts.push(`pronunciación a revisar: ${unconfirmed.map((c) => c.name).join(',')}`);
     if (report.demucs.used && report.demucs.vocalPresence === true) parts.push('sin voz');
     if (report.clap && report.clap.score !== null) parts.push(`CLAP:${report.clap.score}`);
     return parts.length ? ` (${parts.join(', ')})` : '';

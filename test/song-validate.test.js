@@ -284,6 +284,55 @@ test('nombre presente en Verse 1 (single-recipient) se detecta como fuga', () =>
   assert.ok(failures.some((f) => f.includes('[Verse 1]') && f.toLowerCase().includes('frank')), `fallos: ${failures.join(' | ')}`);
 });
 
+test('nombre corto que colisiona con una palabra común ("al") no dispara falsa fuga en Verse 1', () => {
+  // Bug real (LESSONS.md, incidente "Al"): con nombre de encuesta "Al", una
+  // línea de Verse 1 con la preposición "al" ("sonriendo al caminar") o con
+  // palabras que contienen esas letras ("cristal", "final", "igual") quemó 3
+  // intentos de generación seguidos porque el chequeo viejo era un
+  // .includes()/split case-insensitive sin límite de palabra ni de mayúscula.
+  const surveyAl = "What's their name?: Al";
+  const response = buildResponse({
+    chorus1: ['Aal, hoy te canto con todo mi amor', 'Gracias por darme siempre tu calor', 'Cada momento contigo brilla mejor', 'Eres mi orgullo y mi mayor honor'],
+    chorus2: ['Aal, admiro tu fuerza y tu bondad', 'Marcaste mi vida con sinceridad', 'Nunca dudé de tu generosidad', 'Sos ejemplo puro de humanidad'],
+    verse1: ['Salía de una pizzería una tarde cualquiera', 'Ibas con tu amiga sonriendo al caminar', 'Todo se veía igual, como un cristal', 'Te invité a compartir la pizza sin imaginar'],
+  });
+  const { failures } = hardValidate(response, surveyAl);
+  const leakFailures = failures.filter((f) => f.includes('[Verse 1]') && f.includes('debe estar ausente'));
+  assert.deepEqual(leakFailures, [], `no debería marcar "al" como nombre filtrado, fallos: ${leakFailures.join(' | ')}`);
+});
+
+test('nombre corto SÍ capitalizado y como palabra propia en Verse 1 sigue detectándose como fuga', () => {
+  // La comparación case-sensitive no debe dejar de detectar una fuga real solo
+  // porque el nombre es corto: si "Al" aparece como palabra independiente y
+  // capitalizada (como se dirigiría a la persona), sigue siendo una fuga.
+  const surveyAl = "What's their name?: Al";
+  const response = buildResponse({
+    chorus1: ['Aal, hoy te canto con todo mi amor', 'Gracias por darme siempre tu calor', 'Cada momento contigo brilla mejor', 'Eres mi orgullo y mi mayor honor'],
+    chorus2: ['Aal, admiro tu fuerza y tu bondad', 'Marcaste mi vida con sinceridad', 'Nunca dudé de tu generosidad', 'Sos ejemplo puro de humanidad'],
+    verse1: ['Al, siempre fuiste mi mejor amigo', 'Recuerdo esa risa que jamás cambió', 'El tiempo pasaba lento y sereno', 'Algo en mi pecho supo que eras bueno'],
+  });
+  const { failures } = hardValidate(response, surveyAl);
+  assert.ok(
+    failures.some((f) => f.includes('[Verse 1]') && f.includes('debe estar ausente')),
+    `debería seguir detectando la fuga real de "Al", fallos: ${failures.join(' | ')}`
+  );
+});
+
+test('conteo de ocurrencias en Chorus no se infla por una palabra que contiene el nombre como substring', () => {
+  // Mismo bug de raíz que la fuga en Verse 1, pero en el conteo "una sola vez
+  // por chorus": con nombre "al", una palabra como "cristal" en el mismo
+  // chorus no debe contarse como una segunda mención del nombre.
+  const surveyAl = "What's their name?: Al";
+  const response = buildResponse({
+    chorus1: ['Aal, tu amor brilla como un cristal', 'Gracias por darme siempre tu calor', 'Cada momento contigo brilla mejor', 'Eres mi orgullo y mi mayor honor'],
+    chorus2: ['Aal, admiro tu fuerza y tu bondad', 'Marcaste mi vida con sinceridad', 'Nunca dudé de tu generosidad', 'Sos ejemplo puro de humanidad'],
+    verse1: ['Salía de una pizzería una tarde cualquiera', 'Todo se veía normal y sereno', 'El tiempo pasaba lento aquel día', 'Algo en mi pecho supo que eras bueno'],
+  });
+  const { failures } = hardValidate(response, surveyAl);
+  const countFailures = failures.filter((f) => f.includes('[Chorus 1]') && f.includes('veces'));
+  assert.deepEqual(countFailures, [], `no debería inflar el conteo por "cristal", fallos: ${countFailures.join(' | ')}`);
+});
+
 test('Chorus 1 idéntico a Chorus 2 se detecta', () => {
   const response = buildResponse({
     chorus2: ['Frank, hoy te canto con todo mi amor', 'Gracias por darme siempre tu calor', 'Cada momento contigo brilla mejor', 'Eres mi orgullo y mi mayor honor'],

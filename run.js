@@ -213,6 +213,7 @@ If the survey names more than one person to dedicate the song to:
 Suno is singing in Latin American Spanish, so it will mispronounce names that have English or complex spellings. You MUST modify how these names are SPELLED in the lyrics using literal Spanish phonetics so Suno sings them correctly.
 - Examples: "Johelyn" → "Yoelin" | "Dayana" → "Daiana" | "Brayan" → "Braian" | "Geovanny" → "Yeovani" | "Jhoselyn" → "Yoselin" | "Shirley" → "Chirley".
 - If a name has a "J" or "Y" that sounds like a vowel or an English sound, respell it literally for a Spanish reader (e.g., replace J with Y or I).
+- If a name STARTS WITH A VOWEL (especially "A"), Suno tends to add a phantom "H"/"J" sound at the start (e.g. "Al" sung like "Jal"/"Hal"). Double the initial vowel to prevent it: "Al" → "Aal" | "Ana" → "Aana" | "Alma" → "Aalma" | "Andrea" → "Aandrea". Apply this before any other respelling rule when the name begins with a vowel.
 - Never use English phonetic rules (like "Dez-ray" or "Pee-air") because Suno is reading in Spanish. Write exactly how you want it pronounced in Spanish syllables.
 - Never spell a name out acrostic-style ("MARIA - M de mi amor, A de...") — it sounds forced and breaks the emotion.
 - Always flag any respelling you used in the **Advertencias** field of the response so it can be reviewed before sending to Suno.

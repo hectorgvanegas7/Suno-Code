@@ -1176,3 +1176,92 @@ quedaba COLGADO al terminar — y como start-flow.js espera el exit de cada hijo
 sin tocar Chrome. La confusión histórica venía de `launchPersistentContext`,
 donde `context.close()` sí cierra la ventana — ese es el motivo del patrón
 "Chrome standalone + connectOverCDP", no un supuesto peligro de `browser.close()`.
+
+## Nombre corto que colisiona con una palabra española común ("Al") quemaba los 3 intentos de generación
+
+Incidente real (2026-07-04, `logs/run-2026-07-04T01-11-07-151Z.log`): con
+nombre de encuesta "Al", los 3 intentos de `generateSongWithSelfCorrection`
+fallaron con el mismo error idéntico: `[Verse 1] contiene el nombre "al" —
+debe estar ausente`. La letra generada era correcta — Verse 1 tenía la línea
+"Ibas con tu amiga Martha sonriendo **al** caminar", donde "al" es la
+contracción española de "a"+"el" (preposición), no el nombre. El chequeo C de
+`hardValidate` (`lib/song-validate.js`) usaba `.includes()` case-insensitive
+sin límite de palabra, así que CUALQUIER "al" en Verse 1 —la preposición, o
+substrings dentro de "cristal"/"final"/"igual"— disparaba el fallo. Con un
+nombre de 2 letras que coincide con una palabra gramatical de altísima
+frecuencia en español, es prácticamente imposible que el LLM evite el string
+"al" en 4 líneas de verso natural — los 3 reintentos con instrucciones
+correctivas estaban condenados desde el intento 1, porque el problema nunca
+fue el contenido generado.
+
+**Fix aplicado:** el chequeo C ahora compara **case-sensitive contra la forma
+capitalizada** del nombre (`Al`, no `al`), sobre el texto de Verse 1 SIN pasar
+a minúsculas, con límite de palabra consciente del español (`nameRegex` en
+`lib/song-validate.js`, compartida ahora por los chequeos B/C/multi-recipient
+que antes tenían 3 varas distintas — `.includes()`, `.split()`, y un
+`nameRegex` local solo en el camino multi-destinatario). Un nombre que de
+verdad se filtra en Verse 1 casi siempre aparece capitalizado (se dirige/
+refiere a la persona); la preposición española nunca lo está salvo al inicio
+de oración — caso raro que queda sin cubrir, pero muchísimo más angosto que
+disparar con cualquier "al" en cualquier posición. Casos cubiertos en
+`test/song-validate.test.js` ("nombre corto que colisiona con una palabra
+común", "nombre corto SÍ capitalizado... sigue detectándose como fuga",
+"conteo de ocurrencias... no se infla por substring").
+
+**Nota separada (pronunciación, no validación):** el mismo nombre "Al" tenía
+otro problema real en Suno — lo canta con una "H"/"J" fantasma al inicio
+("Jal"/"Hal"). Confirmado empíricamente que reescribirlo duplicando la vocal
+inicial ("Al" → "Aal") lo arregla; se agregó como regla explícita en el
+`SYSTEM_PROMPT` de `run.js` (sección PHONETIC RE-SPELLING). Es la misma regla
+que existía en el prompt original (`54dd609`, ejemplo "Alma" → "Halma" →
+"Aalma"/"Al-ma") y se había perdido sin querer al reescribir esa sección a
+fonética española en el commit `251c5b5` — no fue una decisión deliberada,
+quedó afuera como efecto colateral. Si vuelve a aparecer un nombre corto o
+vocal-inicial con este problema, probar primero la duplicación de vocal antes
+de inventar una respelling nueva desde cero.
+
+## `verify-audio.js` daba OK en un nombre realmente mal pronunciado — Whisper con `initial_prompt` se autocorrige
+
+Mismo incidente que la sección anterior: aparte del bug de validación, el
+nombre respelled ("Áll") seguía sonando con la "H"/"J" fantasma en el audio
+real de Suno, y sin embargo `verify-audio.js` no lo marcó como problema —
+`missingNames` dio vacío, o sea "presente y OK". Investigado: el chequeo de
+nombres (`isNameInTranscription`) solo compara la TRANSCRIPCIÓN de Whisper
+contra el nombre esperado, y en modo `--demucs` esa transcripción corre con
+`initial_prompt` = la letra completa (para evitar alucinaciones sobre canto,
+ver comentario en `lib/audio-analysis.js` desde antes de este fix). Efecto
+secundario nunca antes explotado en código: ese prompt sesga a Whisper a
+"escuchar" la palabra que ya sabe que está buscando, así que puede transcribir
+"Al" aunque el audio real tenga un sonido inicial distinto — Whisper nunca es
+un juez de pronunciación, es un ASR con modelo de lenguaje detrás.
+
+**Investigación de alternativas** (fonemas agnósticos al idioma tipo
+Wav2Vec2Phoneme, GOP/Goodness-of-Pronunciation, WhisperX con alineación
+forzada) confirmó que existen soluciones más rigurosas, pero requieren modelos
+nuevos (descarga, dependencias nuevas tipo `phonemizer`/`espeak-ng`) — riesgo
+alto para un pipeline en producción. Se optó por el fix de menor riesgo que
+ataca la misma causa raíz sin dependencias nuevas.
+
+**Fix aplicado (`lib/audio-analysis.js`):** `verifyNamePronunciation` — para
+cada nombre que la transcripción principal SÍ dio por presente, recorta
+(ffmpeg) la ventana exacta de esa palabra (timestamps que Whisper ya da) y la
+re-transcribe en un proceso APARTE, SIN `initial_prompt`. Si esa segunda
+pasada, libre del sesgo de la letra, no confirma el nombre, se guarda en
+`report.nameAudioChecks` (`confirmed: false`) — informativo, nunca cambia
+`missingNames` directamente, pero sí resta 15 pts en `pickBestVersion`
+(mismo peso liviano que CLAP). El clip de ~1-2s queda en
+`<carpeta del mp3>/name-check/<archivo>-<nombre>.wav` para que confirmar de
+oído sea cuestión de segundos, no de escuchar la canción entera — el reporte
+siempre dijo "confirmá con tu oído" pero antes no había forma barata de
+hacerlo. Cero dependencias nuevas: reusa `transcribeFiles`/`ffmpeg`, ya
+presentes para la transcripción principal y para corte abrupto/clipping.
+Cubierto en `test/audio-analysis.test.js` (penalización en `scoreReport` +
+que un reporte sin `nameAudioChecks`, forma vieja del objeto, no rompa).
+
+**Si esto no alcanza** (sigue habiendo falsos "confirmado" en el futuro): el
+siguiente paso investigado y descartado por ahora es un modelo de fonemas
+agnóstico al idioma (ej. `facebook/wav2vec2-lv-60-espeak-cv-ft`) comparado
+contra un G2P español (`espeak-ng`) por distancia fonética — ataca la causa
+raíz de forma más rigurosa (GOP/Goodness-of-Pronunciation, el estándar
+académico), pero implica nuevas dependencias de Python y un modelo a
+descargar; evaluar solo si el problema se vuelve recurrente pese a este fix.
