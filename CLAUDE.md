@@ -229,6 +229,19 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
   coincide con state.json — si no coinciden, sube el archivo original tal cual,
   sin renombrar. SE DETIENE sin Submit to QA (Regla Dura #1).
   Uso: `node upload-to-flow.js --version A|B` o `--file "ruta.mp3"`.
+  Antes de buscar el `input[type="file"]`, espera hasta 5s
+  (`page.waitForSelector`) a que React lo monte — corre justo después de que
+  flow-submit.js termina de escribir en la MISMA pestaña, y un chequeo
+  inmediato podía dar 0 inputs por pura cuestión de timing (bug real, ver
+  LESSONS.md). El campo existe siempre, incluso en un REDO (dentro de la zona
+  "Replace MP3", oculto pero interactuable) — no hace falta clickear
+  "reemplazar" antes. La verificación final de que la subida funcionó compara
+  el `src` del `<audio>` contra el que había ANTES de subir, no solo si existe
+  alguno — en un REDO ya hay un `<audio>` con el archivo viejo rechazado por
+  QC, así que "existe un audio" solo no prueba que la subida nueva funcionó.
+  `exitAfterDelay` (250ms antes de `process.exit()`, mismo patrón que run.js)
+  en todos los puntos de salida — evita un crash de libuv en Windows al
+  cerrar una conexión CDP abierta.
 - `qa-dashboard.js` — Express local (puerto 3000). **Ya NO lo forkea
   `start-flow.js`** (la orquestación sube la Versión B automáticamente); quedó
   como herramienta standalone opcional: `node qa-dashboard.js` muestra
@@ -269,31 +282,50 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
     vacía). Un ciclo fallido avisa por ntfy y el loop sigue. En --loop el
     checkpoint pre-Create se saltea siempre (aunque haya --pause). La única
     interacción por canción sigue siendo el Submit to QA.
-  - `--max-rerolls N` = tope del auto-reroll por mala pronunciación (default 2,
-    0 lo desactiva). Si verify-report.json dice que el nombre del destinatario
-    no se escucha en NINGUNA versión (missingNames en ambas, con probability de
-    palabra de Whisper < 0.65 contando como ausente), los MP3 rechazados van a
-    Downloads/suno/rejected/ (si el reroll falla se restauran), se re-clickea
-    Create sobre el mismo formulario y se re-analiza. Solo cuando Create corrió
-    en ESTA corrida — nunca en --resume. Cada reroll gasta ≈10 créditos y avisa
-    por ntfy; al agotarse, sube la mejor versión igual con aviso urgent.
+  - Reintento automático del Create INICIAL (`MAX_CREATE_RETRIES`, fijo en 2,
+    no configurable por flag): si `createAndDownload()` falla del todo (0 MP3
+    descargados — ver LESSONS.md), antes el pipeline se quedaba sin subir nada
+    y sin avisar claramente (bug real en un REDO); ahora re-clickea Create
+    automáticamente hasta 2 veces más sobre el mismo formulario (gasta créditos
+    de nuevo cada vez), y si los 3 intentos totales fallan avisa por ntfy
+    `urgent` con los comandos de recuperación manual exactos
+    (`node suno-create.js` + `node upload-to-flow.js --version A|B`).
+    (Existió un `--max-rerolls N`/auto-reroll por mala pronunciación del
+    nombre del destinatario — removido el 2026-07-04: la señal de "nombre
+    ausente" de Whisper no era confiable y, visto en vivo, agotó los 2
+    rerolls sin resolver nada, solo gastando créditos. Ver LESSONS.md.)
   - `node start-flow.js --done` = cierre: registra en la hoja + marca state.json.
   - `node start-flow.js --poll [N]` = vigía de cola. Default: intervalo aleatorio
     10-15s. Acepta minutos ("3"), segundos ("30s") o rangos ("10-15s", "1-2").
     Reusa el Chrome del puerto 9333 si ya está abierto (no lanza ventana propia).
     Si el flujo normal arranca sin canciones en cola, cae solo a este modo.
+    `pollOnce` recarga (`page.reload()`) la pestaña reutilizada en CADA poll —
+    bug real (2026-07-04, ver LESSONS.md): sin esto, tras una cola vacía la
+    pestaña quedaba abierta con el DOM viejo para siempre, y el poller nunca
+    detectaba una canción nueva que cayera después.
   - `poll-flow.js` es ahora un redirect deprecated a `start-flow.js --poll`.
   - Cada corrida (normal o `--poll`) escribe toda su salida — la propia + la de cada
     script hijo (`run.js`, `suno-fill.js`, `flow-submit.js`, `upload-to-flow.js`) — en
     `logs/run-<timestamp>.log`, además de mostrarla en la terminal como siempre. El
     auto-verify en background sigue con su log aparte (`logs/verify-audio-auto-*.log`).
 - `lib/suno-create-dl.js` — chequea créditos de Suno, Create × 1 (Suno v5.5 genera 2
-  versiones por click), espera generación y descarga ambos MP3 a Downloads/suno/. Si
-  falla clickear Download → MP3 Audio en la UI, cae a `pauseForHumanInteraction` en
-  vez de tirar error — el watcher de filesystem y el fallback humano corren en
-  paralelo (`Promise.race`), y el que pierde se cancela limpio (nunca queda un
-  listener de stdin huérfano ni una promesa sin resolver).
+  versiones por click), espera generación y descarga ambos MP3 a Downloads/suno/.
+  La descarga usa la API nativa de Playwright de punta a punta (migración
+  2026-07-04, ver LESSONS.md) — NO hay watcher de filesystem: `clickDownloadMp3`
+  clickea ⋯ → Download → MP3 Audio y devuelve el objeto `Download` nativo
+  (capturado vía `page.on('download')`, armado ANTES del click para no perderse
+  el evento — Suno tarda 2.6-6.3s en prepararlo, medido en vivo); guardar el
+  archivo es `await download.saveAs(destPath)`, envuelto en un timeout de 8 min
+  propio porque `saveAs()` no trae uno. Cada `Download` es una referencia
+  inequívoca a una descarga concreta, así que A y B corren en paralelo sin
+  ningún riesgo de confundirse entre sí. Si falla clickear automáticamente,
+  cae a `pauseForHumanInteraction` — un click humano en "MP3 Audio" dispara el
+  mismo evento nativo, así que se detecta igual sin mecanismo aparte.
 - `lib/audio-match.js` — encuentra los 2 MP3 por título + recencia en Downloads/suno/.
+  `titleMatchScore` ignora palabras ≤2 caracteres por defecto, pero si eso deja
+  la lista vacía (título compuesto enteramente por palabras cortas, ej. "Fe",
+  "A ti") usa todas las palabras sin filtrar en vez de dar 0 siempre (bug real,
+  ver LESSONS.md).
 - `lib/audio-analysis.js` — ffprobe (duración) + Whisper (transcripción) + comparación
   letra + CLAP (calidad perceptual: claridad vocal, producción, emoción, artefactos,
   final — ±15 pts informativo, no decide solo) + `pickBestVersion(reportA, reportB)`:
@@ -335,6 +367,15 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
   Suno — guarda `selector-drift-report.md` (gitignored, es una foto de un
   momento) con el detalle. Originado por Antigravity (2026-07-04), revisado
   y con el fix de `STYLE_TEXTAREA` aplicado tras confirmarlo en vivo.
+- `download-click-diagnosis.js` — script standalone de diagnóstico (10 clicks de
+  prueba en cards YA generadas — nunca clickea Create, cero créditos gastados)
+  que mide cuánto tarda Chrome en confirmar (`page.on('download')`) el inicio
+  de una descarga tras clickear "MP3 Audio". Corré `node download-click-
+  diagnosis.js` si vuelve a sospecharse un timeout de descarga — guarda
+  `download-click-diagnosis-report.md` (gitignored, foto de un momento).
+  Originado por Antigravity (2026-07-04): confirmó que Suno tarda 2.6-6.3s en
+  preparar el archivo, el dato que llevó a la migración completa a
+  `download.saveAs()` en `lib/suno-create-dl.js` (ver LESSONS.md).
 - `sheets.js` — wrapper standalone de `lib/sheets-core.js` (registro en Google Sheet)
 - `lib/playwright-helpers.js` — helpers de Playwright (clickByText, setSliderValue,
   expandIfCollapsed, connectToSunoTab, isLoggedIn). Además:

@@ -1265,3 +1265,265 @@ contra un G2P español (`espeak-ng`) por distancia fonética — ataca la causa
 raíz de forma más rigurosa (GOP/Goodness-of-Pronunciation, el estándar
 académico), pero implica nuevas dependencias de Python y un modelo a
 descargar; evaluar solo si el problema se vuelve recurrente pese a este fix.
+
+## Descarga A/B en paralelo se robaban el archivo entre sí — ENOENT en cualquiera de las dos (2026-07-04)
+
+Visto en vivo varias veces ("Nuestro Pacto Eterno", "Gracia que nos sostuvo"
+x2, "El Vestido Rojo"): una de las dos versiones se descargaba bien y la otra
+tiraba `ENOENT: no such file or directory, stat '...'` sobre SU PROPIO
+destino. Al principio pareció ser siempre A la víctima (y B el "ladrón"), pero
+en "El Vestido Rojo" pasó al revés (A "ganó" con contenido que en realidad
+era el de B, B quedó con el ENOENT) — la dirección no es fija, es una carrera
+real de timing.
+
+**Causa raíz (versión completa):** la paralelización de A/B (ver entrada
+anterior, "Descarga de A y B en serie...") hace que ambos `watchForNewMp3`
+vigilen la MISMA carpeta al mismo tiempo, cada uno con su propia "foto" de
+archivos existentes tomada en un momento distinto. Si ninguno de los dos
+archivos reales había aterrizado todavía cuando se tomaron ambas fotos, los
+dos watchers ven los mismos .mp3 nuevos como candidatos — y acá había DOS
+huecos, no uno:
+
+1. **Fuente compartida:** ambos podían reclamar el mismo archivo recién
+   llegado (el .mp3 tal como lo bajó el navegador). Primer fix: `claimedPaths`
+   (`Set` compartido) marca la fuente apenas un watcher decide actuar sobre
+   ella, sincrónicamente, sin ningún `await` de por medio (Node es
+   single-threaded, así que no hay ventana real de carrera entre el chequeo y
+   el reclamo si ambos ocurren en el mismo tick).
+
+2. **Destino ya renombrado, redescubierto como "nuevo" (el hueco que faltaba):**
+   ese primer fix NO alcanzaba. Cuando el watcher de B renombraba su archivo a
+   `"... B.mp3"`, ese nombre NUNCA HABÍA EXISTIDO antes — así que si el
+   watcher de A todavía seguía corriendo (su propio archivo real seguía sin
+   llegar) y hacía un poll DESPUÉS de ese rename, veía `"... B.mp3"` como
+   candidato "nuevo" (no estaba en la foto de A, y `claimedPaths` solo tenía
+   la fuente original, no el destino). A lo reclamaba y lo volvía a renombrar
+   hacia SU propio destino limpio — robándole a B el archivo que ya había
+   resuelto. B terminaba con una promesa ya resuelta apuntando a un archivo
+   que un instante después dejó de existir (ENOENT), y A terminaba "exitoso"
+   pero con el contenido que en realidad era la generación de B.
+
+**Fix completo:** `finish()` ahora agrega TANTO la fuente como el destino
+resuelto (`resolvedDest`) a `claimedPaths`, en el mismo tick sincrónico en que
+decide actuar. Así, un archivo ya colocado en su destino final por un watcher
+queda inmediatamente protegido de ser "redescubierto" por cualquier otro.
+
+**Sin test automático a propósito** (mismo criterio que el resto de este
+archivo para bugs de timing de filesystem/Playwright real — ver
+`test/suno-create-dl-config.test.js`: ese test cubre timeouts/constantes, no
+el flujo de descarga en sí, que necesita Chrome/Suno real para reproducirse
+de verdad). Validar en la próxima corrida real con 2 versiones generadas que
+ninguna tire ENOENT, en ninguna dirección.
+
+## Un REDO no subió nada al Flow — un fallo total de descarga (0 archivos) apagaba el resto del pipeline en silencio (2026-07-04)
+
+Visto en vivo en un REDO ("El Vestido Rojo"): el pipeline no subió ninguna
+versión al Flow — quedó lo que había antes (la canción vieja, ya rechazada
+por QC), y hubo que subir a mano. Root cause en `start-flow.js`, Paso 3b: si
+`createAndDownload()` (el Create inicial de la corrida, no un reroll) lanzaba
+por completo — 0 archivos descargados, ninguna de las 2 versiones sobrevivió
+la carrera de descargas de la entrada anterior — el `catch` solo logueaba el
+error y seguía. Eso dejaba `mp3sDescargados = false` y `createdThisRun =
+false` para TODA la corrida, lo cual en cascada:
+
+1. El bucle de auto-reroll (Paso 3d) nunca corría — `while (createdThisRun &&
+   ...)` es `false` de entrada, y el reroll ya requiere una descarga previa
+   exitosa para poder comparar.
+2. El Paso 5 (subida automática) está detrás de `if (mp3sDescargados)` —
+   con `false`, se salta ENTERO. El pipeline seguía corriendo (esperaba el
+   Submit to QA, etc.) pero nunca tocaba el campo de archivo del Flow.
+
+A diferencia del reroll (que SÍ reintenta cuando el audio suena mal, pero
+solo después de al menos una descarga exitosa), un fallo total en el primer
+intento no tenía ningún camino de recuperación automática.
+
+**Fix:** el Create inicial ahora reintenta hasta `MAX_CREATE_RETRIES` (2)
+veces completas (re-clickeando Create de nuevo sobre el mismo formulario,
+gastando créditos otra vez) si `createAndDownload()` lanza por completo — no
+confundir con `MAX_REROLLS` (ese es por mala pronunciación del nombre, y
+solo aplica cuando SÍ hubo alguna descarga que analizar). Si los 3 intentos
+totales fallan, avisa por ntfy con prioridad `urgent` y deja instrucciones de
+recuperación manual explícitas en consola (`node suno-create.js` +
+`node upload-to-flow.js --version A|B`) — antes solo quedaba el mensaje
+genérico de "Create manual disponible", sin explicar que NADA se había
+subido.
+
+**Sobre las "6 versiones de la misma canción":** no es un bug aparte —
+es la consecuencia esperable de `--max-rerolls 2` (default): hasta 3 Creates
+totales (el original + 2 rerolls) × 2 versiones por click = hasta 6
+generaciones de Suno para una sola canción, cada una gastando créditos. El
+bug de la carrera de descargas (entrada anterior de este archivo) lo hacía
+mucho más probable de lo normal: con solo 1 versión sobreviviendo cada
+intento (la otra perdida en la carrera), la chance de que "la única
+disponible" no confirme el nombre y dispare OTRO reroll era mucho más alta
+que si ambas versiones realmente hubieran estado disponibles para comparar.
+Con el fix de `claimedPaths` (entrada anterior) debería volver a ser la
+excepción, no la norma.
+
+## Se sacó el auto-reroll por mala pronunciación (2026-07-04)
+
+Decisión explícita de Hector tras verlo fallar en vivo: en "Treinta Años de
+Camino" (nombre "Gerardo") se gastaron los 2 rerolls completos
+(`--max-rerolls 2`, default) y el nombre siguió sin confirmarse
+("⚠️ Rerolls agotados (2): el nombre sigue sin escucharse bien") — 3 Creates
+totales, ~30 créditos, cero mejora. No fue un caso aislado: la señal de la
+que depende (`missingNames`, basada en si Whisper "escucha" el nombre) ya
+estaba documentada como poco confiable sobre canto, y el bug de la carrera
+de descargas (entrada anterior) hacía que muchas corridas solo tuvieran 1
+versión real para juzgar en cada intento, disparando el reroll más seguido
+de lo que debería. En conjunto: el mecanismo no convergía a un resultado
+mejor, solo gastaba créditos reales esperando que la próxima tirada de
+dados saliera distinta.
+
+**Qué se sacó** (`start-flow.js`): el flag `--max-rerolls N`, la función
+`bothVersionsMissingNames()`, `quarantineRejectedMp3s()` (movía los MP3
+rechazados a `Downloads/suno/rejected/`), el `while` de reroll completo, y
+el mensaje post-loop de "rerolls agotados". La señal informativa se
+mantiene intacta — el reporte de `verify-audio.js` sigue avisando
+"nombres ausentes ⚠️" y penalizando en `pickBestVersion` cuando el nombre no
+se escucha bien; lo que se sacó es SOLO la re-generación automática que
+intentaba "arreglarlo" gastando más créditos sin garantía de mejora.
+
+**No se tocó** `MAX_CREATE_RETRIES` (entrada anterior, "Un REDO no subió
+nada al Flow") — mecanismo completamente distinto (reintenta el Create
+INICIAL si falla del todo, 0 archivos descargados) que sigue activo igual
+que antes.
+
+**Carpeta `Downloads/suno/rejected/`:** ya no la escribe ningún código —
+queda como limpieza manual opcional si Hector quiere borrar lo acumulado
+de corridas viejas; no hace falta para que el pipeline funcione bien.
+
+## Causa raíz real de los timeouts de 8 min en una de las dos versiones: el click en la SIGUIENTE card cancelaba la descarga de la ACTUAL (2026-07-04)
+
+Después de arreglar la carrera de `claimedPaths` (entradas anteriores), seguía
+pasando que una de las dos versiones se colgaba los 8 minutos completos sin
+que aterrizara ningún archivo — ya no por robo entre watchers, sino porque
+la descarga real nunca llegaba a completarse del lado de Chrome.
+
+**Diagnóstico** (Antigravity, script aislado de solo lectura contra una
+sesión real de Suno, 10 clicks de prueba en cards ya generadas — cero
+créditos gastados): el evento nativo `page.on('download')` de Chrome SIEMPRE
+se disparó (10/10), pero nunca instantáneo — tardó entre **2.6s y 6.3s**
+(promedio ~4.8s) desde el click en "MP3 Audio" hasta que Chrome confirmó que
+la descarga arrancó. Cero errores de consola, cero estados raros del DOM.
+
+**Causa raíz confirmada:** en `lib/suno-create-dl.js`, `clickDownloadMp3`
+clickeaba "MP3 Audio" para la Versión A y devolvía el control INMEDIATAMENTE
+(el caller solo esperaba `page.waitForTimeout(1500)` — 1.5s) antes de pasar
+a abrir el menú de la Versión B. Como Suno tarda hasta 6.3s en preparar el
+archivo, tocar la UI de B (abrir su menú ⋯, Escape, etc.) **antes** de que
+la descarga de A terminara de dispararse la cancelaba en silencio del lado
+del navegador — sin ningún error visible, simplemente el archivo nunca
+llegaba a existir, y el watcher de filesystem esperaba los 8 minutos completos
+por algo que Chrome ya había abortado en los primeros segundos.
+
+**Fix:** `clickDownloadMp3` ahora arma un listener de `page.on('download')`
+ANTES de intentar el click (no después — el click puede ocurrir en cualquier
+vuelta del bucle de reintentos por "not-ready", así que el listener tiene
+que estar activo desde el arranque para no perderse el evento), y una vez
+clickeado espera esa confirmación real (`DOWNLOAD_START_CONFIRM_TIMEOUT_MS`,
+20s — margen de sobra sobre el máximo de 6.3s medido) antes de devolver el
+control al caller. Recién ahí el caller pasa a tocar la próxima card. Si
+Chrome no confirma en 20s, se loguea una advertencia pero se sigue igual.
+(Nota post-migración a `download.saveAs()`, ver entrada siguiente: en el
+momento en que se escribió esto el watcher de filesystem seguía siendo la
+fuente de verdad de "el archivo está completo en disco" — ya no existe,
+reemplazado por completo.)
+
+**Sobre el uso de Antigravity acá:** primera vez que se usó para reproducir
+un bug en vivo con clicks reales (no solo lectura de selectores) — seguro
+porque "Download → MP3 Audio" no gasta créditos de Suno (a diferencia de
+"Create"). Las reglas duras (nunca Create, nunca Submit to QA, solo cards ya
+generadas, reporte en Markdown) se respetaron.
+
+## Migración completa a la API nativa de descargas de Playwright — se acabó el watcher de filesystem (2026-07-04)
+
+El fix anterior (esperar `page.on('download')` antes de tocar la próxima
+card) redujo el problema pero no lo cerró del todo — Antigravity encontró en
+vivo que seguía habiendo timeouts de 8 min esporádicos. Causa raíz definitiva:
+mientras exista CUALQUIER mecanismo que vigile una carpeta compartida y trate
+de adivinar "cuál archivo nuevo es de quién" (snapshots, `claimedPaths`,
+lo que sea), siempre va a quedar una ventana de ambigüedad entre A y B.
+
+**Fix (reemplazo total, no un parche más):** `lib/suno-create-dl.js` ya no
+vigila ninguna carpeta. `clickDownloadMp3` devuelve directamente el objeto
+`Download` nativo de Playwright (capturado vía `page.on('download')` antes
+del click, igual que antes) en vez de un booleano; la fase de guardado usa
+`await download.saveAs(destPath)`, que Playwright resuelve solo cuando la
+descarga terminó de verdad — sin polling, sin `fs.watch`, sin comparar
+nombres. Cada `Download` es una referencia inequívoca a UNA descarga
+concreta: A y B nunca pueden confundirse entre sí porque no hay ningún
+estado compartido que consultar. Se eliminaron `watchForNewMp3` y
+`claimedPaths` por completo. El fallback manual (`awaitManualDownload`)
+también migró: un click humano en "MP3 Audio" dispara el mismo evento
+`page.on('download')` que uno automatizado, así que no hace falta ningún
+mecanismo aparte para detectarlo tampoco ahí.
+
+**Riesgo nuevo que había que cubrir:** `saveAs()` no tiene timeout propio —
+si una descarga se estancara a mitad de camino quedaría colgado para
+siempre. Se envolvió en un `Promise.race` contra el mismo techo de 8 min
+(`DOWNLOAD_WAIT_TIMEOUT_MS`) que tenía el watcher que reemplaza, para no
+perder esa garantía.
+
+**Diagnóstico y arreglo, ambos de Antigravity** (revisados acá antes de
+aplicar, como siempre) — la explicación técnica completa (con el paso a paso
+del bug de nombres duplicados) fue el material fuente de este fix.
+
+## Cinco hallazgos más de Antigravity, revisados y aplicados juntos (2026-07-04)
+
+Mismo día, mismo patrón (Antigravity diagnostica, Claude verifica contra el
+código real antes de aplicar). Los 5 se confirmaron ciertos leyendo el
+código — ninguno se aplicó a ciegas.
+
+**1. 🔴 Poller ciego en sequía (`start-flow.js`, `pollOnce`) — el más
+importante de los 5.** `pollOnce` solo cerraba la pestaña en el camino de
+éxito (`found: true`). Si la cola estaba vacía, la pestaña quedaba abierta
+sin cerrar; el siguiente poll la reutilizaba con `navigate: false`, y
+`enterFlowAndEnsureAssignment` con ese flag lee el DOM tal cual está, sin
+recargar nunca. Si una canción nueva caía en la cola mientras tanto, el
+poller nunca la iba a detectar — se quedaba mirando la misma foto vieja del
+DOM indefinidamente. **Fix:** si se reutiliza la pestaña, se recarga
+(`page.reload()`) siempre antes de chequear, sin importar qué pasó en el
+poll anterior.
+
+**2. 🟡 `titleMatchScore` fallaba con títulos cortos (`lib/audio-match.js`).**
+El filtro de palabras >2 caracteres dejaba `words` vacío para títulos como
+"Fe" o "A ti" (todas sus palabras ≤2 chars), y el score daba 0 SIEMPRE sin
+importar el archivo — un título corto nunca podía matchear nada, aunque el
+MP3 correcto estuviera bien guardado en disco. Baja probabilidad (los
+títulos generados suelen ser frases descriptivas), pero cuando pasa es un
+fallo duro. **Fix:** si el filtro deja la lista vacía, usar todas las
+palabras sin filtrar en vez de rendirse. Cubierto en
+`test/audio-match.test.js` (nuevo).
+
+**3. 🟡 Normalización inconsistente en `readRecentCompletion`
+(`start-flow.js`).** Tenía su propia función `normalize` local que NO
+limpiaba signos de puntuación, a diferencia de la centralizada en
+`lib/audio-match.js`. Un título con puntuación (ej. "Mi lugar seguro." con
+punto final) que Suno renderizara sin ese punto en la card fallaba la
+comparación por una simple diferencia de puntuación, no por ser una canción
+distinta — abortaba el auto-registro en Sheets sin necesidad (quedaba el
+fallback manual de `--done`, así que no se perdía nada, pero era molesto).
+**Fix:** usar la `normalize` centralizada (importada) en vez de la copia
+local.
+
+**4. ⚪ Comparación estricta de títulos en el Paso 5 (`start-flow.js`).**
+`report.titulo === currentTitulo` sin normalizar — cualquier diferencia
+mínima de mayúsculas/espacios/puntuación entre `state.json` y
+`verify-report.json` hacía que se ignorara el reporte de análisis (ya había
+un fallback sano: "sube B por defecto", así que el impacto era bajo).
+**Fix:** misma normalización que el punto 3, aplicada acá también.
+
+**5. ⚪ Crash de salida en Windows (`flow-submit.js`, `upload-to-flow.js`).**
+`run.js` ya tiene `exitAfterDelay()` (250ms antes de `process.exit()`) para
+evitar un crash de libuv ("Assertion failed:
+!(handle->flags & UV_HANDLE_CLOSING)") verificado empíricamente cuando se
+cierra un socket CDP y se llama `process.exit()` en el mismo tick. Nunca se
+replicó en los otros dos scripts que también hablan CDP. No se vio este
+crash específico en ningún log de esta sesión — es preventivo, no la
+reproducción de un incidente real. **Fix:** mismo helper `exitAfterDelay`
+copiado a ambos archivos, reemplazando todos los `process.exit()`.
+
+**Verificación:** `npm test` (80 casos, 5 nuevos de `audio-match.test.js`) y
+`node start-flow.js --dry-run` (circuito completo sin API real) corridos
+después de los 5 cambios — todo limpio.
