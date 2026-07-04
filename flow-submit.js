@@ -18,6 +18,17 @@ const { parseSongFile, buildRedoAwareNotes } = require('./lib/song-file');
 
 const SONG_PATH = path.join(__dirname, 'song.txt');
 const DEBUG_PORT = 9333;
+
+// Windows (libuv): terminar el proceso con una conexión CDP todavía abierta
+// puede crashear con "Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)"
+// si el socket se cierra en el mismo tick que process.exit() — verificado
+// empíricamente en run.js (ver LESSONS.md). Este script nunca hace
+// browser.close() (deja la pestaña abierta a propósito), pero la conexión
+// CDP igual queda viva hasta que el proceso termina, así que el mismo riesgo
+// aplica. El delay le da tiempo al event loop a limpiar antes de forzar la salida.
+function exitAfterDelay(code) {
+  setTimeout(() => process.exit(code), 250);
+}
 const SCREENSHOT_PATH = path.join(__dirname, 'flow-submit-verify.png');
 
 // Pone el valor en un <input>/<textarea> controlado por React usando el
@@ -180,8 +191,8 @@ async function findNotesField(page) {
   console.log('Deteniéndose acá. Revisá el screenshot antes de subir el MP3 y hacer Submit to QA manualmente.');
 
   console.log('Dejando la pestaña del Flow abierta para tu revisión manual.');
-  process.exit(0);
+  exitAfterDelay(0);
 })().catch((err) => {
   console.error('flow-submit.js falló:', err);
-  process.exit(1);
+  exitAfterDelay(1);
 });

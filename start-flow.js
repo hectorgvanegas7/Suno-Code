@@ -112,6 +112,7 @@ const state = require('./lib/pipeline-state');
 const { LYRICS_TEXTAREA } = require('./lib/suno-selectors');
 const { rotateOldRunFiles } = require('./lib/hygiene');
 const { parseSessionTime } = require('./lib/session-time');
+const { normalize } = require('./lib/audio-match');
 
 const DEBUG_PORT = 9333;   // Chrome de Suno (ya corriendo para suno-fill y flow-submit)
 
@@ -402,7 +403,18 @@ async function pollOnce(log) {
     const ctx = contexts[0];
     let page = ctx.pages().find((p) => p.url().includes('cancioneterna.com'));
     const needNavigate = !page;
-    if (!page) page = await ctx.newPage();
+    if (!page) {
+      page = await ctx.newPage();
+    } else {
+      // Bug real (2026-07-04, ver LESSONS.md): en sequía (cola vacía) esta
+      // pestaña quedaba abierta sin cerrar NI recargar — el siguiente poll la
+      // reutilizaba tal cual (navigate:false más abajo lee el DOM as-is), así
+      // que si una canción nueva caía en la cola mientras tanto, el poller
+      // nunca la iba a ver: seguía mirando la misma foto vieja del DOM para
+      // siempre. Recargar SIEMPRE que se reutiliza la pestaña garantiza
+      // estado fresco en cada intento, sin cambiar el resto del flujo.
+      await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
+    }
     if (needNavigate) {
       await page.bringToFront();
     }
@@ -542,10 +554,15 @@ async function readRecentCompletion(expectedTitulo, { page: providedPage = null 
     if (!cardData.title) throw new Error('No se encontró el título en la primera card');
     if (!cardData.sessionText) throw new Error('No se encontró texto de sesión en la primera card');
 
-    // Verificar que el título coincide con el state.json actual
-    const normalize = (s) =>
-      s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ').trim();
-
+    // Verificar que el título coincide con el state.json actual. Usa la
+    // `normalize` centralizada de lib/audio-match.js (importada arriba) en
+    // vez de una copia local — esa SÍ limpia signos de puntuación
+    // (`.replace(/[^a-z0-9\s]/g, ' ')`), la copia local no. Bug real
+    // (2026-07-04, ver LESSONS.md): un título con puntuación (ej. "Mi lugar
+    // seguro." con punto final) que Suno renderizara sin ese punto en la
+    // card fallaba esta comparación por una simple diferencia de puntuación,
+    // no una canción distinta — abortaba el auto-registro en Sheets sin
+    // necesidad.
     if (expectedTitulo) {
       if (normalize(cardData.title) !== normalize(expectedTitulo)) {
         throw new Error(
@@ -923,14 +940,6 @@ async function runFlow({ resume = false } = {}) {
   let verifyPromise = null; // corre en paralelo con el Paso 4; se espera después
 
   const isLoopMode = process.argv.includes('--loop');
-  // Auto-reroll por nombres mal pronunciados: cuántas veces re-clickear Create
-  // (≈10 créditos cada vez) si Whisper no detecta el nombre del destinatario en
-  // NINGUNA versión. Default 2; --max-rerolls N lo cambia (0 lo desactiva).
-  const maxRerollsIdx = process.argv.indexOf('--max-rerolls');
-  const MAX_REROLLS = maxRerollsIdx !== -1 && /^\d+$/.test(process.argv[maxRerollsIdx + 1] || '')
-    ? parseInt(process.argv[maxRerollsIdx + 1], 10)
-    : 2;
-  let createdThisRun = false; // el reroll solo aplica si Create corrió en ESTA corrida
 
   if (skipSunoFill) {
     // En resume no sabemos si el crash fue antes o después del click en Create.
@@ -972,32 +981,61 @@ async function runFlow({ resume = false } = {}) {
     }
     console.log('\n=== Paso 3b/4: Create + generación + descarga (suno-create-dl.js) ===');
     console.log('  (Pasá --no-auto-create para saltar este paso y hacer Create a mano)\n');
-    try {
-      const { createAndDownload } = require('./lib/suno-create-dl');
-      const { versionA, versionB } = await createAndDownload();
-      mp3sDescargados = true;
-      createdThisRun = true;
-      hayVersionB = !!versionB;
-      console.log('\n  ✅ Generación y descarga completas.');
-      if (versionA) console.log(`     Versión A: ${versionA.path || versionA.label}`);
-      if (versionB) console.log(`     Versión B: ${versionB.path || versionB.label}`);
 
-      // Paso 3c: verify-audio.js — se LANZA acá pero se espera DESPUÉS del
-      // Paso 4: el análisis (GPU/CPU + filesystem) y flow-submit (navegador)
-      // son independientes, así que correrlos en paralelo ahorra 1-4 min.
-      // El resultado se lee antes de la recomendación de versión (Paso 5).
-      // --no-auto-verify lo saltea; --fast-verify fuerza el modo rápido.
-      if (!process.argv.includes('--no-auto-verify')) {
-        console.log('\n  ⏳ Análisis de audio lanzado en paralelo con el Paso 4 (Whisper + demucs)...');
-        verifyPromise = runVerifyAudio({ fast: process.argv.includes('--fast-verify') });
-      } else {
-        console.log('\n  (--no-auto-verify: saltando el análisis automático — corré node verify-audio.js a mano)');
+    // Reintentos si la descarga falla POR COMPLETO (0 archivos — createAndDownload
+    // lanza). Bug real (2026-07-04, ver LESSONS.md): si este primer intento
+    // fallaba del todo, `mp3sDescargados` quedaba en false para TODA la corrida
+    // — eso saltaba ENTERO el Paso 5 (subida automática): el pipeline solo
+    // logueaba el error y seguía sin subir nada, dejando lo que hubiera antes
+    // en el Flow (en un REDO, la versión vieja ya rechazada por QC) hasta que
+    // Gabo lo notara y subiera a mano.
+    const MAX_CREATE_RETRIES = 2;
+    let createAttempt = 0;
+    let createSucceeded = false;
+    while (createAttempt <= MAX_CREATE_RETRIES && !createSucceeded) {
+      createAttempt++;
+      try {
+        const { createAndDownload } = require('./lib/suno-create-dl');
+        const { versionA, versionB } = await createAndDownload();
+        mp3sDescargados = true;
+        hayVersionB = !!versionB;
+        createSucceeded = true;
+        console.log('\n  ✅ Generación y descarga completas.');
+        if (versionA) console.log(`     Versión A: ${versionA.path || versionA.label}`);
+        if (versionB) console.log(`     Versión B: ${versionB.path || versionB.label}`);
+
+        // Paso 3c: verify-audio.js — se LANZA acá pero se espera DESPUÉS del
+        // Paso 4: el análisis (GPU/CPU + filesystem) y flow-submit (navegador)
+        // son independientes, así que correrlos en paralelo ahorra 1-4 min.
+        // El resultado se lee antes de la recomendación de versión (Paso 5).
+        // --no-auto-verify lo saltea; --fast-verify fuerza el modo rápido.
+        if (!process.argv.includes('--no-auto-verify')) {
+          console.log('\n  ⏳ Análisis de audio lanzado en paralelo con el Paso 4 (Whisper + demucs)...');
+          verifyPromise = runVerifyAudio({ fast: process.argv.includes('--fast-verify') });
+        } else {
+          console.log('\n  (--no-auto-verify: saltando el análisis automático — corré node verify-audio.js a mano)');
+        }
+      } catch (e) {
+        const tituloActual = state.read()?.titulo || '(sin título)';
+        if (createAttempt <= MAX_CREATE_RETRIES) {
+          console.log(`\n  ⚠️ Create/descarga falló por completo (intento ${createAttempt}/${MAX_CREATE_RETRIES + 1}): ${e.message}`);
+          console.log('  Reintentando — re-clickeando Create sobre el mismo formulario (gasta créditos de nuevo)...');
+          await notify(
+            `⚠️ Create/descarga falló en "${tituloActual}" (intento ${createAttempt}). Reintentando automáticamente...`,
+            { title: 'Reintento de Create', priority: 'default', tags: 'arrows_counterclockwise' }
+          ).catch(() => {});
+        } else {
+          console.log(`\n  ⚠️ Create/descarga automático falló ${createAttempt} veces seguidas: ${e.message}`);
+          console.log('  Continuando con el resto del pipeline SIN subir nada automáticamente. Create manual disponible con:');
+          console.log('    node suno-create.js   (clickea Create)');
+          console.log('    node verify-audio.js  (analiza después de descargar)');
+          console.log('    node upload-to-flow.js --version A|B   (subida manual)');
+          await notify(
+            `🛑 Create/descarga falló ${createAttempt} veces seguidas en "${tituloActual}" — necesita intervención manual (node suno-create.js + upload-to-flow.js). No se subió nada automáticamente.`,
+            { title: 'Create/descarga falló — acción manual necesaria', priority: 'urgent', tags: 'warning' }
+          ).catch(() => {});
+        }
       }
-    } catch (e) {
-      console.log(`\n  ⚠️ Create/descarga automático falló: ${e.message}`);
-      console.log('  Continuando con el resto del pipeline. Create manual disponible con:');
-      console.log('    node suno-create.js   (clickea Create)');
-      console.log('    node verify-audio.js  (analiza después de descargar)');
     }
   }
 
@@ -1020,85 +1058,6 @@ async function runFlow({ resume = false } = {}) {
   const REPORT_PATH = path.join(__dirname, 'verify-report.json');
   const currentTitulo = state.read()?.titulo || null;
 
-  // ── Paso 3d: Auto-reroll por mala pronunciación del nombre ─────────────────
-  // Si el análisis dice que el nombre del destinatario NO se escucha en ninguna
-  // de las versiones, se descartan esos MP3 (van a Downloads/suno/rejected/
-  // para que audio-match no los vuelva a agarrar), se re-clickea Create sobre
-  // el MISMO formulario (sigue lleno en Suno) y se re-analiza. Solo aplica si
-  // Create corrió en ESTA corrida — nunca en --resume, donde no sabemos si el
-  // formulario sigue lleno. Máximo MAX_REROLLS veces (≈10 créditos cada una).
-  function bothVersionsMissingNames() {
-    if (!fs.existsSync(REPORT_PATH)) return false;
-    try {
-      const report = JSON.parse(fs.readFileSync(REPORT_PATH, 'utf-8'));
-      if (!currentTitulo || report.titulo !== currentTitulo) return false;
-      const missingA = (report.reportA?.missingNames || []).length > 0;
-      // Con una sola versión descargada, la decisión recae solo en la A.
-      const missingB = report.reportB ? (report.reportB.missingNames || []).length > 0 : missingA;
-      return missingA && missingB;
-    } catch {
-      return false;
-    }
-  }
-
-  // Mueve los MP3 rechazados a <carpeta>/rejected/ y devuelve la lista de
-  // movimientos para poder DESHACERLOS si el reroll falla a mitad de camino
-  // (sin esto, un Create fallido dejaría el pipeline sin ningún MP3 que subir).
-  function quarantineRejectedMp3s() {
-    const moved = [];
-    try {
-      const report = JSON.parse(fs.readFileSync(REPORT_PATH, 'utf-8'));
-      for (const r of [report.reportA, report.reportB]) {
-        if (r?.path && fs.existsSync(r.path)) {
-          const rejectedDir = path.join(path.dirname(r.path), 'rejected');
-          fs.mkdirSync(rejectedDir, { recursive: true });
-          const dest = path.join(rejectedDir, `${Date.now()}-${path.basename(r.path)}`);
-          fs.renameSync(r.path, dest);
-          moved.push({ src: r.path, dest });
-          console.log(`  🗑️  Descartado (nombre mal pronunciado): ${path.basename(r.path)} → rejected/`);
-        }
-      }
-    } catch (e) {
-      console.log(`  ⚠️ No se pudieron apartar los MP3 rechazados: ${e.message}`);
-    }
-    return moved;
-  }
-
-  let rerollsUsados = 0;
-  while (createdThisRun && verifyOk && rerollsUsados < MAX_REROLLS && bothVersionsMissingNames()) {
-    rerollsUsados++;
-    console.log(`\n🔁 Auto-reroll ${rerollsUsados}/${MAX_REROLLS}: el nombre no se escucha bien en ninguna versión. Regenerando (gasta créditos)...`);
-    await notify(
-      `🔁 Reroll ${rerollsUsados}/${MAX_REROLLS} por mala pronunciación del nombre en "${currentTitulo}". Regenerando en Suno...`,
-      { title: 'Auto-Reroll Suno', priority: 'high', tags: 'arrows_counterclockwise' }
-    ).catch(() => {});
-    const moved = quarantineRejectedMp3s();
-    try {
-      const { createAndDownload } = require('./lib/suno-create-dl');
-      const { versionB } = await createAndDownload();
-      hayVersionB = !!versionB;
-      console.log('  ✅ Re-generación y descarga completas. Re-analizando audio...');
-      verifyOk = await runVerifyAudio({ fast: process.argv.includes('--fast-verify') });
-    } catch (e) {
-      console.log(`  ⚠️ El reroll falló (${e.message}) — restaurando los MP3 anteriores y siguiendo con lo que hay.`);
-      for (const m of moved) {
-        try { fs.renameSync(m.dest, m.src); } catch {}
-      }
-      await notify(
-        `⚠️ El reroll de "${currentTitulo}" falló (${String(e.message).slice(0, 120)}). Se sigue con las versiones anteriores.`,
-        { title: 'Auto-Reroll falló', priority: 'high', tags: 'warning' }
-      ).catch(() => {});
-      break;
-    }
-  }
-  if (rerollsUsados > 0 && bothVersionsMissingNames()) {
-    console.log(`\n⚠️ Rerolls agotados (${MAX_REROLLS}): el nombre sigue sin escucharse bien. Se sube la mejor versión igual — ESCUCHALA antes de tu Submit.`);
-    await notify(
-      `⚠️ Rerolls agotados en "${currentTitulo}": el nombre sigue mal pronunciado. Escuchá el MP3 antes de hacer Submit.`,
-      { title: 'Auto-Reroll agotado', priority: 'urgent', tags: 'warning' }
-    ).catch(() => {});
-  }
-
   // ── Paso 5: Recomendación + Upload automático de la MEJOR versión ──────────
   // Se sube la versión que recomienda verify-report.json (pickBestVersion:
   // duración, letra, clipping, corte abrupto, CLAP...). Solo se confía en el
@@ -1114,7 +1073,13 @@ async function runFlow({ resume = false } = {}) {
     if (verifyOk && fs.existsSync(REPORT_PATH)) {
       try {
         const report = JSON.parse(fs.readFileSync(REPORT_PATH, 'utf-8'));
-        if (currentTitulo && report.titulo && report.titulo === currentTitulo) {
+        // Normalizado (no comparación estricta de strings) — misma razón que
+        // readRecentCompletion más arriba: una diferencia de mayúsculas,
+        // espacios extra o puntuación entre song.txt/state.json y lo que
+        // escribió verify-audio.js no debería tirar el reporte entero (bug
+        // real, ver LESSONS.md). El fallback ya existente ("B por defecto")
+        // sigue intacto si de verdad no coincide.
+        if (currentTitulo && report.titulo && normalize(report.titulo) === normalize(currentTitulo)) {
           const rec = report.recommendation;
           console.log('\n══════════════════════════════════════════════════════');
           console.log(`📊 RECOMENDACIÓN DE AUDIO: Versión ${rec.recommended}`);

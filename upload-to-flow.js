@@ -30,6 +30,18 @@ const { parseTituloFromSongFile: parseTitulo } = require('./lib/audio-analysis')
 const DEBUG_PORT = 9333;
 const SONG_PATH = path.join(__dirname, 'song.txt');
 
+// Windows (libuv): terminar el proceso con una conexión CDP todavía abierta
+// puede crashear con "Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)"
+// si el socket se cierra en el mismo tick que process.exit() — verificado
+// empíricamente en run.js (ver LESSONS.md). La mayoría de los exits acá
+// abajo ocurren ANTES de conectar a Chrome (sin riesgo), pero el catch final
+// puede disparar con la conexión todavía viva si algo falla a mitad de
+// camino — más simple y seguro aplicar el mismo delay en todos los casos que
+// tratar de distinguir cuáles corren de verdad riesgo.
+function exitAfterDelay(code) {
+  setTimeout(() => process.exit(code), 250);
+}
+
 function parseArgs(argv) {
   const args = {};
   for (let i = 0; i < argv.length; i++) {
@@ -50,22 +62,22 @@ function parseArgs(argv) {
     mp3Path = path.resolve(cliArgs.file);
     if (!fs.existsSync(mp3Path)) {
       console.error(`❌ Archivo no encontrado: ${mp3Path}`);
-      process.exit(1);
+      exitAfterDelay(1);
     }
     console.log(`\n📁 Archivo especificado: ${mp3Path}`);
   } else if (cliArgs.version) {
     if (!['A', 'B'].includes(cliArgs.version)) {
       console.error('❌ --version debe ser A o B');
-      process.exit(1);
+      exitAfterDelay(1);
     }
     if (!fs.existsSync(SONG_PATH)) {
       console.error('❌ song.txt no encontrado. Pasá el archivo directamente con --file.');
-      process.exit(1);
+      exitAfterDelay(1);
     }
     const titulo = parseTitulo(fs.readFileSync(SONG_PATH, 'utf-8'));
     if (!titulo) {
       console.error('❌ No se pudo leer el título de song.txt. Usá --file directamente.');
-      process.exit(1);
+      exitAfterDelay(1);
     }
     console.log(`\n🔍 Buscando Versión ${cliArgs.version} para: "${titulo}"`);
     try {
@@ -73,31 +85,31 @@ function parseArgs(argv) {
       const chosen = cliArgs.version === 'A' ? versionA : versionB;
       if (!chosen) {
         console.error(`❌ No se encontró Versión ${cliArgs.version}. Usá --file directamente.`);
-        process.exit(1);
+        exitAfterDelay(1);
       }
       mp3Path = chosen.path;
       console.log(`   Archivo: ${mp3Path}`);
     } catch (e) {
       console.error(`❌ ${e.message}`);
-      process.exit(1);
+      exitAfterDelay(1);
     }
   } else {
     console.error('❌ Usá --version A|B o --file "ruta.mp3"');
     console.error('   Ejemplos:');
     console.error('     node upload-to-flow.js --version A');
     console.error('     node upload-to-flow.js --file "C:\\Users\\hecto\\Downloads\\suno\\20260630-mi-cancion-A.mp3"');
-    process.exit(1);
+    exitAfterDelay(1);
   }
 
   // Verificar que el archivo existe y no está a medias
   if (!fs.existsSync(mp3Path)) {
     console.error(`❌ Archivo no encontrado: ${mp3Path}`);
-    process.exit(1);
+    exitAfterDelay(1);
   }
   const stat = fs.statSync(mp3Path);
   if (stat.size < 10000) {
     console.error(`❌ Archivo demasiado pequeño (${stat.size} bytes) — posiblemente descarga incompleta.`);
-    process.exit(1);
+    exitAfterDelay(1);
   }
   console.log(`   Tamaño: ${Math.round(stat.size / 1024)} KB`);
 
@@ -114,12 +126,24 @@ function parseArgs(argv) {
     ({ browser, page } = await connectToFlowTab(chromium, DEBUG_PORT));
   } catch (e) {
     console.error(`❌ ${e.message}`);
-    process.exit(1);
+    exitAfterDelay(1);
   }
   console.log(`   Conectado: ${page.url()}`);
 
   // Buscar campo de archivo para MP3
   console.log('\n🔍 Buscando campo de carga de MP3...');
+
+  // Darle a React margen para montar el componente de carga antes de
+  // buscarlo. Bug real (2026-07-04, ver LESSONS.md): este script corre
+  // inmediatamente después de que flow-submit.js termina de escribir título/
+  // letra/notas en la MISMA pestaña, y React puede seguir re-renderizando en
+  // ese momento — un `.count()` inmediato (sin esperar nada) podía dar 0
+  // inputs aunque el campo terminara de montarse medio segundo después. El
+  // campo existe siempre, incluso en un REDO (queda dentro de la zona
+  // "Replace MP3", oculto pero interactuable) — esto es pura espera de
+  // timing, no un chequeo de estado.
+  await page.waitForSelector('input[type="file"]', { timeout: 5000 }).catch(() => null);
+
   const fileInputSelectors = [
     'input[type="file"][accept*="audio"]',
     'input[type="file"][accept*="mp3"]',
@@ -200,6 +224,13 @@ function parseArgs(argv) {
     console.warn(`  ⚠️ No se pudo preparar el archivo con nombre limpio: ${e.message}`);
   }
 
+  // En un REDO, el Flow ya muestra un <audio> con el archivo VIEJO (el que
+  // rechazó QC) antes de que subamos nada — capturar su src ahora para poder
+  // distinguir "ya estaba" de "se subió de verdad" después (ver más abajo).
+  const previousAudioSrc = await page.evaluate(
+    () => document.querySelector('audio[src]')?.src || null
+  ).catch(() => null);
+
   // Subir el archivo
   console.log(`\n⬆️  Subiendo: ${path.basename(uploadPath)}`);
   try {
@@ -215,11 +246,18 @@ function parseArgs(argv) {
   // Verificar que la UI muestre el archivo cargado — chequear el nombre que
   // REALMENTE se subió (uploadPath), no el original: si se renombró, el Flow
   // muestra el nombre limpio y buscar el original acá siempre daría falso negativo.
-  const uploadConfirmed = await page.evaluate((filename) => {
-    // Buscar el nombre del archivo en el DOM (suele aparecer cerca del input)
+  //
+  // Bug real (2026-07-04, ver LESSONS.md): en un REDO ya existe un <audio
+  // src> con el archivo viejo ANTES de subir nada — un chequeo de "¿existe
+  // algún audio[src]?" da true al instante sin importar si la subida nueva
+  // funcionó o no. Ahora solo cuenta como confirmación real si el src
+  // CAMBIÓ respecto al que había antes (o si antes no había ninguno).
+  const uploadConfirmed = await page.evaluate(({ filename, previousAudioSrc }) => {
     const text = document.body.innerText || '';
-    return text.includes(filename) || document.querySelector('audio[src]') !== null;
-  }, path.basename(uploadPath)).catch(() => false);
+    if (text.includes(filename)) return true;
+    const audioEl = document.querySelector('audio[src]');
+    return !!audioEl && audioEl.src !== previousAudioSrc;
+  }, { filename: path.basename(uploadPath), previousAudioSrc }).catch(() => false);
 
   await page.screenshot({ path: 'flow-upload-verify.png', fullPage: true });
 
@@ -247,5 +285,5 @@ function parseArgs(argv) {
   await browser.close().catch(() => {});
 })().catch((err) => {
   console.error('upload-to-flow.js falló:', err.message);
-  process.exit(1);
+  exitAfterDelay(1);
 });
