@@ -72,6 +72,27 @@ async function fillReactField(page, locator, value, label) {
 // placeholder/name/id que contengan "note" (en inglés o español), entre los
 // inputs/textareas visibles que no sean #title ni #lyrics.
 async function findNotesField(page) {
+  // Regla de LESSONS.md: cada sección dinámica necesita su PROPIA espera —
+  // que #title/#lyrics ya existan no garantiza que el campo de notas (que
+  // puede montarse async) esté en el DOM. Sin esto, el querySelectorAll
+  // inmediato de abajo devolvía null y las notas quedaban sin escribir con
+  // solo un warning. Timeout tolerado: si de verdad no existe, el flujo
+  // sigue cayendo al mismo camino de "llenar a mano" de siempre.
+  await page.waitForFunction(() => {
+    return Array.from(document.querySelectorAll('input, textarea')).some((el) => {
+      if (el.id === 'title' || el.id === 'lyrics') return false;
+      if (!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)) return false;
+      let label = el.closest('label')?.innerText || null;
+      if (!label && el.id) {
+        const lbl = document.querySelector(`label[for="${el.id}"]`);
+        label = lbl ? lbl.innerText : null;
+      }
+      const haystack = [label, el.getAttribute('aria-label'), el.placeholder, el.name, el.id]
+        .filter(Boolean).join(' ').toLowerCase();
+      return /not[ae]/.test(haystack);
+    });
+  }, { timeout: 15000 }).catch(() => {});
+
   const candidates = await page.evaluate(() => {
     const out = [];
     document.querySelectorAll('input, textarea').forEach((el, idx) => {
