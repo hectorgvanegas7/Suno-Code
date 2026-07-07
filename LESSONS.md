@@ -1,5 +1,69 @@
 # Lessons / gotchas
 
+## Auditoría 2026-07-07: npm test pegaba a Drive real, doble-Create latente, saveAs() nunca se usó, state.json no atómico
+
+Auditoría completa de solo-lectura (Claude, 3 barridos paralelos) + tanda de
+fixes de bajo riesgo. Los hallazgos que importan aunque no se toquen todavía:
+
+1. **`npm test` NO era offline.** El script era `node --test` sin path, y el
+   runner de Node matchea `*-test.js` en cualquier carpeta — `upload-test.js`
+   (experimento suelto en la raíz) entró a la suite e hizo una subida REAL a
+   Drive + galería ("Fila 177", 2026-07-07) durante una corrida de tests.
+   **Fix:** `"test": "node --test test/"`. **Regla:** ningún script con
+   side-effects de red puede llamarse `*-test.js`/`*.test.js` fuera de
+   `test/`; los experimentos van a `experiments/`.
+
+2. **Ventana de doble-Create (créditos duplicados), SIN fix todavía.**
+   `waitForCreateStarted` espera cards nuevas solo 20 s
+   (`CREATE_CARDS_TIMEOUT_MS`). Si Suno tarda más en insertar la primera
+   card, el código reintenta con `jsClickCreate` — si el primer click SÍ
+   había registrado, son 2 generaciones pagadas (el código solo advierte
+   "algo clickeó de más"). No existe una etapa `CREATE_CLICKED` en state.json
+   que bloquee un re-click. Pendiente de diseño (toca lógica central).
+
+3. **La descarga NO usa `download.saveAs()`, aunque los comentarios del
+   propio archivo, CLAUDE.md y la lección de la migración 2026-07-04 dicen
+   que sí.** El objeto `Download` solo se usa para `.failure()`; el archivo
+   real se localiza escaneando el directorio por título+mtime
+   (`findDownloadedFile`) + `renameSync`. Funciona porque el loop de
+   descargas es SECUENCIAL (cada descarga se reclama/renombra antes de la
+   siguiente) — contrato ahora documentado en
+   `test/find-downloaded-file.test.js`. Reconciliar código vs. docs queda
+   pendiente (lógica central). **Regla:** cuando una migración se documente
+   como completa, verificar que el código viejo se haya ido de verdad.
+
+4. **`state.json` se escribía sin atomicidad** (`writeFileSync` directo). Un
+   crash a mitad de write deja JSON truncado, `read()` devuelve `null` en
+   silencio, y con eso se apagan la salvaguarda anti-Create-duplicado y la
+   auto-detección del Submit. **Fix:** `atomicWriteJson` (tmp + rename) en
+   `lib/pipeline-state.js`, cubierto en `test/atomic-state-write.test.js`.
+
+5. **La salida de los scripts Python se emparejaba por índice a ciegas.**
+   `transcribeFiles`/CLAP/NISQA parsean la última línea de stdout y asumen
+   que `results[i]` corresponde a `paths[i]` — un reorden u omisión cruzaba
+   los resultados de A y B en silencio (la recomendación de `pickBestVersion`
+   saldría de la versión equivocada). **Fix:** `batchFileMismatch` compara
+   `result.file` contra el path esperado y falla ruidoso por-resultado.
+   Cubierto en `test/python-batch-order.test.js`.
+
+6. Fixes menores de la misma tanda: fd del log de verify-audio sin cerrar
+   (fuga por corrida en `--loop`); el iframe de monitoreo quedaba VISIBLE
+   tapando la pestaña de trabajo si el screenshot de la card lanzaba
+   (restauración movida a un `finally`); `suno-fill.js`/`suno-create.js`
+   salían con `process.exit(1)` en el mismo tick (crash de libuv en Windows —
+   mismo patrón ya arreglado en upload-to-flow.js); `suno-create.js` y los
+   fallbacks de reintento de Create clickeaban sin dismiss fresco de
+   overlays (la regla es "antes de CADA click", no solo el primero); el
+   campo de notas del Flow no tenía `waitForSelector` propio (regla de
+   secciones dinámicas); el loop infinito de detección del Submit ahora
+   avisa por ntfy si acumula ~3 min de fallos ESTRUCTURALES consecutivos
+   (los "título aún no coincide" de la espera normal no cuentan) — sigue
+   sin deadline, por diseño.
+
+7. **NISQA no corre en producción** desde que se integró: falta
+   `pip install torchmetrics` (visible en el `error` de cada
+   verify-report.json). Instalarlo está pendiente de OK.
+
 ## STYLE_TEXTAREA roto: Suno rotó el placeholder de ejemplo, ya no contiene "style" (2026-07-04)
 
 Primer uso real del flujo "Antigravity ejecuta reconocimiento acotado,
