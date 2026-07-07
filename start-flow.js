@@ -1475,6 +1475,17 @@ async function runFlow({ resume = false } = {}) {
     }, 1000);
     if (typeof ticker.unref === 'function') ticker.unref();
 
+    // Contador de fallos ESTRUCTURALES consecutivos de readRecentCompletion.
+    // "Título aún no coincide" es la espera normal (la primera card sigue
+    // siendo la canción anterior hasta que Hector hace Submit) y NO cuenta.
+    // Pero si el DOM dejó de matchear (Suno/Flow rediseñó las clases Tailwind
+    // de "Recent completions"), el loop giraría para siempre en silencio —
+    // esto avisa por ntfy sin agregar deadline (el loop sigue infinito por
+    // diseño, pedido de Gabo 2026-07-03).
+    let consecutiveStructuralErrors = 0;
+    let notifiedStructuralErrors = false;
+    const STRUCTURAL_ERROR_ALERT_THRESHOLD = 36; // ~3 min a un poll cada 5s
+
     while (true) {
       const elapsedMs = Date.now() - startedTime;
       const elapsedMin = elapsedMs / 60000;
@@ -1545,6 +1556,7 @@ async function runFlow({ resume = false } = {}) {
 
       try {
         completion = await readRecentCompletion(currentTitulo, { page: pollTarget });
+        consecutiveStructuralErrors = 0;
         if (completion) break;
       } catch (e) {
         // Título aún no coincide / formulario aún sin enviar — seguir esperando.
@@ -1552,6 +1564,20 @@ async function runFlow({ resume = false } = {}) {
         if (!(await isPortUp(DEBUG_PORT))) {
           console.log('\n⚠️ Chrome se cerró — la auto-detección no puede continuar.');
           break;
+        }
+        if (/no coincide con state\.json/.test(e.message || '')) {
+          consecutiveStructuralErrors = 0; // espera normal pre-Submit
+        } else {
+          consecutiveStructuralErrors++;
+          if (consecutiveStructuralErrors >= STRUCTURAL_ERROR_ALERT_THRESHOLD && !notifiedStructuralErrors) {
+            notifiedStructuralErrors = true;
+            console.log(`\n⚠️ readRecentCompletion lleva ${consecutiveStructuralErrors} fallos estructurales seguidos: ${e.message}`);
+            console.log('   Posible rediseño de la UI de "Recent completions" — la auto-detección puede no funcionar. Fallback: node start-flow.js --done');
+            await notify(
+              `⚠️ La auto-detección del Submit lleva ~3 min fallando con el mismo error estructural: ${e.message}\nSi hiciste Submit y no se registró solo, corré: node start-flow.js --done`,
+              { title: 'Auto-detección del Submit con problemas', priority: 'high', tags: 'warning' }
+            ).catch(() => {});
+          }
         }
       }
       await new Promise((r) => setTimeout(r, pollIntervalMs));
