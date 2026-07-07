@@ -659,16 +659,23 @@ async function readRecentCompletion(expectedTitulo, { page: providedPage = null 
             })
           : null;
 
-        const imgBuffer = await (clipBox ? rootPage.screenshot({ clip: clipBox }) : cardLocator.screenshot({ animations: 'disabled' }));
-
-        if (frameMode) {
-          await rootPage.evaluate((orig) => {
-            const el = document.getElementById('poll-iframe-hidden');
-            if (el) {
-              el.style.opacity = (orig && orig.opacity) || '0.01';
-              el.style.zIndex = (orig && orig.zIndex) || '-9999';
-            }
-          }, origIframeStyle);
+        // La restauración va en un finally: si el screenshot lanza, el catch de
+        // afuera lo trata como "no crítico" y sigue — pero sin esto el iframe
+        // quedaba visible (opacity 1, z-index 999999) tapando la pestaña de
+        // trabajo de Hector hasta el siguiente poll.
+        let imgBuffer;
+        try {
+          imgBuffer = await (clipBox ? rootPage.screenshot({ clip: clipBox }) : cardLocator.screenshot({ animations: 'disabled' }));
+        } finally {
+          if (frameMode) {
+            await rootPage.evaluate((orig) => {
+              const el = document.getElementById('poll-iframe-hidden');
+              if (el) {
+                el.style.opacity = (orig && orig.opacity) || '0.01';
+                el.style.zIndex = (orig && orig.zIndex) || '-9999';
+              }
+            }, origIframeStyle).catch(() => {});
+          }
         }
 
 
