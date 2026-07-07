@@ -29,7 +29,7 @@ const fs = require('fs');
 const path = require('path');
 const { findSunoMp3s, SUNO_DIR } = require('./lib/audio-match');
 const { extractFirstNames } = require('./lib/text-helpers');
-const { analyzeAudio, prepareVocals, cleanupVocalsTmp, transcribeFiles, runClapScoreWithVocalIsolation, stripStructuralTags, printReport, pickBestVersion, parseLyricsFromSongFile, parseTituloFromSongFile, getDurationAsync, formatDuration, formatElapsed, SONG_PATH } = require('./lib/audio-analysis');
+const { analyzeAudio, prepareVocals, cleanupVocalsTmp, transcribeFiles, runClapScoreWithVocalIsolation, runNisqaScore, resolveVocalOrMixPaths, stripStructuralTags, printReport, pickBestVersion, parseLyricsFromSongFile, parseTituloFromSongFile, getDurationAsync, formatDuration, formatElapsed, SONG_PATH } = require('./lib/audio-analysis');
 const { notify } = require('./lib/ntfy');
 
 function parseArgs(argv) {
@@ -122,6 +122,7 @@ function parseArgs(argv) {
     const prepB = await prepareVocals(versionB.path, useDemucs);
     let batch;
     let clapBatch;
+    let nisqaBatch;
     try {
       const cleanLyrics = stripStructuralTags(lyricsText);
       batch = transcribeFiles([prepA.targetPath, prepB.targetPath], {
@@ -141,6 +142,17 @@ function parseArgs(argv) {
         [prepA.demucs.used ? prepA.targetPath : null, prepB.demucs.used ? prepB.targetPath : null],
         { device: useDemucs ? 'cuda' : null },
       );
+
+      // NISQA: MOS de naturalidad de voz sobre la voz aislada si demucs corrió,
+      // si no sobre el mix — misma decisión que ya usa CLAP internamente
+      // (resolveVocalOrMixPaths), reusada acá para no duplicar el criterio.
+      // También tiene que correr ANTES del finally por el mismo motivo que CLAP.
+      console.log('🗣️  Evaluando naturalidad de voz con NISQA...');
+      const nisqaPaths = resolveVocalOrMixPaths(
+        [versionA.path, versionB.path],
+        [prepA.demucs.used ? prepA.targetPath : null, prepB.demucs.used ? prepB.targetPath : null],
+      );
+      nisqaBatch = runNisqaScore(nisqaPaths, { device: useDemucs ? 'cuda' : null });
     } finally {
       cleanupVocalsTmp(prepA);
       cleanupVocalsTmp(prepB);
@@ -156,6 +168,7 @@ function parseArgs(argv) {
       prepared: prepA,
       transcriptionOutcome: batch.results[0],
       clapOutcome: clapBatch.results[0],
+      nisqaOutcome: nisqaBatch.results[0],
     });
     reportB = await analyzeAudio(versionB.path, {
       label: 'Versión B',
@@ -167,6 +180,7 @@ function parseArgs(argv) {
       prepared: prepB,
       transcriptionOutcome: batch.results[1],
       clapOutcome: clapBatch.results[1],
+      nisqaOutcome: nisqaBatch.results[1],
     });
   } else {
     console.log('⏳ Analizando Versión A... (puede tardar 1-3 minutos si Whisper necesita transcribir)');
@@ -202,7 +216,10 @@ function parseArgs(argv) {
         tagLeaking: reportA.tagLeaking,
         missingNames: reportA.missingNames,
         nameAudioChecks: reportA.nameAudioChecks,
+        namePacingIssues: reportA.namePacingIssues,
+        pacingIssuesCount: reportA.pacingIssues.length,
         clap: reportA.clap,
+        nisqa: reportA.nisqa,
         summary: reportA.summary,
       },
       reportB: reportB ? {
@@ -217,7 +234,10 @@ function parseArgs(argv) {
         tagLeaking: reportB.tagLeaking,
         missingNames: reportB.missingNames,
         nameAudioChecks: reportB.nameAudioChecks,
+        namePacingIssues: reportB.namePacingIssues,
+        pacingIssuesCount: reportB.pacingIssues.length,
         clap: reportB.clap,
+        nisqa: reportB.nisqa,
         summary: reportB.summary,
       } : null,
       timestamp: new Date().toISOString(),
@@ -225,6 +245,25 @@ function parseArgs(argv) {
     console.log(`📄 Reporte guardado en ${REPORT_PATH}`);
   } catch (e) {
     console.warn(`⚠️ No se pudo guardar verify-report.json: ${e.message}`);
+  }
+
+  // Log de calibración para el umbral de "palabras pegadas sin pausa"
+  // (NAME_GAP_MERGE_THRESHOLD_S / GENERAL_GAP_MERGE_THRESHOLD_S en
+  // lib/audio-analysis.js). SOLO logging — no es entrenamiento de un modelo,
+  // es un registro para que Hector pueda ajustar el umbral a mano más
+  // adelante con casos reales confirmados, mismo criterio que ya se usó para
+  // calibrar CLAP/NISQA.
+  try {
+    const PACING_LOG_PATH = path.join(__dirname, 'logs', 'pacing-feedback.jsonl');
+    const logLine = JSON.stringify({
+      timestamp: new Date().toISOString(),
+      titulo,
+      versionA: { namePacingIssues: reportA.namePacingIssues, pacingIssuesCount: reportA.pacingIssues.length },
+      versionB: reportB ? { namePacingIssues: reportB.namePacingIssues, pacingIssuesCount: reportB.pacingIssues.length } : null,
+    });
+    fs.appendFileSync(PACING_LOG_PATH, logLine + '\n', 'utf-8');
+  } catch (e) {
+    console.warn(`⚠️ No se pudo escribir logs/pacing-feedback.jsonl: ${e.message}`);
   }
 
   console.log(`\n📊 RECOMENDACIÓN: Versión ${recommendation.recommended}`);
@@ -254,8 +293,10 @@ function parseArgs(argv) {
     if (report.missingNames && report.missingNames.length > 0) parts.push(`nombres ausentes: ${report.missingNames.join(',')}`);
     const unconfirmed = (report.nameAudioChecks || []).filter((c) => c.confirmed === false);
     if (unconfirmed.length > 0) parts.push(`pronunciación a revisar: ${unconfirmed.map((c) => c.name).join(',')}`);
+    if (report.namePacingIssues && report.namePacingIssues.length > 0) parts.push(`nombre pegado: ${report.namePacingIssues.map((c) => c.name).join(',')}`);
     if (report.demucs.used && report.demucs.vocalPresence === true) parts.push('sin voz');
     if (report.clap && report.clap.score !== null) parts.push(`CLAP:${report.clap.score}`);
+    if (report.nisqa && report.nisqa.score !== null) parts.push(`NISQA:${report.nisqa.score}`);
     return parts.length ? ` (${parts.join(', ')})` : '';
   }
 

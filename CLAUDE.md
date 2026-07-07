@@ -51,8 +51,14 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
    **start-flow.js espera a que termine** (ya no es fire-and-forget en background)
    para poder leer su resultado. Analiza duración, Whisper, Levenshtein contra la
    letra, nombres de destinatarios ausentes, calidad perceptual con CLAP (claridad
-   vocal, producción, emoción, artefactos, final) y (con `--demucs`, el default)
-   separa voz y chequea instrumental accidental. Escribe `verify-report.json` con
+   vocal, producción, emoción, artefactos, final), MOS de naturalidad de voz con
+   NISQA (ruido, discontinuidad, coloración, volumen — señal complementaria a
+   CLAP, más precisa para detectar voz robótica/con artefactos), nombres/palabras
+   pegados sin pausa (`checkNamePacing`/`detectMergedWordPairs` en
+   `lib/audio-analysis.js` — usa los word timestamps que Whisper ya devuelve, sin
+   dependencia nueva; detecta el caso real reportado de "Clara tú" sonando como
+   "Claratu" corrido) y (con `--demucs`,
+   el default) separa voz y chequea instrumental accidental. Escribe `verify-report.json` con
    un puntaje por versión (`pickBestVersion` en `lib/audio-analysis.js`) y una
    recomendación — INFORMA, nunca decide solo. `--no-auto-verify` saltea este paso;
    `--fast-verify` fuerza el modo rápido (Whisper small/CPU) en vez de `--demucs`.
@@ -174,6 +180,22 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
 - `lib/cache-helpers.js` — caché local en `.cache/<hash-de-encuesta>.json` de
   respuestas del LLM que pasaron QA. Se salta por completo en `--dry-run` (nunca lee
   ni escribe) para que un test con mock no contamine la caché de una encuesta real.
+- `lib/name-dictionary.json` — diccionario `{nombre en minúscula: respelling fonético}`
+  para forzar la ortografía exacta de nombres difíciles ante Suno (ej. "maryuri":
+  "Mariúri", "geovanny": "Yeováni"). `run.js` busca ahí cada nombre extraído con
+  `extractFirstNames` ANTES de llamar al LLM; si hay coincidencia, inyecta una regla
+  estricta en el mensaje (`🚨 REGLA ESTRICTA DE PRONUNCIACIÓN`) en vez de dejar que
+  el modelo improvise el respelling. Costo cero cuando no hay match (no se toca el
+  prompt). Cualquier entrada nueva que cambie la tilde de lugar hay que
+  verificarla contra las reglas de acentuación española (sílaba tónica real del
+  nombre) antes de agregarla — un par de entradas iniciales tenían la tilde en la
+  sílaba equivocada (2026-07-05: "Yeóvani"→"Yeováni", "Aántoni"→"Aantóni",
+  "Aalbert"→"Áalbert", "Máriuri"→"Mariúri") y solo se detectó en revisión manual,
+  no con un test — no hay verificación automática de que un respelling "suene bien",
+  eso sigue dependiendo de confirmarlo de oído contra Suno real. Este archivo,
+  igual que el resto del SYSTEM_PROMPT, cae bajo la regla de mantenimiento de
+  `lib/song-validate.js` — ver el test de `foneticaAplicada` + respelling con
+  cambio de primera letra en `test/song-validate.test.js`.
 - `lib/text-helpers.js` — `extractFirstNames(surveyText)`: extracción de nombres del
   destinatario filtrando palabras de relleno (mis/hijos/y/...). Único lugar donde
   vive esta lógica — la usan `run.js` y `verify-audio.js`, nunca duplicarla de nuevo
@@ -328,9 +350,11 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
   ver LESSONS.md).
 - `lib/audio-analysis.js` — ffprobe (duración) + Whisper (transcripción) + comparación
   letra + CLAP (calidad perceptual: claridad vocal, producción, emoción, artefactos,
-  final — ±15 pts informativo, no decide solo) + `pickBestVersion(reportA, reportB)`:
+  final — ±15 pts informativo, no decide solo) + NISQA (MOS de naturalidad de voz:
+  ruido, discontinuidad, coloración, volumen — ±10 pts, más conservador que CLAP
+  hasta validarlo en vivo, no decide solo) + `pickBestVersion(reportA, reportB)`:
   puntúa cada versión (duración, corte abrupto, clipping, fidelidad de letra, nombres
-  ausentes, instrumental accidental, CLAP) y recomienda una — siempre orientativo,
+  ausentes, instrumental accidental, CLAP, NISQA) y recomienda una — siempre orientativo,
   nunca decide solo.
   `verifyNamePronunciation`: segunda opinión sobre la pronunciación del nombre del
   destinatario. La transcripción principal corre con `initial_prompt`=letra completa
@@ -342,6 +366,21 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
   y deja el clip de ~1-2s en `<carpeta del mp3>/name-check/` para confirmar de oído
   en segundos en vez de la canción entera. Pesa ±15 pts en `pickBestVersion`, igual
   filosofía que CLAP (señal nueva, no decide sola).
+  `checkNamePacing`/`detectMergedWordPairs`: detectan palabras pegadas sin pausa
+  (ej. "Clara tú" cantado como "Claratu" corrido — bug real reportado por Gabo
+  2026-07-04) midiendo el hueco entre los word timestamps que Whisper ya
+  devuelve (sin dependencia nueva). `checkNamePacing` corre por cada nombre de
+  destinatario confirmado presente y deja un clip en `name-check/` (mismo
+  mecanismo que `verifyNamePronunciation`); pesa ±15 pts en `pickBestVersion`
+  (señal determinística, mismo peso que `nameAudioChecks`).
+  `detectMergedWordPairs` escanea toda la letra en busca del mismo problema
+  fuera de los nombres — puramente informativo (`report.pacingIssues`, 0 pts)
+  hasta confirmar con casos reales que el umbral no genera ruido. Los
+  umbrales (`NAME_GAP_MERGE_THRESHOLD_S`/`GENERAL_GAP_MERGE_THRESHOLD_S`) son
+  un primer valor sin calibrar contra oído humano — `verify-audio.js` appendea
+  cada caso detectado a `logs/pacing-feedback.jsonl` para ajustarlos más
+  adelante con casos reales (esto es un log para calibración manual, NO un
+  sistema de entrenamiento de un modelo).
 - `lib/transcribe.py` — script Python que usa faster-whisper para transcribir.
 - `lib/clap_score.py` — script Python que evalúa calidad de audio con CLAP (modelo
   laion/clap-htsat-unfused). Recibe 1+ MP3, devuelve JSON con score 0-100 global y
@@ -349,6 +388,18 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
   transcribe.py (batching, CUDA fallback, JSON a stdout). Requiere:
   `pip install transformers librosa` (torch ya está para Whisper). Degrada con
   gracia si no está instalado.
+- `lib/nisqa_score.py` — script Python que evalúa MOS de naturalidad de voz con
+  NISQA v2.0 vía `torchmetrics.audio.NonIntrusiveSpeechQualityAssessment` (pesos
+  pre-entrenados, se descargan solos la primera vez). Recibe 1+ audios (idealmente
+  la voz ya aislada por demucs — ver `resolveVocalOrMixPaths` en
+  `lib/audio-analysis.js`, compartida con CLAP para no duplicar el criterio de
+  "qué archivo representa la voz de esta versión"), devuelve JSON con
+  `nisqa_score` 0-100 (MOS normalizado) + 4 dimensiones (ruido, discontinuidad,
+  coloración, volumen). Mismo patrón que clap_score.py (batching, CUDA fallback,
+  JSON a stdout, fail-fast de dependencias). Requiere: `pip install torchmetrics`
+  (torch/librosa ya están). Degrada con gracia si no está instalado. Señal
+  complementaria a CLAP: entrenado específicamente para MOS de voz, más preciso
+  que la similitud texto-audio de CLAP para detectar voz robótica/con artefactos.
 - `lib/ntfy.js` — notificaciones push vía ntfy.sh. Tópico privado con sufijo aleatorio
   (ntfy.sh no tiene auth — un nombre adivinable deja leer/mandar notificaciones a
   cualquiera). Si el tópico cambia otra vez, avisar: hay que re-suscribirse en la app.

@@ -100,6 +100,7 @@
 // el resto del flujo. bringToFront() solo se llama al abrir la pestaña por
 // primera vez o al encontrar canción nueva, para no robar foco en cada poll.
 
+require('dotenv').config();
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -113,6 +114,7 @@ const { LYRICS_TEXTAREA } = require('./lib/suno-selectors');
 const { rotateOldRunFiles } = require('./lib/hygiene');
 const { parseSessionTime } = require('./lib/session-time');
 const { normalize } = require('./lib/audio-match');
+const { postImageToGallery, flushPendingGalleryUploads } = require('./lib/gallery-upload');
 
 const DEBUG_PORT = 9333;   // Chrome de Suno (ya corriendo para suno-fill y flow-submit)
 
@@ -369,12 +371,17 @@ async function openFlowTabAndEnsureAssignment() {
     if (contexts.length === 0) throw new Error("No hay contextos de navegador disponibles");
     const context = contexts[0];
     let page = context.pages().find((p) => p.url().includes('cancioneterna.com'));
-    const needNavigate = !page;
+    const openedNew = !page;
     if (!page) page = await context.newPage();
     await page.bringToFront();
 
-    const result = await enterFlowAndEnsureAssignment(page, clickByText, { navigate: needNavigate });
-    console.log(`  Flow listo (${result.assigned}).`);
+    try {
+      const result = await enterFlowAndEnsureAssignment(page, clickByText, { navigate: openedNew });
+      console.log(`  Flow listo (${result.assigned}).`);
+    } catch (e) {
+      if (openedNew) await page.close().catch(() => {});
+      throw e;
+    }
   });
 }
 
@@ -402,7 +409,7 @@ async function pollOnce(log) {
     if (contexts.length === 0) return { found: false };
     const ctx = contexts[0];
     let page = ctx.pages().find((p) => p.url().includes('cancioneterna.com'));
-    const needNavigate = !page;
+    const openedNew = !page;
     if (!page) {
       page = await ctx.newPage();
     } else {
@@ -415,18 +422,22 @@ async function pollOnce(log) {
       // estado fresco en cada intento, sin cambiar el resto del flujo.
       await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
     }
-    if (needNavigate) {
+    if (openedNew) {
       await page.bringToFront();
     }
 
     if (page.url().includes('/sign-in')) {
       log('⚠️ El Flow pide login. Iniciá sesión en la ventana del poller y va a seguir solo.');
+      if (openedNew) await page.close().catch(() => {});
       return { found: false };
     }
 
     try {
-      const result = await enterFlowAndEnsureAssignment(page, clickByText, { navigate: needNavigate });
-      if (result.entered !== true) return { found: false };
+      const result = await enterFlowAndEnsureAssignment(page, clickByText, { navigate: openedNew });
+      if (result.entered !== true) {
+        if (openedNew) await page.close().catch(() => {});
+        return { found: false };
+      }
       let title = null;
       try { title = (await page.locator('#title').inputValue()).trim() || null; } catch {}
       await page.close().catch(() => {});
@@ -434,6 +445,9 @@ async function pollOnce(log) {
     } catch {
       // enterFlowAndEnsureAssignment tira si no hay #lyrics NI botón Assign utilizable.
       // En sequía lo normal es que Assign no traiga nada: cola vacía, no error fatal.
+      if (openedNew && !page.url().includes('cancioneterna.com')) {
+        await page.close().catch(() => {});
+      }
       return { found: false };
     }
   } catch (err) {
@@ -491,177 +505,204 @@ async function readRecentCompletion(expectedTitulo, { page: providedPage = null 
     if (!page) page = await context.newPage();
     const rootPage = frameMode ? page.page() : page;
 
-    // Navegar / refrescar a /create (la vista que muestra "Recent completions")
-    if (!page.url().includes('/artists/flow/create')) {
-      await page.goto(FLOW_CREATE_URL, { waitUntil: 'domcontentloaded' });
-    } else if (!frameMode) {
-      await page.reload({ waitUntil: 'domcontentloaded' });
-    } else {
-      // Frame no tiene reload(). Disparar location.reload() desde adentro del
-      // propio frame casi siempre tira "Execution context was destroyed" en
-      // Playwright/CDP porque Chromium destruye el realm de JS ANTES de que
-      // la respuesta del evaluate() vuelva — no es un error real, la
-      // navegación sí ocurre igual. Se traga acá (no en el call site) porque
-      // pasa en la inmensa mayoría de los polls, no es una excepción rara.
-      await page.evaluate(() => window.location.reload()).catch(() => {});
-      await page.waitForLoadState('domcontentloaded').catch(() => {});
-    }
-    await page.waitForSelector('h3:has-text("Recent completions")', { timeout: 15000 });
-    // Optimización de ejecución AGY: Asegura que React renderizó las cards de completados antes de evaluate
-    await page.waitForSelector('.rounded-xl.border.border-slate-100', { timeout: 10000 });
-    await page.waitForTimeout(500);
+    try {
+      // Navegar / refrescar a /create (la vista que muestra "Recent completions")
+      if (!page.url().includes('/artists/flow/create')) {
+        await page.goto(FLOW_CREATE_URL, { waitUntil: 'domcontentloaded' });
+      } else if (!frameMode) {
+        await page.reload({ waitUntil: 'domcontentloaded' });
+      } else {
+        // Frame no tiene reload(). Disparar location.reload() desde adentro del
+        // propio frame casi siempre tira "Execution context was destroyed" en
+        // Playwright/CDP porque Chromium destruye el realm de JS ANTES de que
+        // la respuesta del evaluate() vuelva — no es un error real, la
+        // navegación sí ocurre igual. Se traga acá (no en el call site) porque
+        // pasa en la inmensa mayoría de los polls, no es una excepción rara.
+        await page.evaluate(() => window.location.reload()).catch(() => {});
+        await page.waitForLoadState('domcontentloaded').catch(() => {});
+      }
+      await page.waitForSelector('h3:has-text("Recent completions")', { timeout: 15000 });
+      // Optimización de ejecución AGY: Asegura que React renderizó las cards de completados antes de evaluate
+      await page.waitForSelector('.rounded-xl:has(.font-medium.text-slate-900)', { timeout: 10000 });
+      await page.waitForTimeout(500);
 
-    // Extraer título, texto de sesión e índice global de la primera card
-    const cardData = await page.evaluate(() => {
-      const heading = Array.from(document.querySelectorAll('h3')).find(
-        (el) => /recent completions/i.test(el.textContent)
-      );
-      if (!heading) return { error: 'heading h3 not found' };
+      // Extraer título, texto de sesión e índice global de la primera card
+      const cardData = await page.evaluate(() => {
+        const heading = Array.from(document.querySelectorAll('h3')).find(
+          (el) => /recent completions/i.test(el.textContent)
+        );
+        if (!heading) return { error: 'heading h3 not found' };
 
-      // Subir hasta encontrar el panel que contiene las cards
-      let panel = heading.parentElement;
-      for (let i = 0; i < 6; i++) {
-        if (!panel) return { error: 'panel not found' };
-        if (panel.querySelectorAll('.rounded-xl').length >= 2) break;
-        panel = panel.parentElement;
+        // Subir hasta encontrar el panel que contiene las cards
+        let panel = heading.parentElement;
+        for (let i = 0; i < 6; i++) {
+          if (!panel) return { error: 'panel not found' };
+          if (panel.querySelectorAll('.rounded-xl').length >= 2) break;
+          panel = panel.parentElement;
+        }
+
+        // Buscar la primera card ignorando si está activa o no (Suno le quita border-slate-100 si está sonando)
+        const firstCard = Array.from(panel.querySelectorAll('.rounded-xl')).find(el => el.querySelector('.font-medium.text-slate-900'));
+        if (!firstCard) return { error: 'first card not found inside panel' };
+
+        const titleEl = firstCard.querySelector('.font-medium.text-slate-900');
+        const metaDiv = firstCard.querySelector('.text-xs.text-slate-500');
+        const spans = metaDiv ? Array.from(metaDiv.querySelectorAll('span')) : [];
+        // Acepta "Xh Ymin", "Y min" y también horas exactas sin minutos
+        // ("1h session", "2 hours session") — sin la tercera alternativa,
+        // una sesión de exactamente N horas nunca matchea acá (queda
+        // sessionText null) y parseSessionTime()'s hourOnly branch (pensado
+        // justo para ese caso) nunca llega a ejecutarse.
+        const sessionSpan = spans.find((s) => /\d+\s*(h\s*\d*\s*min|min|h(?:r|our)?s?\b)/i.test(s.textContent));
+
+        // Índice global para usarlo como nth() en Playwright (ignorando colores de borde)
+        const allCards = Array.from(document.querySelectorAll('.rounded-xl')).filter(el => el.querySelector('.font-medium.text-slate-900'));
+        const cardIndex = allCards.indexOf(firstCard);
+
+        return {
+          title: titleEl?.textContent.trim() ?? null,
+          sessionText: sessionSpan?.textContent.trim() ?? null,
+          cardIndex,
+        };
+      });
+
+      if (cardData.error) throw new Error(`DOM: ${cardData.error}`);
+      if (!cardData.title) throw new Error('No se encontró el título en la primera card');
+      if (!cardData.sessionText) throw new Error('No se encontró texto de sesión en la primera card');
+
+      // Verificar que el título coincide con el state.json actual. Usa la
+      // `normalize` centralizada de lib/audio-match.js (importada arriba) en
+      // vez de una copia local — esa SÍ limpia signos de puntuación
+      // (`.replace(/[^a-z0-9\s]/g, ' ')`), la copia local no. Bug real
+      // (2026-07-04, ver LESSONS.md): un título con puntuación (ej. "Mi lugar
+      // seguro." con punto final) que Suno renderizara sin ese punto en la
+      // card fallaba esta comparación por una simple diferencia de puntuación,
+      // no una canción distinta — abortaba el auto-registro en Sheets sin
+      // necesidad.
+      if (expectedTitulo) {
+        if (normalize(cardData.title) !== normalize(expectedTitulo)) {
+          throw new Error(
+            `Título de la card ("${cardData.title}") no coincide con state.json ("${expectedTitulo}"). ` +
+            '¿Se completó otra canción antes de registrar esta?'
+          );
+        }
+      } else {
+        console.log(`  ⚠️ state.json no tiene título — primera card sin verificar: "${cardData.title}"`);
       }
 
-      const firstCard = panel.querySelector('.rounded-xl.border.border-slate-100');
-      if (!firstCard) return { error: 'first card not found inside panel' };
+      // Parsear el tiempo de sesión
+      const parsed = parseSessionTime(cardData.sessionText);
+      if (!parsed) throw new Error(`No se pudo parsear tiempo: "${cardData.sessionText}"`);
 
-      const titleEl = firstCard.querySelector('.font-medium.text-slate-900');
-      const metaDiv = firstCard.querySelector('.text-xs.text-slate-500');
-      const spans = metaDiv ? Array.from(metaDiv.querySelectorAll('span')) : [];
-      // Acepta "Xh Ymin", "Y min" y también horas exactas sin minutos
-      // ("1h session", "2 hours session") — sin la tercera alternativa,
-      // una sesión de exactamente N horas nunca matchea acá (queda
-      // sessionText null) y parseSessionTime()'s hourOnly branch (pensado
-      // justo para ese caso) nunca llega a ejecutarse.
-      const sessionSpan = spans.find((s) => /\d+\s*(h\s*\d*\s*min|min|h(?:r|our)?s?\b)/i.test(s.textContent));
+      // Screenshot de la card (fallo no es crítico)
+      let screenshotPath = null;
+      try {
+        fs.mkdirSync(SCREENSHOTS_DIR, { recursive: true });
+        const cardLocator = page.locator('.rounded-xl').filter({ has: page.locator('.font-medium.text-slate-900') }).nth(cardData.cardIndex);
+        await cardLocator.scrollIntoViewIfNeeded();
+        await page.waitForTimeout(250);
+        await rootPage.mouse.move(0, 0);
+        await page.waitForTimeout(50);
+        
+        const cardHandle = await cardLocator.elementHandle();
 
-      // Índice global para usarlo como nth() en Playwright
-      const allCards = Array.from(document.querySelectorAll('.rounded-xl.border.border-slate-100'));
-      const cardIndex = allCards.indexOf(firstCard);
+        // Calcular la caja exacta (bounding box) que envuelve al título y a la info de sesión
+        // para tomar la foto estrictamente de ese pedazo, tal como lo pidió el usuario.
+        const clipBox = await cardHandle.evaluate((card) => {
+          const title = card.querySelector('.font-medium.text-slate-900');
+          const meta = card.querySelector('.text-xs.text-slate-500');
+          if (!title || !meta) return null;
+          
+          const tBox = title.getBoundingClientRect();
+          const mBox = meta.getBoundingClientRect();
+          
+          // Unir ambas cajas y darle un pequeño margen
+          const top = Math.min(tBox.top, mBox.top) - 12;
+          const left = Math.min(tBox.left, mBox.left) - 16;
+          const right = Math.max(tBox.right, mBox.right) + 16;
+          const bottom = Math.max(tBox.bottom, mBox.bottom) + 12;
+          
+          return {
+            x: left,
+            y: top,
+            width: right - left,
+            height: bottom - top
+          };
+        });
+
+        // El iframe oculto de monitoreo (poll-iframe-hidden) vive con opacity: 0.01
+        // Y z-index: -9999 para quedar invisible/inerte para Hector (ver pollOnce/
+        // enterFlowAndEnsureAssignment). Cualquier screenshot — sea
+        // rootPage.screenshot({clip}) o locator.screenshot() — captura los píxeles
+        // YA COMPUESTOS de la página. Verificado en vivo (probando contra la card
+        // real): con SOLO subir la opacidad la foto sigue saliendo en blanco,
+        // porque el z-index negativo lo deja renderizado detrás del fondo opaco
+        // de la página — hace falta subir AMBOS a la vez para que se vea. Los
+        // subimos justo durante el instante del screenshot y los restauramos
+        // enseguida — dura ~200ms dentro de un iframe con pointer-events:none,
+        // así que no genera flash perceptible ni roba foco.
+        const origIframeStyle = frameMode
+          ? await rootPage.evaluate(() => {
+              const el = document.getElementById('poll-iframe-hidden');
+              if (!el) return null;
+              const orig = { opacity: el.style.opacity, zIndex: el.style.zIndex };
+              el.style.opacity = '1';
+              el.style.zIndex = '999999';
+              return orig;
+            })
+          : null;
+
+        const imgBuffer = await (clipBox ? rootPage.screenshot({ clip: clipBox }) : cardLocator.screenshot({ animations: 'disabled' }));
+
+        if (frameMode) {
+          await rootPage.evaluate((orig) => {
+            const el = document.getElementById('poll-iframe-hidden');
+            if (el) {
+              el.style.opacity = (orig && orig.opacity) || '0.01';
+              el.style.zIndex = (orig && orig.zIndex) || '-9999';
+            }
+          }, origIframeStyle);
+        }
+
+
+        const slug = cardData.title
+          .toLowerCase()
+          .normalize('NFD').replace(/[̀-ͯ]/g, '')
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-+|-+$/g, '');
+        const d = new Date();
+        const datePrefix = [
+          d.getFullYear(),
+          String(d.getMonth() + 1).padStart(2, '0'),
+          String(d.getDate()).padStart(2, '0'),
+        ].join('-');
+        screenshotPath = path.join(SCREENSHOTS_DIR, `${datePrefix}_${slug}.png`);
+        fs.writeFileSync(screenshotPath, imgBuffer);
+
+        const w = clipBox ? Math.round(clipBox.width) : '?';
+        const h = clipBox ? Math.round(clipBox.height) : '?';
+        console.log(`  Screenshot: ${screenshotPath} (${w}×${h}px)`);
+      } catch (e) {
+        console.log(`  ⚠️ Screenshot fallido (no es crítico): ${e.message}`);
+      }
 
       return {
-        title: titleEl?.textContent.trim() ?? null,
-        sessionText: sessionSpan?.textContent.trim() ?? null,
-        cardIndex,
+        title: cardData.title,
+        sessionText: cardData.sessionText,
+        screenshotPath,
+        ...parsed,
       };
-    });
-
-    if (cardData.error) throw new Error(`DOM: ${cardData.error}`);
-    if (!cardData.title) throw new Error('No se encontró el título en la primera card');
-    if (!cardData.sessionText) throw new Error('No se encontró texto de sesión en la primera card');
-
-    // Verificar que el título coincide con el state.json actual. Usa la
-    // `normalize` centralizada de lib/audio-match.js (importada arriba) en
-    // vez de una copia local — esa SÍ limpia signos de puntuación
-    // (`.replace(/[^a-z0-9\s]/g, ' ')`), la copia local no. Bug real
-    // (2026-07-04, ver LESSONS.md): un título con puntuación (ej. "Mi lugar
-    // seguro." con punto final) que Suno renderizara sin ese punto en la
-    // card fallaba esta comparación por una simple diferencia de puntuación,
-    // no una canción distinta — abortaba el auto-registro en Sheets sin
-    // necesidad.
-    if (expectedTitulo) {
-      if (normalize(cardData.title) !== normalize(expectedTitulo)) {
-        throw new Error(
-          `Título de la card ("${cardData.title}") no coincide con state.json ("${expectedTitulo}"). ` +
-          '¿Se completó otra canción antes de registrar esta?'
-        );
+    } finally {
+      if (openedNew && !page.isClosed()) {
+        await page.close().catch(() => {});
       }
-    } else {
-      console.log(`  ⚠️ state.json no tiene título — primera card sin verificar: "${cardData.title}"`);
     }
-
-    // Parsear el tiempo de sesión
-    const parsed = parseSessionTime(cardData.sessionText);
-    if (!parsed) throw new Error(`No se pudo parsear tiempo: "${cardData.sessionText}"`);
-
-    // Screenshot de la card (fallo no es crítico)
-    let screenshotPath = null;
-    try {
-      fs.mkdirSync(SCREENSHOTS_DIR, { recursive: true });
-
-      const cardLocator = page.locator('.rounded-xl.border.border-slate-100').nth(cardData.cardIndex);
-      await cardLocator.scrollIntoViewIfNeeded();
-      await page.waitForTimeout(250);
-      // El mouse es una sola API global de la pestaña, no existe por-frame.
-      await rootPage.mouse.move(0, 0);
-      await page.waitForTimeout(50);
-
-      const cardHandle = await cardLocator.elementHandle();
-      const rect = await cardHandle.evaluate(el => {
-        const origStyle = el.getAttribute('style') || '';
-        el.style.position = 'fixed';
-        el.style.top = '0';
-        el.style.left = '0';
-        el.style.zIndex = '999999';
-        el.style.margin = '0';
-        return { width: el.offsetWidth, height: el.offsetHeight, origStyle };
-      });
-
-      await page.waitForTimeout(200);
-
-      // Si "page" es el Frame del iframe de monitoreo, position:fixed(0,0) la
-      // pinea al viewport INTERNO del frame, no al de la pestaña — hay que
-      // sumarle el offset del propio <iframe> en la página raíz para que el
-      // clip apunte al lugar correcto. page.screenshot() siempre se llama
-      // sobre rootPage porque Frame no tiene .screenshot().
-      let clipX = 0;
-      let clipY = 0;
-      if (frameMode) {
-        const frameElementHandle = await page.frameElement();
-        const iframeBox = await frameElementHandle.boundingBox();
-        if (!iframeBox) throw new Error('No se pudo ubicar el iframe de monitoreo en la página');
-        clipX = iframeBox.x;
-        clipY = iframeBox.y;
-      }
-
-      // Timeout corto (5s) por si la ventana está minimizada y Chrome suspende el render
-      const imgBuffer = await rootPage.screenshot({
-        animations: 'disabled',
-        timeout: 5000,
-        clip: { x: clipX, y: clipY, width: rect.width, height: rect.height }
-      });
-
-      await cardHandle.evaluate((el, orig) => el.setAttribute('style', orig), rect.origStyle);
-
-      const slug = cardData.title
-        .toLowerCase()
-        .normalize('NFD').replace(/[̀-ͯ]/g, '')
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-+|-+$/g, '');
-      const d = new Date();
-      const datePrefix = [
-        d.getFullYear(),
-        String(d.getMonth() + 1).padStart(2, '0'),
-        String(d.getDate()).padStart(2, '0'),
-      ].join('-');
-      screenshotPath = path.join(SCREENSHOTS_DIR, `${datePrefix}_${slug}.png`);
-      fs.writeFileSync(screenshotPath, imgBuffer);
-
-      const w = Math.round(rect.width);
-      const h = Math.round(rect.height);
-      console.log(`  Screenshot: ${screenshotPath} (${w}×${h}px)`);
-    } catch (e) {
-      console.log(`  ⚠️ Screenshot fallido (no es crítico): ${e.message}`);
-    }
-
-    if (openedNew) await page.close().catch(() => {});
-
-    return {
-      title: cardData.title,
-      sessionText: cardData.sessionText,
-      screenshotPath,
-      ...parsed,
-    };
   });
 }
 
 // ─── MODO --done: cierre del flujo ────────────────────────────────────────────
 async function runDone(passedCompletion = null) {
-  const { logSongToSheet } = require('./lib/sheets-core');
+  const { logSongToSheet, SPREADSHEET_ID } = require('./lib/sheets-core');
 
   console.log('=== Cierre (--done): registrando en la hoja ===\n');
 
@@ -709,21 +750,83 @@ async function runDone(passedCompletion = null) {
     console.log('\n✅ Canción registrada y marcada como completada.');
 
     // ── Pieza 8: screenshot → Drive (intento; fallback a aviso manual) ──────
-    if (screenshotPath) {
-      await tryDriveScreenshot(screenshotPath, result.row, result.tabName).catch(() => {});
+    // Anti-duplicado: si --done se corre dos veces para la MISMA canción (ej.
+    // reintento manual tras un corte), ya subimos un screenshot nuevo a Drive
+    // Y encolamos/enviamos la galería la primera vez — repetirlo generaría
+    // otro archivo en Drive y otra foto flotante superpuesta en la misma fila
+    // (bug real visto en pruebas: correr --done 2 veces dejó 2 fotos en la
+    // fila 173). Si ya se intentó para este songId, no se reintenta acá — un
+    // envío que quedó en cola se reintenta solo (flushPendingGalleryUploads
+    // al próximo arranque de start-flow.js), nunca a mano desde --done.
+    let screenshotAutoPasted = false;
+    const alreadyAttempted = current
+      && current.galleryAttempt
+      && current.galleryAttempt.songId === result.songId;
+
+    if (alreadyAttempted) {
+      console.log(
+        current.galleryAttempt.sent
+          ? '📸 Screenshot de esta canción ya se envió a la galería antes — no se reintenta.'
+          : '📸 Screenshot de esta canción ya se encoló antes — se reintentará solo (no acá, para no duplicar en Drive).'
+      );
+    } else if (screenshotPath) {
+      const fileId = await tryDriveScreenshot(screenshotPath, result.row, result.tabName).catch(() => null);
+
+      if (fileId) {
+        // ── Pieza 8b: pegar screenshot flotante usando Apps Script Web App ──────
+        try {
+          const success = await postImageToGallery({
+            tabName: result.tabName,
+            fileId,
+            fila: result.row,
+            secret: process.env.GALLERY_WEBAPP_SECRET,
+            url: process.env.GALLERY_WEBAPP_URL
+          });
+          if (success) {
+            screenshotAutoPasted = true;
+          }
+        } catch (e) {
+          console.log(`⚠️ postImageToGallery falló y propagó error (${e.message}).`);
+        }
+
+        state.write({ galleryAttempt: { songId: result.songId, sent: screenshotAutoPasted } });
+
+        // Si no se pudo pegar automáticamente por Web App (error de red y quedó encolada, o no hay URL)
+        if (!screenshotAutoPasted) {
+          const { copyImageToClipboard } = require('./lib/sheets-paste');
+          if (copyImageToClipboard(screenshotPath)) {
+            console.log(`📋 ¡FOTO COPIADA AL PORTAPAPELES como respaldo!`);
+            console.log(`   Solo ve a tu Excel, haz click donde la quieras poner y presiona Ctrl+V.\n`);
+          }
+        }
+      } else {
+        // Fallback a portapapeles si falló la subida a Drive
+        const { copyImageToClipboard } = require('./lib/sheets-paste');
+        if (copyImageToClipboard(screenshotPath)) {
+          console.log(`📋 ¡FOTO COPIADA AL PORTAPAPELES!`);
+          console.log(`   Solo ve a tu Excel, haz click donde la quieras poner y presiona Ctrl+V.\n`);
+        }
+      }
     }
 
-    const pending = ['Remarks', 'Flow Screenshot'];
-    if (!timeHHMM) pending.unshift('Total Time', 'Time');
+    const pending = [];
+    if (!timeHHMM) pending.push('Total Time', 'Time');
+    if (!result.remark) pending.push('Remarks');
+    if (!screenshotAutoPasted) pending.push('Flow Screenshot');
+
     if (screenshotPath) {
       console.log(`📸 Screenshot local: ${screenshotPath}`);
     }
     console.log(`⏱️  Te queda a mano en la hoja: ${pending.join(', ')}.`);
 
-    // ── Pieza 9: remark draft (solo muestra, no escribe) ────────────────────
-    const remarkDraft = buildRemarkDraft();
-    console.log('\n📝 Borrador de Remarks (no se escribe solo — copialo si querés usarlo):');
-    console.log(`   "${remarkDraft}"`);
+    if (result.remark) {
+      console.log(`📝 Remarks auto-completado: "${result.remark}"`);
+    } else {
+      // ── Pieza 9: remark draft (solo muestra, no escribe) ────────────────────
+      const remarkDraft = buildRemarkDraft();
+      console.log('\n📝 Borrador de Remarks (no se escribe solo — copialo si querés usarlo):');
+      console.log(`   "${remarkDraft}"`);
+    }
 
     // ── Higiene: rotar logs/ y screenshots/ de más de 30 días ───────────────
     // Solo al final de una corrida exitosa (acá, no en --dry-run). Best-effort:
@@ -799,8 +902,10 @@ async function tryDriveScreenshot(localPngPath, sheetRow, tabName) {
     });
 
     console.log(`  ✅ Screenshot subido a tu Drive (Screenshots Flow). Puedes insertarlo manualmente sobre las celdas en tu hoja.`);
+    return fileId;
   } catch (e) {
     console.log(`  ⚠️ Upload fallido (${e.message.substring(0, 80)}). Pega el screenshot manualmente en col H.`);
+    return null;
   }
 }
 
@@ -1639,6 +1744,11 @@ async function runPoll(rawArgs) {
 
 // ─── Entrada ──────────────────────────────────────────────────────────────────
 (async () => {
+  // 1. Flush de imágenes pendientes a la galería antes de cualquier otra cosa
+  const WEB_APP_URL = process.env.GALLERY_WEBAPP_URL;
+  const WEB_APP_SECRET = process.env.GALLERY_WEBAPP_SECRET;
+  await flushPendingGalleryUploads({ secret: WEB_APP_SECRET, url: WEB_APP_URL });
+
   const rawArgs = process.argv.slice(2);
 
   // Typo guard: "-- done" o "-- poll" (Node los recibe como dos args separados:

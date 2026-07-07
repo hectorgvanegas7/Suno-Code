@@ -211,8 +211,10 @@ If the survey names more than one person to dedicate the song to:
 ### PHONETIC RE-SPELLING FOR SUNO (SPANISH)
 
 Suno is singing in Latin American Spanish, so it will mispronounce names that have English or complex spellings. You MUST modify how these names are SPELLED in the lyrics using literal Spanish phonetics so Suno sings them correctly.
-- Examples: "Johelyn" → "Yoelin" | "Dayana" → "Daiana" | "Brayan" → "Braian" | "Geovanny" → "Yeovani" | "Jhoselyn" → "Yoselin" | "Shirley" → "Chirley".
+- Examples: "Johelyn" → "Yoelin" | "Dayana" → "Daiana" | "Brayan" → "Braian" | "Geovanny" → "Yeovani" | "Jhoselyn" → "Yoselin" | "Shirley" → "Chirley" | "Maryuri" → "Máriuri" (or "Mariúri").
 - If a name has a "J" or "Y" that sounds like a vowel or an English sound, respell it literally for a Spanish reader (e.g., replace J with Y or I).
+- **Accents (Tildes)**: Use explicit acute accents (tildes) to force Suno to place the stress on the correct syllable if it's naturally ambiguous (e.g., "Máriuri" instead of "Mariuri" to avoid "Mariúri").
+- **Never double the 'R'** to make a soft 'r' sound. In Spanish, "rr" is a strong trill (like "perro"). If you want a soft R between vowels, use a single 'r' (e.g., "Mariuri", NEVER "Mariurri").
 - If a name STARTS WITH A VOWEL (especially "A"), Suno tends to add a phantom "H"/"J" sound at the start (e.g. "Al" sung like "Jal"/"Hal"). Double the initial vowel to prevent it: "Al" → "Aal" | "Ana" → "Aana" | "Alma" → "Aalma" | "Andrea" → "Aandrea". Apply this before any other respelling rule when the name begins with a vowel.
 - Never use English phonetic rules (like "Dez-ray" or "Pee-air") because Suno is reading in Spanish. Write exactly how you want it pronounced in Spanish syllables.
 - Never spell a name out acrostic-style ("MARIA - M de mi amor, A de...") — it sounds forced and breaks the emotion.
@@ -222,7 +224,7 @@ Suno is singing in Latin American Spanish, so it will mispronounce names that ha
 
 1. **No quality lists.** "Your patience, your dedication, your love" = automatic regeneration. Every quality must be shown through a scene or action, not explained.
 
-2. **Nothing invented.** Only use what is explicitly in the survey. If it's not there, don't write it.
+2. **Nothing invented (with one exception).** Do not invent facts, major life events, or specific memories not in the survey. However, if the survey is extremely generic (e.g., "I love her way of being"), you MUST infer small, universally relatable micro-actions (e.g., a subtle smile, looking out the window, the way she walks) to ground the emotion in a cinematic scene. Never just list the generic adjective.
 
 3. **Consistent address form (Spanish).** Use tú, usted, or vos based on the survey — never mix. This includes imperative phrases (e.g. "no tardes" = tú / "no tarde" = usted / "no tardés" = vos). Verify every single line including the Outro.
 
@@ -661,9 +663,40 @@ process.on('uncaughtException', async (err) => {
     }
     // --------------------------------------------
 
-    const baseUserMessage = isRedo
+    // --- Inyección del Diccionario de Nombres ---
+    let dictInjection = '';
+    const extractedNames = extractFirstNames(surveyContent);
+    if (extractedNames.length > 0) {
+      try {
+        const dictPath = path.join(__dirname, 'lib', 'name-dictionary.json');
+        if (fs.existsSync(dictPath)) {
+          const dict = JSON.parse(fs.readFileSync(dictPath, 'utf-8'));
+          const matches = [];
+          for (const name of extractedNames) {
+            const lowerName = name.toLowerCase();
+            if (dict[lowerName]) {
+              matches.push(`"${name}" -> "${dict[lowerName]}"`);
+            }
+          }
+          if (matches.length > 0) {
+            dictInjection = `\n\n🚨 REGLA ESTRICTA DE PRONUNCIACIÓN: Para que el audio se genere correctamente, DEBES escribir los siguientes nombres EXACTAMENTE con esta fonética/ortografía en todas las secciones de la letra:\n- ${matches.join('\n- ')}\n`;
+            console.log(`\n📚 Diccionario fonético activado para: ${matches.join(', ')}`);
+          }
+        }
+      } catch (e) {
+        console.warn('\n⚠️ No se pudo leer name-dictionary.json:', e.message);
+      }
+    }
+    // --------------------------------------------
+
+    const defaultUserMessage = `Here is the survey for this song:\n\n${surveyContent}`;
+    let finalBaseUserMessage = isRedo
       ? buildRedoUserMessage(surveyContent, redoTitle, redoLyrics, redoFeedback)
-      : undefined;
+      : defaultUserMessage;
+      
+    if (dictInjection) {
+      finalBaseUserMessage += dictInjection;
+    }
 
     const surveyHash = getSurveyHash(surveyContent);
     const cachedResponse = !isDryRun ? readCache(surveyHash) : null;
@@ -676,7 +709,7 @@ process.on('uncaughtException', async (err) => {
       parsedJson = cachedResponse.parsedJson;
       passedQA = cachedResponse.passedQA;
     } else {
-      const result = await generateSongWithSelfCorrection(surveyContent, baseUserMessage);
+      const result = await generateSongWithSelfCorrection(surveyContent, finalBaseUserMessage);
       fullResponse = result.fullResponse;
       parsedJson = result.parsedJson;
       passedQA = result.passedQA;

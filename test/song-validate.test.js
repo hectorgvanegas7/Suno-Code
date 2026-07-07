@@ -20,6 +20,7 @@ function buildResponse({
   checklist = {},
   preamble = '',
   advertencias = 'Ninguna',
+  foneticaAplicada = false,
 } = {}) {
   const baseChecklist = {
     "6_secciones_en_orden": true,
@@ -60,7 +61,8 @@ function buildResponse({
       "Outro": outro
     },
     qaChecklist: finalChecklist,
-    advertencias
+    advertencias,
+    foneticaAplicada,
   };
 
   return preamble + JSON.stringify(json, null, 2);
@@ -271,6 +273,33 @@ test('nombre incorrecto en Chorus 1 (single-recipient) sí se detecta', () => {
     chorus1: ['Roberto, hoy te canto con todo mi amor', 'Gracias por darme siempre tu calor', 'Cada momento contigo brilla mejor', 'Eres mi orgullo y mi mayor honor'],
   });
   const { valid, failures } = hardValidate(response, SURVEY_SINGLE);
+  assert.equal(valid, false);
+  assert.ok(failures.some((f) => f.includes('[Chorus 1]') && f.includes('primera palabra')), `fallos: ${failures.join(' | ')}`);
+});
+
+test('respelling fonético (lib/name-dictionary.json) que cambia la primera letra pasa SOLO con foneticaAplicada=true', () => {
+  // lib/name-dictionary.json inyecta reglas como "Geovanny" -> "Yeováni"
+  // (G -> Y). El chequeo de "primera palabra del Chorus" en hardValidate
+  // tolera esto únicamente vía el flag foneticaAplicada (bypass explícito),
+  // no por coincidencia de primera letra — hay que fijar esa dependencia con
+  // un test real del diccionario, no solo confiar en que el LLM lo marque bien.
+  const SURVEY_GEOVANNY = "What's their name?: Geovanny";
+  const response = buildResponse({
+    chorus1: ['Yeováni, hoy te canto con todo mi amor', 'Gracias por darme siempre tu calor', 'Cada momento contigo brilla mejor', 'Eres mi orgullo y mi mayor honor'],
+    chorus2: ['Yeováni, admiro tu fuerza y tu bondad', 'Marcaste mi vida con sinceridad', 'Nunca dudé de tu generosidad', 'Sos ejemplo puro de humanidad'],
+    foneticaAplicada: true,
+  });
+  const { valid, failures } = hardValidate(response, SURVEY_GEOVANNY);
+  assert.equal(valid, true, `esperaba válido con foneticaAplicada=true, fallos: ${failures.join(' | ')}`);
+});
+
+test('mismo respelling fonético SIN foneticaAplicada=true sí dispara fallo de primera palabra', () => {
+  const SURVEY_GEOVANNY = "What's their name?: Geovanny";
+  const response = buildResponse({
+    chorus1: ['Yeováni, hoy te canto con todo mi amor', 'Gracias por darme siempre tu calor', 'Cada momento contigo brilla mejor', 'Eres mi orgullo y mi mayor honor'],
+    foneticaAplicada: false,
+  });
+  const { valid, failures } = hardValidate(response, SURVEY_GEOVANNY);
   assert.equal(valid, false);
   assert.ok(failures.some((f) => f.includes('[Chorus 1]') && f.includes('primera palabra')), `fallos: ${failures.join(' | ')}`);
 });

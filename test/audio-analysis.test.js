@@ -2,11 +2,11 @@
 // (lib/audio-analysis.js) — decide qué versión sube automáticamente al Flow.
 //
 // 100% offline: construye reportes falsos a mano, nunca corre ffmpeg/Whisper/
-// CLAP de verdad. Corré con: npm test
+// CLAP/NISQA de verdad. Corré con: npm test
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { pickBestVersion, lastMeaningfulLine } = require('../lib/audio-analysis');
+const { pickBestVersion, lastMeaningfulLine, checkNamePacing, detectMergedWordPairs } = require('../lib/audio-analysis');
 
 function buildReport(overrides = {}) {
   return {
@@ -19,10 +19,19 @@ function buildReport(overrides = {}) {
     tagLeaking: [],
     missingNames: [],
     nameAudioChecks: [],
+    namePacingIssues: [],
+    pacingIssues: [],
     demucs: { used: false, vocalPresence: null, error: null },
     clap: { score: null, dimensions: null, error: null },
+    nisqa: { score: null, mos: null, dimensions: null, error: null },
     ...overrides,
   };
+}
+
+// Fabrica un segment con words[] para probar checkNamePacing/detectMergedWordPairs
+// sin correr Whisper de verdad.
+function buildSegment(words) {
+  return { start: words[0].start, end: words[words.length - 1].end, text: words.map((w) => w.word).join(' '), words };
 }
 
 test('pickBestVersion: sin Versión B, recomienda A sin comparar', () => {
@@ -97,6 +106,70 @@ test('pickBestVersion: CLAP bajo (<50) penaliza aunque el resto esté limpio', (
   const reportB = buildReport();
   const result = pickBestVersion(reportA, reportB);
   assert.equal(result.recommended, 'B');
+});
+
+test('pickBestVersion: NISQA alto en B (>85) le da una ventaja informativa sobre A neutral', () => {
+  const reportA = buildReport();
+  const reportB = buildReport({ nisqa: { score: 90, mos: 4.6, dimensions: {}, error: null } });
+  const result = pickBestVersion(reportA, reportB);
+  assert.equal(result.recommended, 'B');
+});
+
+test('pickBestVersion: NISQA bajo (<50) penaliza aunque el resto esté limpio', () => {
+  const reportA = buildReport({ nisqa: { score: 30, mos: 2.2, dimensions: {}, error: null } });
+  const reportB = buildReport();
+  const result = pickBestVersion(reportA, reportB);
+  assert.equal(result.recommended, 'B');
+});
+
+test('pickBestVersion: B con nombre pegado a palabra vecina pierde contra A limpia', () => {
+  const reportA = buildReport();
+  const reportB = buildReport({
+    namePacingIssues: [{ name: 'clara', spelledAs: 'Clara', mergedAfter: true, gapAfterS: 0.01, clipPath: 'x.wav' }],
+  });
+  const result = pickBestVersion(reportA, reportB);
+  assert.equal(result.recommended, 'A');
+  assert.ok(result.scoreA > result.scoreB);
+});
+
+test('checkNamePacing: palabra siguiente pegada (hueco 10ms) se detecta como mergedAfter', () => {
+  const segments = [buildSegment([
+    { word: 'Clara', start: 10.0, end: 10.3, probability: 0.9 },
+    { word: 'tú', start: 10.31, end: 10.5, probability: 0.9 },
+  ])];
+  const result = checkNamePacing('Clara', segments);
+  assert.ok(result);
+  assert.equal(result.mergedAfter, true);
+  assert.equal(result.mergedBefore, false);
+});
+
+test('checkNamePacing: hueco normal (0.3s) no dispara ningún merge', () => {
+  const segments = [buildSegment([
+    { word: 'Clara', start: 10.0, end: 10.3, probability: 0.9 },
+    { word: 'tú', start: 10.6, end: 10.8, probability: 0.9 },
+  ])];
+  const result = checkNamePacing('Clara', segments);
+  assert.equal(result, null);
+});
+
+test('checkNamePacing: sin word timestamps devuelve null sin lanzar', () => {
+  const segments = [{ start: 0, end: 1, text: 'Clara tú', words: undefined }];
+  assert.doesNotThrow(() => {
+    const result = checkNamePacing('Clara', segments);
+    assert.equal(result, null);
+  });
+});
+
+test('detectMergedWordPairs: encuentra el par con hueco por debajo del umbral general', () => {
+  const segments = [buildSegment([
+    { word: 'hola', start: 0, end: 0.3, probability: 0.9 },
+    { word: 'mundo', start: 0.31, end: 0.6, probability: 0.9 },
+    { word: 'feliz', start: 0.9, end: 1.2, probability: 0.9 },
+  ])];
+  const pairs = detectMergedWordPairs(segments);
+  assert.equal(pairs.length, 1);
+  assert.equal(pairs[0].wordA, 'hola');
+  assert.equal(pairs[0].wordB, 'mundo');
 });
 
 test('lastMeaningfulLine: devuelve la última línea de un traceback de Python (el mensaje real, no "Traceback...")', () => {
