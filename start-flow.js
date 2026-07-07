@@ -207,12 +207,19 @@ function runVerifyAudio({ fast = false } = {}) {
         stdio: ['ignore', logFd, logFd],
       });
 
+      // El fd del log se abre por corrida — cerrarlo cuando el hijo termina,
+      // si no queda un file descriptor filtrado por cada verify (en --loop se
+      // acumulan durante toda la sesión).
+      const closeLogFd = () => { try { fs.closeSync(logFd); } catch {} };
+
       child.on('error', (e) => {
+        closeLogFd();
         console.log(`  ⚠️ No se pudo lanzar verify-audio.js: ${e.message}`);
         notify(`⚠️ Auto-verify no arrancó: ${e.message}`, { title: 'verify-audio falló', priority: 'default', tags: 'warning' }).catch(() => {});
         resolve(false);
       });
       child.on('exit', (code) => {
+        closeLogFd();
         if (code !== 0) {
           console.log(`  ⚠️ verify-audio.js terminó con código ${code}. Ver: ${logPath}`);
           notify(
