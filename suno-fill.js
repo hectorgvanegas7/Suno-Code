@@ -236,5 +236,8 @@ async function fillSunoForm(page, titulo, voz, estilo, lyrics, genderTarget) {
   await browser.close().catch(() => {});
 })().catch((err) => {
   console.error('Automation failed:', err);
-  process.exit(1);
+  // Mismo patrón que upload-to-flow.js/flow-submit.js: salir en el mismo tick
+  // con una conexión CDP viva dispara el crash de libuv en Windows
+  // ("Assertion failed !(handle->flags & UV_HANDLE_CLOSING)").
+  setTimeout(() => process.exit(1), 250);
 });
