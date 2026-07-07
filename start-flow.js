@@ -1237,7 +1237,7 @@ async function runFlow({ resume = false } = {}) {
       await notify(
         `⚠️ La subida automática de la Versión ${versionToUpload} falló: ${e.message}\nReintento manual: node upload-to-flow.js --version ${versionToUpload}`,
         { title: 'Upload al Flow falló', priority: 'high', tags: 'warning' }
-      );
+      ).catch(() => {});
     }
   } else {
     console.log(
