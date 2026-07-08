@@ -133,8 +133,12 @@ async function checkpoint(summary, nextAction) {
 const POLL_PORT  = 9333;   // Mismo puerto, reusamos el navegador abierto
 const FLOW_CREATE_URL = 'https://cancioneterna.com/artists/flow/create';
 const SCREENSHOTS_DIR = path.join(__dirname, 'screenshots');
-const CHROME_PATH = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
-const USER_DATA_DIR = 'C:\\Users\\hecto\\AppData\\Local\\ChromeAutomationProfile';
+const CHROME_PATH = process.platform === 'darwin'
+  ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+  : 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+const USER_DATA_DIR = process.platform === 'darwin'
+  ? path.join(process.env.HOME || '', 'Library/Application Support/Google/ChromeAutomationProfile')
+  : 'C:\\Users\\hecto\\AppData\\Local\\ChromeAutomationProfile';
 const PROFILE_DIRECTORY = 'Profile 1';
 const LOGIN_WAIT_TIMEOUT_MS = 5 * 60 * 1000;
 const AUTO_VERIFY_LOG_DIR = path.join(__dirname, 'logs');
@@ -623,9 +627,8 @@ async function readRecentCompletion(expectedTitulo, { page: providedPage = null 
           const tBox = title.getBoundingClientRect();
           const mBox = meta.getBoundingClientRect();
           
-          // Unir ambas cajas y darle un pequeño margen
-          const top = Math.min(tBox.top, mBox.top) - 12;
-          const left = Math.min(tBox.left, mBox.left) - 16;
+          const top = Math.max(0, Math.min(tBox.top, mBox.top) - 12);
+          const left = Math.max(0, Math.min(tBox.left, mBox.left) - 16);
           const right = Math.max(tBox.right, mBox.right) + 16;
           const bottom = Math.max(tBox.bottom, mBox.bottom) + 12;
           
@@ -992,6 +995,7 @@ async function runFlow({ resume = false } = {}) {
     if (
       preRunState && postRunState &&
       preRunState.songId === postRunState.songId &&
+      !postRunState.isRedo &&
       (preRunState.stage === state.STAGES.SUNO_FILLED || preRunState.stage === state.STAGES.FLOW_FILLED)
     ) {
       resumeStage = preRunState.stage;
@@ -1057,6 +1061,8 @@ async function runFlow({ resume = false } = {}) {
   let hayVersionB = false; // si solo se descargó 1 versión, el upload debe ir a la A
   let verifyOk = false;
   let verifyPromise = null; // corre en paralelo con el Paso 4; se espera después
+  let dlVersionA = null;
+  let dlVersionB = null;
 
   const isLoopMode = process.argv.includes('--loop');
 
@@ -1068,6 +1074,8 @@ async function runFlow({ resume = false } = {}) {
     try {
       const { findSunoMp3s } = require('./lib/audio-match');
       const { versionA, versionB } = findSunoMp3s(state.read()?.titulo || null, { recencyMinutes: 180 });
+      dlVersionA = versionA;
+      dlVersionB = versionB;
       mp3sDescargados = true;
       hayVersionB = !!versionB;
       console.log(`  ✅ MP3s encontrados: ${versionA.name}${versionB ? ` + ${versionB.name}` : ' (solo 1 versión)'}`);
@@ -1079,9 +1087,15 @@ async function runFlow({ resume = false } = {}) {
       }
     } catch (e) {
       console.log(`  ⚠️ No se encontraron MP3s en disco: ${e.message}`);
-      console.log('  Revisá Suno: si la generación ya corrió, descargá los 2 MP3 a Downloads/suno/');
-      console.log('  (o corré node suno-create.js si Create nunca llegó a clickearse).');
-      console.log('  El pipeline sigue con los pasos manuales de siempre.');
+      if (isLoopMode) {
+        console.log('  🤖 [Auto-Recovery] Modo --loop activo: reseteando etapa a "generated" para re-intentar generación de Suno.');
+        state.write({ stage: state.STAGES.GENERATED });
+        throw new Error('MP3s faltantes en disco. Reiniciando ciclo de generación.');
+      } else {
+        console.log('  Revisá Suno: si la generación ya corrió, descargá los 2 MP3 a Downloads/suno/');
+        console.log('  (o corré node suno-create.js si Create nunca llegó a clickearse).');
+        console.log('  El pipeline sigue con los pasos manuales de siempre.');
+      }
     }
   } else if (!noAutoCreate) {
     // ✋ Checkpoint humano: el formulario ya está lleno y los screenshots de
@@ -1116,6 +1130,8 @@ async function runFlow({ resume = false } = {}) {
       try {
         const { createAndDownload } = require('./lib/suno-create-dl');
         const { versionA, versionB } = await createAndDownload();
+        dlVersionA = versionA;
+        dlVersionB = versionB;
         mp3sDescargados = true;
         hayVersionB = !!versionB;
         createSucceeded = true;
@@ -1188,6 +1204,18 @@ async function runFlow({ resume = false } = {}) {
     let uploadReason = hayVersionB
       ? 'sin reporte de análisis confiable — B por defecto'
       : 'solo se descargó una versión';
+
+    if (hayVersionB && dlVersionA && dlVersionB) {
+      const sizeA = fs.existsSync(dlVersionA.path) ? fs.statSync(dlVersionA.path).size : 0;
+      const sizeB = fs.existsSync(dlVersionB.path) ? fs.statSync(dlVersionB.path).size : 0;
+      if (sizeA > sizeB) {
+        versionToUpload = 'A';
+        uploadReason = `sin reporte confiable — elegida Versión A por ser más larga (${Math.round(sizeA/1024)}KB vs ${Math.round(sizeB/1024)}KB)`;
+      } else {
+        versionToUpload = 'B';
+        uploadReason = `sin reporte confiable — elegida Versión B por ser más larga (${Math.round(sizeB/1024)}KB vs ${Math.round(sizeA/1024)}KB)`;
+      }
+    }
 
     if (verifyOk && fs.existsSync(REPORT_PATH)) {
       try {
@@ -1383,6 +1411,8 @@ async function runFlow({ resume = false } = {}) {
   let notifiedSafe = false;
   let notifiedDanger = false;
   let notifiedSuspend = false;
+  let autoSubmitted = false;
+  const autoSubmitTargetMin = 26 + Math.random() * 5; // Aleatorio entre 26 y 31 min
 
   // ── Candado visual anti-click-accidental ────────────────────────────────
   // Badge en la esquina + Submit atenuado hasta el minuto 25, SIEMPRE en la
@@ -1466,7 +1496,8 @@ async function runFlow({ resume = false } = {}) {
     // run-log y 1800 líneas de ticker lo inflarían — el estado ya queda
     // registrado con la línea [Timer] de cada 30s.
     const ticker = setInterval(() => {
-      const mins = (Date.now() - startedTime) / 60000;
+      let mins = (Date.now() - startedTime) / 60000;
+      if (globalThis.__domTimerMin) mins = globalThis.__domTimerMin;
       let msg;
       if (mins < 25) msg = `⏳ ${mins.toFixed(1)} min — ventana de Submit (25-30 min) en ~${(25 - mins).toFixed(1)} min`;
       else if (mins <= 30) msg = `✅ ${mins.toFixed(1)} min — VENTANA ABIERTA: hacé Submit to QA cuando estés conforme`;
@@ -1487,8 +1518,29 @@ async function runFlow({ resume = false } = {}) {
     const STRUCTURAL_ERROR_ALERT_THRESHOLD = 36; // ~3 min a un poll cada 5s
 
     while (true) {
-      const elapsedMs = Date.now() - startedTime;
-      const elapsedMin = elapsedMs / 60000;
+      let elapsedMin = (Date.now() - startedTime) / 60000;
+      if (workPage) {
+        try {
+          const webTimerStr = await workPage.evaluate(() => {
+            const spans = Array.from(document.querySelectorAll('span'));
+            const timerSpan = spans.find(s => s.innerText && s.innerText.includes(':') && s.className.includes('tabular-nums'));
+            return timerSpan ? timerSpan.innerText : null;
+          });
+          if (webTimerStr) {
+            const parts = webTimerStr.split(':');
+            if (parts.length === 2) {
+              const mm = parseInt(parts[0], 10);
+              const ss = parseInt(parts[1], 10);
+              if (!isNaN(mm) && !isNaN(ss)) {
+                elapsedMin = mm + (ss / 60);
+              }
+            }
+          }
+        } catch (e) {
+          // Si falla, el fallback de startedTime ya está en elapsedMin
+        }
+      }
+      globalThis.__domTimerMin = elapsedMin;
       const now = Date.now();
 
       // Failsafe de suspensión (aviso — el Submit sigue siendo tuyo, así que
@@ -1543,6 +1595,39 @@ async function runFlow({ resume = false } = {}) {
           priority: 'high',
           tags: 'white_check_mark'
         }).catch(() => {});
+      }
+
+      // Auto-Submit nocturno (Solo si se pasa el flag explícito)
+      if (process.argv.includes('--auto-submit') && elapsedMin >= autoSubmitTargetMin && !autoSubmitted) {
+        autoSubmitted = true;
+        console.log(`\n🤖 [Auto-Submit] ¡Modo nocturno activo! Se alcanzó el objetivo aleatorio de ${autoSubmitTargetMin.toFixed(1)} min. Haciendo click automático en "Submit to QA"...`);
+        try {
+          if (workPage) {
+            // Eliminar inline styles de pointer-events para forzar click
+            await workPage.evaluate(async () => {
+              const btns = Array.from(document.querySelectorAll('button'));
+              // Click main button
+              const mainBtn = btns.find(b => b.innerText.toLowerCase().includes('submit to qa') || (b.innerText.toLowerCase().includes('complete song') && !b.innerText.toLowerCase().includes('yes')));
+              if (mainBtn) {
+                mainBtn.style.pointerEvents = '';
+                mainBtn.click();
+              }
+              // Wait for modal
+              await new Promise(r => setTimeout(r, 1000));
+              // Click confirm button
+              const confirmBtns = Array.from(document.querySelectorAll('button'));
+              const yesBtn = confirmBtns.find(b => b.innerText.toLowerCase().includes('yes, complete song') || b.innerText.toLowerCase().includes('yes, submit'));
+              if (yesBtn) {
+                yesBtn.click();
+              }
+            });
+            console.log('  ✅ Click automático realizado con éxito.');
+          } else {
+            console.log('  ⚠️ Auto-submit falló: pestaña de trabajo (workPage) no encontrada.');
+          }
+        } catch (e) {
+          console.log(`  ⚠️ Falló el auto-submit: ${e.message}`);
+        }
       }
 
       if (elapsedMin >= 30 && !notifiedDanger) {
@@ -1823,6 +1908,14 @@ async function runPoll(rawArgs) {
     await runDryRun();
   } else if (isLoop) {
     // ── Modo --loop: canciones en continuo ──────────────────────────────────
+    if (process.platform === 'darwin') {
+      console.log('☕ Activando caffeinate (macOS) para prevenir la suspensión durante el loop nocturno...');
+      require('child_process').spawn('caffeinate', ['-d', '-i', '-m', '-s', '-w', process.pid.toString()], {
+        detached: true,
+        stdio: 'ignore'
+      }).unref();
+    }
+    
     // Cada ciclo corre el flujo COMPLETO (runFlow ya incluye el cierre: detecta
     // tu Submit manual y registra en Sheets/Drive — por eso acá NO se llama a
     // runDone() de nuevo: hacerlo arriesgaría un registro doble). Sin canciones
@@ -1830,7 +1923,7 @@ async function runPoll(rawArgs) {
     // y retorna. Un ciclo que falla avisa por ntfy y el loop sigue con la
     // próxima — solo Ctrl+C (o cerrar Chrome sin reabrir) lo frena.
     // La ÚNICA interacción por canción sigue siendo tu Submit to QA.
-    console.log('🔁 Modo --loop: canciones en continuo. Tu única interacción por canción es el Submit to QA. Ctrl+C para salir.\n');
+    console.log('🔁 Modo --loop: canciones en continuo. Tu única interacción por canción es el Submit to QA (salvo que uses --auto-submit). Ctrl+C para salir.\n');
     let ciclo = 0;
     while (true) {
       ciclo++;

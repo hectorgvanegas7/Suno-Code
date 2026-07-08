@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const { safeClick, setSliderValue, expandIfCollapsed, withReloadRetry, connectToSunoTab, pauseForHumanInteraction, isPortUp } = require('./lib/playwright-helpers');
 const { LYRICS_TEXTAREA, TITLE_INPUT, STYLE_TEXTAREA, MORE_OPTIONS_TOGGLE_TEXT, WEIRDNESS_SLIDER_LABEL, STYLE_INFLUENCE_SLIDER_LABEL, EXPAND_LYRICS_BOX_LABEL } = require('./lib/suno-selectors');
-const { parseSongFile } = require('./lib/song-file');
+const { parseSongFile, applyPhoneticReplacements } = require('./lib/song-file');
 const state = require('./lib/pipeline-state');
 
 const SONG_PATH = path.join(__dirname, 'song.txt');
@@ -45,9 +45,10 @@ async function fillSunoForm(page, titulo, voz, estilo, lyrics, genderTarget) {
     await lyricsBox.fill(lyrics, { force: true });
   } catch (e) {
     // Fallback: seleccionar todo y reemplazar tecleando
-    await page.keyboard.down('Control');
+    const modifier = process.platform === 'darwin' ? 'Meta' : 'Control';
+    await page.keyboard.down(modifier);
     await page.keyboard.press('A');
-    await page.keyboard.up('Control');
+    await page.keyboard.up(modifier);
     await page.keyboard.press('Backspace');
     await page.keyboard.insertText(lyrics);
   }
@@ -115,12 +116,16 @@ async function fillSunoForm(page, titulo, voz, estilo, lyrics, genderTarget) {
     ].filter(Boolean).join(', ');
     throw new Error(`No se pudo parsear song.txt completamente. Campos faltantes: ${faltan}.`);
   }
+  const sunoLyrics = applyPhoneticReplacements(lyrics);
   const genderTarget = /femenin/i.test(voz) ? 'Female' : 'Male';
   console.log('Parseado de song.txt:');
   console.log('  Titulo:', titulo);
   console.log('  Voz:', voz, '->', genderTarget);
   console.log('  Estilo:', estilo);
   console.log('  Lyrics length:', lyrics.length, 'chars');
+  if (sunoLyrics !== lyrics) {
+    console.log('  📢 Respelling fonético aplicado para Suno (Suno lyrics length:', sunoLyrics.length, 'chars)');
+  }
 
   if (!(await isPortUp(9333))) {
     throw new Error('❌ Chrome no está escuchando en el puerto 9333. ¿Olvidaste iniciarlo con la flag de debugging?');
@@ -139,7 +144,7 @@ async function fillSunoForm(page, titulo, voz, estilo, lyrics, genderTarget) {
     // out (e.g. Suno rendered raw i18n keys instead of translated UI labels).
     await withReloadRetry(
       page,
-      () => fillSunoForm(page, titulo, voz, estilo, lyrics, genderTarget),
+      () => fillSunoForm(page, titulo, voz, estilo, sunoLyrics, genderTarget),
       { maxAttempts: 3, description: 'formulario de Suno (Advanced mode)' }
     );
   } catch (err) {
@@ -206,7 +211,7 @@ async function fillSunoForm(page, titulo, voz, estilo, lyrics, genderTarget) {
   const influenceVal = await page.locator(`[role="slider"][aria-label="${STYLE_INFLUENCE_SLIDER_LABEL}"]`).getAttribute('aria-valuenow');
 
   const allSectionsPresent = ['[Verse 1]', '[Chorus 1]', '[Verse 2]', '[Chorus 2]', '[Bridge]', '[Outro]'].every((s) => lyricsValue.includes(s));
-  const endsCorrectly = lyricsValue.trim().endsWith(lyrics.trim().split('\n').pop().trim());
+  const endsCorrectly = lyricsValue.trim().endsWith(sunoLyrics.trim().split('\n').pop().trim());
 
   console.log('\n--- Valores leidos del formulario ---');
   console.log('Title:', titleValue);
@@ -221,7 +226,7 @@ async function fillSunoForm(page, titulo, voz, estilo, lyrics, genderTarget) {
   // una canción truncada). Ahora una relectura fallida detiene y pide ojos.
   if (!allSectionsPresent || !endsCorrectly) {
     await pauseForHumanInteraction(
-      `La relectura del formulario de Suno no coincide con song.txt (` +
+      `La relectura del formulario de Suno no coincide con song.txt/sunoLyrics (` +
       `secciones completas: ${allSectionsPresent}, final correcto: ${endsCorrectly}). ` +
       'Revisá/corregí la letra en el editor de Suno manualmente antes de continuar.'
     );

@@ -54,8 +54,9 @@ async function fillReactField(page, locator, value, label) {
     await page.context().grantPermissions(['clipboard-read', 'clipboard-write']).catch(() => {});
     await page.evaluate((val) => navigator.clipboard.writeText(val), value);
     await locator.click();
-    await page.keyboard.press('Control+A');
-    await page.keyboard.press('Control+V');
+    const modifier = process.platform === 'darwin' ? 'Meta' : 'Control';
+    await page.keyboard.press(`${modifier}+A`);
+    await page.keyboard.press(`${modifier}+V`);
     await page.waitForTimeout(300);
     current = await locator.inputValue();
   }

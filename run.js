@@ -36,7 +36,9 @@ const isDryRun = args.includes('--dry-run');
 const providerArg = args.find(a => a.startsWith('--provider='));
 const provider = providerArg ? providerArg.split('=')[1] : 'claude';
 
-const USER_DATA_DIR = 'C:\\Users\\hecto\\AppData\\Local\\ChromeAutomationProfile';
+const USER_DATA_DIR = process.platform === 'darwin'
+  ? path.join(process.env.HOME || '', 'Library/Application Support/Google/ChromeAutomationProfile')
+  : 'C:\\Users\\hecto\\AppData\\Local\\ChromeAutomationProfile';
 const PROFILE_DIRECTORY = 'Profile 1';
 const TARGET_URL = 'https://cancioneterna.com/artists/flow';
 const SURVEY_PATH = path.join(__dirname, 'survey.txt');
@@ -213,15 +215,10 @@ If the survey names more than one person to dedicate the song to:
 
 ### PHONETIC RE-SPELLING FOR SUNO (SPANISH)
 
-Suno is singing in Latin American Spanish, so it will mispronounce names that have English or complex spellings. You MUST modify how these names are SPELLED in the lyrics using literal Spanish phonetics so Suno sings them correctly.
-- Examples: "Johelyn" → "Yoelin" | "Dayana" → "Daiana" | "Brayan" → "Braian" | "Geovanny" → "Yeovani" | "Jhoselyn" → "Yoselin" | "Shirley" → "Chirley" | "Maryuri" → "Máriuri" (or "Mariúri").
-- If a name has a "J" or "Y" that sounds like a vowel or an English sound, respell it literally for a Spanish reader (e.g., replace J with Y or I).
-- **Accents (Tildes)**: Use explicit acute accents (tildes) to force Suno to place the stress on the correct syllable if it's naturally ambiguous (e.g., "Máriuri" instead of "Mariuri" to avoid "Mariúri").
-- **Never double the 'R'** to make a soft 'r' sound. In Spanish, "rr" is a strong trill (like "perro"). If you want a soft R between vowels, use a single 'r' (e.g., "Mariuri", NEVER "Mariurri").
-- If a name STARTS WITH A VOWEL (especially "A"), Suno tends to add a phantom "H"/"J" sound at the start (e.g. "Al" sung like "Jal"/"Hal"). Double the initial vowel to prevent it: "Al" → "Aal" | "Ana" → "Aana" | "Alma" → "Aalma" | "Andrea" → "Aandrea". Apply this before any other respelling rule when the name begins with a vowel.
-- Never use English phonetic rules (like "Dez-ray" or "Pee-air") because Suno is reading in Spanish. Write exactly how you want it pronounced in Spanish syllables.
-- Never spell a name out acrostic-style ("MARIA - M de mi amor, A de...") — it sounds forced and breaks the emotion.
-- Always flag any respelling you used in the **Advertencias** field of the response so it can be reviewed before sending to Suno.
+The automation system automatically handles phonetic re-spelling for Suno using an internal dictionary.
+You MUST write the lyrics using the ORIGINAL name spelling from the survey. Do NOT apply phonetic re-spelling inside your generated lyrics. Write the name exactly as it appears in the survey, including capitalization and letters (e.g., use "Johny", "Jamie" or "Geovanny" as-is).
+The system will automatically swap it with the correct phonetic spelling when generating in Suno, and will keep the original spelling in the Flow.
+Always set "foneticaAplicada": false in your JSON response since the system will handle phonetic replacements later.
 
 ### GENERAL RULES
 
@@ -577,7 +574,9 @@ process.on('uncaughtException', async (err) => {
     if (!isDryRun) {
       if (!(await isPortUp(9333))) {
         console.log('Lanzando Chrome en puerto de debug 9333...');
-        const chromeBin = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+        const chromeBin = process.platform === 'darwin'
+          ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+          : 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
         spawn(
           chromeBin,
           [
@@ -685,12 +684,12 @@ process.on('uncaughtException', async (err) => {
           for (const name of extractedNames) {
             const lowerName = name.toLowerCase();
             if (dict[lowerName]) {
-              matches.push(`"${name}" -> "${dict[lowerName]}"`);
+              matches.push(`"${name}" (original) — NO uses "${dict[lowerName]}"`);
             }
           }
           if (matches.length > 0) {
-            dictInjection = `\n\n🚨 REGLA ESTRICTA DE PRONUNCIACIÓN: Para que el audio se genere correctamente, DEBES escribir los siguientes nombres EXACTAMENTE con esta fonética/ortografía en todas las secciones de la letra:\n- ${matches.join('\n- ')}\n`;
-            console.log(`\n📚 Diccionario fonético activado para: ${matches.join(', ')}`);
+            dictInjection = `\n\n🚨 REGLA ESTRICTA: Escribe el nombre EXACTAMENTE con su ortografía original ("${extractedNames.join(', ')}") en toda la letra. NO utilices variantes fonéticas en tu JSON de respuesta, ya que el sistema de automatización las aplicará para Suno automáticamente después:\n- ${matches.join('\n- ')}\n`;
+            console.log(`\n📚 Diccionario fonético activado para: ${extractedNames.join(', ')}`);
           }
         }
       } catch (e) {
@@ -782,7 +781,9 @@ process.on('uncaughtException', async (err) => {
     console.log(fullResponse);
     console.log('\n-----------------------\n');
 
-    spawn('notepad.exe', [SONG_PATH], { detached: true, stdio: 'ignore' }).unref();
+    const editorCmd = process.platform === 'darwin' ? 'open' : 'notepad.exe';
+    const editorArgs = process.platform === 'darwin' ? ['-e', SONG_PATH] : [SONG_PATH];
+    spawn(editorCmd, editorArgs, { detached: true, stdio: 'ignore' }).unref();
 
     console.log(
       passedQA

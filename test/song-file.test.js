@@ -6,7 +6,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { parseSongFile, buildFlowNotes, buildRedoAwareNotes } = require('../lib/song-file');
+const { parseSongFile, buildFlowNotes, buildRedoAwareNotes, applyPhoneticReplacements } = require('../lib/song-file');
 
 function buildSongTxt({ withNotes = true, withDashSeparator = true } = {}) {
   const header = [
@@ -95,4 +95,10 @@ test('buildRedoAwareNotes: con REDO agrega "Redo Fix, corregido" DEBAJO de la no
   assert.equal(result, '7.03.2026. Hector. PS0180. Letra + Suno.\n\nRedo Fix, corregido');
   assert.match(result, /^7\.03\.2026\. Hector\. PS0180\. Letra \+ Suno\./);
   assert.match(result, /Redo Fix, corregido$/);
+});
+
+test('applyPhoneticReplacements: replaces original names with phonetic spellings while keeping case', () => {
+  const lyrics = 'Johny went to the store. Yes, johny, it is true. Jhonny and Johnny too.';
+  const replaced = applyPhoneticReplacements(lyrics);
+  assert.equal(replaced, 'Yoni went to the store. Yes, yoni, it is true. Yoni and Yoni too.');
 });
