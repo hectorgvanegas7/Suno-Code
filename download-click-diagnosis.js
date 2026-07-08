@@ -92,7 +92,7 @@ async function runDiagnosis() {
   
   let browser, page, context;
   try {
-    browser = await chromium.connectOverCDP(`http://127.0.0.1:${DEBUG_PORT}`);
+    browser = await chromium.connectOverCDP(`http://127.0.0.1:${DEBUG_PORT}`, { noDefaults: true });
     const contexts = browser.contexts();
     if (contexts.length === 0) throw new Error("No hay contextos");
     context = contexts[0];

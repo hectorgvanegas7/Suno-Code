@@ -599,7 +599,7 @@ process.on('uncaughtException', async (err) => {
         console.log('Chrome ya está abierto en el puerto de debug 9333. Conectando...');
       }
 
-      const browser = await chromium.connectOverCDP('http://localhost:9333');
+      const browser = await chromium.connectOverCDP('http://localhost:9333', { noDefaults: true });
       activeBrowser = browser;
       const contexts = browser.contexts();
       if (contexts.length === 0) {

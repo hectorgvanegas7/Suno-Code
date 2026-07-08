@@ -273,7 +273,7 @@ function runScript(scriptNameWithArgs) {
 let cachedBrowser = null;
 async function getBrowser() {
   if (!cachedBrowser || !cachedBrowser.isConnected()) {
-    cachedBrowser = await chromium.connectOverCDP(`http://localhost:${DEBUG_PORT}`);
+    cachedBrowser = await chromium.connectOverCDP(`http://localhost:${DEBUG_PORT}`, { noDefaults: true });
   }
   return cachedBrowser;
 }
