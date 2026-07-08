@@ -42,7 +42,12 @@ function buildResponse({
     "sin_dialogos_textuales": true,
     "destinatarios_multiples_balanceados": true,
     "pov_consistente": true,
-    "sin_acrostico": true
+    "sin_acrostico": true,
+    "metrica_corta_y_consistente": true,
+    "rima_fuerte_evidente": true,
+    "adaptacion_poetica_sin_copypaste": true,
+    "coros_con_gancho": true,
+    "vocales_abiertas_en_coro": true
   };
 
   const finalChecklist = { ...baseChecklist, ...checklist };
