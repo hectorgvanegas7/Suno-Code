@@ -1633,12 +1633,19 @@ async function runFlowInner({ resume = false } = {}, hb) {
       const now = Date.now();
       writeHeartbeat({ mode: 'flow', titulo: currentTitulo, elapsedMin: Math.round(elapsedMin * 10) / 10 });
 
-      // Intentar sincronizar con el timer de la página del Flow
+      // Intentar sincronizar con el timer de la página del Flow.
+      // OJO (bug real 2026-07-09, cazado en vivo con la página en 36:42 y el
+      // countdown local en 13 min): el reloj ("38:12") y el label
+      // ("20 min target") son spans HERMANOS — getByText devuelve el elemento
+      // MÁS CHICO que contiene el texto, o sea solo el label sin el reloj,
+      // así que parseWebpageTimer daba null y el override caía al reloj local
+      // en silencio, siempre. Hay que leer el innerText del CONTENEDOR padre,
+      // que junta "38:12 · 20 min target".
       if (workPage) {
         try {
           const timerEl = workPage.getByText(/min target/i).first();
           if (await timerEl.isVisible().catch(() => false)) {
-            const pageTimerText = await timerEl.innerText().catch(() => '');
+            const pageTimerText = await timerEl.locator('xpath=..').innerText().catch(() => '');
             const parsedMin = parseWebpageTimer(pageTimerText);
             if (parsedMin !== null) {
               elapsedMin = parsedMin;

@@ -58,3 +58,14 @@ test('parseWebpageTimer: texto inválido devuelve null', () => {
   assert.equal(parseWebpageTimer(''), null);
   assert.equal(parseWebpageTimer(null), null);
 });
+
+test('parseWebpageTimer: innerText real del CONTENEDOR del Flow (reloj y label en spans hermanos, separados por saltos de línea)', () => {
+  // Bug real 2026-07-09, cazado en vivo: getByText devolvía SOLO el span del
+  // label ("20 min target", sin reloj) → null → el override caía al reloj
+  // local en silencio, siempre. El fix lee el innerText del padre, que llega
+  // con saltos de línea entre los spans — el regex debe tolerarlos.
+  assert.equal(parseWebpageTimer('38:12\n·\n20 min target'), 38.2);
+  // Y el texto del label solo (lo que devolvía el locator viejo) sigue dando
+  // null — documenta el síntoma exacto del bug.
+  assert.equal(parseWebpageTimer('20 min target'), null);
+});
