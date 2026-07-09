@@ -25,7 +25,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { clickByText, isPortUp } = require('./lib/playwright-helpers');
 const { enterFlowAndEnsureAssignment } = require('./lib/flow-helpers');
-const { generate } = require('./lib/llm-provider');
+const { generate, MOCK_SURVEY } = require('./lib/llm-provider');
 const pipelineState = require('./lib/pipeline-state');
 const { getSurveyHash, readCache, writeCache } = require('./lib/cache-helpers');
 const { hardValidate, validateContentForWrite, extractField, convertJsonToMarkdown, isSafeToPatch } = require('./lib/song-validate');
@@ -714,8 +714,14 @@ process.on('uncaughtException', async (err) => {
       console.log('--- MOCK GENERATION DRY RUN ---');
     }
 
-    console.log('Leyendo survey.txt...');
-    const surveyContent = fs.readFileSync(SURVEY_PATH, 'utf-8');
+    // En --dry-run se usa la encuesta MOCK consistente con MOCK_RESPONSE
+    // (lib/llm-provider.js) en vez de la survey.txt real del disco: la
+    // respuesta mock es fija, así que validarla contra los nombres de una
+    // encuesta real cualquiera hacía que hardValidate fallara SIEMPRE y todo
+    // dry-run terminara "con advertencia" — ruido que tapa advertencias
+    // reales (auditoría 2026-07-09). survey.txt real no se toca.
+    console.log(isDryRun ? 'Usando encuesta MOCK (dry-run)...' : 'Leyendo survey.txt...');
+    const surveyContent = isDryRun ? MOCK_SURVEY : fs.readFileSync(SURVEY_PATH, 'utf-8');
 
     // --- Pre-validación rápida de la encuesta ---
     // Reusa extractFirstNames (lib/text-helpers.js) en vez de un regex propio:
@@ -864,7 +870,19 @@ process.on('uncaughtException', async (err) => {
     console.log(fullResponse);
     console.log('\n-----------------------\n');
 
-    spawn('notepad.exe', [SONG_PATH], { detached: true, stdio: 'ignore' }).unref();
+    // Abrir song.txt para revisión (opcional, nunca bloquea). Solo Windows
+    // tiene notepad.exe; en macOS se usa `open -e` (TextEdit). El listener de
+    // 'error' es obligatorio: sin él, un ENOENT del spawn emite 'error' sin
+    // handler y tira una excepción NO atrapada que mataba run.js en Mac
+    // DESPUÉS de haber generado bien la letra (auditoría 2026-07-09 — la
+    // migración multi-plataforma no había gateado este spawn).
+    try {
+      const opener = process.platform === 'win32'
+        ? spawn('notepad.exe', [SONG_PATH], { detached: true, stdio: 'ignore' })
+        : spawn('open', ['-e', SONG_PATH], { detached: true, stdio: 'ignore' });
+      opener.on('error', () => {});
+      opener.unref();
+    } catch {}
 
     console.log(
       passedQA
