@@ -6,7 +6,8 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { recentTimestamps, isPidAlive } = require('../watchdog');
+const fs = require('fs');
+const { recentTimestamps, isPidAlive, isWatchdogRunning, WATCHDOG_PID_PATH } = require('../watchdog');
 
 test('recentTimestamps: filtra solo los timestamps dentro de la ventana', () => {
   const now = Date.now();
@@ -40,4 +41,38 @@ test('isPidAlive: el propio proceso del test está vivo', () => {
 
 test('isPidAlive: un PID que casi seguro no existe devuelve false', () => {
   assert.equal(isPidAlive(999999999), false);
+});
+
+test('isWatchdogRunning: false si logs/watchdog.pid apunta a un PID muerto', () => {
+  fs.mkdirSync(require('path').dirname(WATCHDOG_PID_PATH), { recursive: true });
+  const original = fs.existsSync(WATCHDOG_PID_PATH) ? fs.readFileSync(WATCHDOG_PID_PATH, 'utf-8') : null;
+  try {
+    fs.writeFileSync(WATCHDOG_PID_PATH, '999999999', 'utf-8');
+    assert.equal(isWatchdogRunning(), false);
+  } finally {
+    if (original === null) fs.rmSync(WATCHDOG_PID_PATH, { force: true });
+    else fs.writeFileSync(WATCHDOG_PID_PATH, original, 'utf-8');
+  }
+});
+
+test('isWatchdogRunning: true si logs/watchdog.pid apunta a un PID vivo', () => {
+  fs.mkdirSync(require('path').dirname(WATCHDOG_PID_PATH), { recursive: true });
+  const original = fs.existsSync(WATCHDOG_PID_PATH) ? fs.readFileSync(WATCHDOG_PID_PATH, 'utf-8') : null;
+  try {
+    fs.writeFileSync(WATCHDOG_PID_PATH, String(process.pid), 'utf-8');
+    assert.equal(isWatchdogRunning(), true);
+  } finally {
+    if (original === null) fs.rmSync(WATCHDOG_PID_PATH, { force: true });
+    else fs.writeFileSync(WATCHDOG_PID_PATH, original, 'utf-8');
+  }
+});
+
+test('isWatchdogRunning: false si no existe logs/watchdog.pid', () => {
+  const original = fs.existsSync(WATCHDOG_PID_PATH) ? fs.readFileSync(WATCHDOG_PID_PATH, 'utf-8') : null;
+  try {
+    fs.rmSync(WATCHDOG_PID_PATH, { force: true });
+    assert.equal(isWatchdogRunning(), false);
+  } finally {
+    if (original !== null) fs.writeFileSync(WATCHDOG_PID_PATH, original, 'utf-8');
+  }
 });

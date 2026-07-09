@@ -312,16 +312,20 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
       los loops de poll y de espera del Submit. Independiente de `state.json`
       (que solo cambia cuando avanza una canción — con la cola vacía puede
       pasar horas sin tocarse aunque todo esté sano).
-    - `watchdog.js` — supervisor EXTERNO, corre en su propio proceso/terminal
-      (nunca comparte stdin con la terminal de start-flow.js, así que no le
-      importa si esa terminal está bloqueada). `node watchdog.js` chequea cada
-      2 min si `logs/heartbeat.json` está viejo (>5 min); si el PID sigue vivo
-      lo mata (`taskkill /T /F` en Windows) y relanza
-      `node start-flow.js --loop --resume`. Circuit breaker: 3 reinicios en 30
-      min → deja de reintentar y avisa urgente en vez de crash-loopear toda la
-      noche gastando créditos. `node watchdog.js --digest` manda un resumen
-      por ntfy (Auto-Submits, reinicios, última canción, espacio en disco) —
-      pensado para una Tarea Programada a hora fija (ej. 7am).
+    - `watchdog.js` — supervisor EXTERNO, corre en su propio proceso (nunca
+      comparte stdin con la terminal de start-flow.js, así que no le importa
+      si esa terminal está bloqueada). **`start-flow.js --loop` lo auto-arranca
+      solo** (2026-07-09, para que alcance con UN comando) — chequea
+      `logs/watchdog.pid` para no duplicarlo si ya hay uno vivo; `--no-watchdog`
+      lo desactiva. Chequea cada 2 min si `logs/heartbeat.json` está viejo (>5
+      min); si el PID sigue vivo lo mata (`taskkill /T /F` en Windows) y
+      relanza `node start-flow.js --loop --resume`. Circuit breaker: 3
+      reinicios en 30 min → deja de reintentar y avisa urgente en vez de
+      crash-loopear toda la noche gastando créditos. El resumen matutino
+      TAMPOCO necesita Tarea Programada aparte: el mismo loop continuo
+      revisa la hora en cada tick y manda `sendDigest()` una sola vez por
+      día, apenas pasa `DIGEST_HOUR` (7am por default) —
+      `node watchdog.js --digest` lo manda a mano si hace falta antes.
       `logs/watchdog-events.jsonl` registra cada reinicio para revisar de
       mañana. No mata ni relanza Chrome — sigue vivo en el puerto 9333
       independiente de Node, `--resume` se reconecta a esa misma sesión.

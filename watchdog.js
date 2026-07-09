@@ -1,11 +1,13 @@
 // watchdog.js — Supervisor externo para dejar cancioneterna-flow corriendo
 // toda la noche sin nadie mirando.
 //
-// Corre en SU PROPIO proceso/terminal (o Tarea Programada de Windows) —
-// nunca comparte stdin con la terminal donde corre start-flow.js, así que
-// no le importa si esa terminal está bloqueada esperando un ENTER que nadie
-// va a dar. Ese caso puntual (pauseForHumanInteraction colgado para siempre)
-// ya se cubre DESDE ADENTRO con el timeout de lib/playwright-helpers.js
+// `node start-flow.js --loop` lo lanza SOLO (auto-arranque, ver start-flow.js
+// — chequea logs/watchdog.pid para no duplicarlo; --no-watchdog lo
+// desactiva). Corre en su propio proceso, detached — nunca comparte stdin
+// con la terminal donde corre start-flow.js, así que no le importa si esa
+// terminal está bloqueada esperando un ENTER que nadie va a dar. Ese caso
+// puntual (pauseForHumanInteraction colgado para siempre) ya se cubre DESDE
+// ADENTRO con el timeout de lib/playwright-helpers.js
 // (CANCIONETERNA_HUMAN_TIMEOUT_MS, activado automático en --loop). Este
 // watchdog cubre todo lo demás: el proceso Node murió del todo, o quedó
 // colgado de verdad (heartbeat viejo con el PID todavía vivo — un hang que
@@ -15,11 +17,14 @@
 // proceso detached e independiente, y sigue vivo en el puerto 9333 aunque
 // Node muera; --resume se reconecta a esa misma sesión.
 //
-// Uso:
+// El resumen matutino NO necesita una Tarea Programada aparte: el loop
+// continuo chequea la hora en cada tick y manda `sendDigest()` solo una vez
+// por día, apenas pasa DIGEST_HOUR (default 7am) — ver maybeSendDailyDigest.
+//
+// Uso manual (rara vez hace falta, --loop ya lo auto-arranca):
 //   node watchdog.js          → loop continuo, chequea cada 2 min (Ctrl+C para salir)
 //   node watchdog.js --once   → un solo chequeo y sale (para probar)
-//   node watchdog.js --digest → manda un resumen por ntfy de las últimas 12h y sale
-//                                (pensado para una Tarea Programada a hora fija, ej. 7am)
+//   node watchdog.js --digest → manda el resumen de las últimas 12h a mano y sale
 //
 // Circuit breaker: si reinicia MAX_RESTARTS_IN_WINDOW veces en
 // RESTART_WINDOW_MS, deja de reintentar y avisa urgente — un bug real no se
@@ -43,6 +48,8 @@ const LOGS_DIR = path.join(__dirname, 'logs');
 const WATCHDOG_STATE_PATH = path.join(LOGS_DIR, 'watchdog-state.json');
 const WATCHDOG_EVENTS_PATH = path.join(LOGS_DIR, 'watchdog-events.jsonl');
 const AUTO_SUBMIT_EVENTS_PATH = path.join(LOGS_DIR, 'auto-submit-events.jsonl');
+const WATCHDOG_PID_PATH = path.join(LOGS_DIR, 'watchdog.pid');
+const DIGEST_HOUR = 7; // hora local a la que se manda el resumen matutino, sin Tarea Programada
 
 function logEvent(event) {
   try {
@@ -211,14 +218,70 @@ async function main() {
     return;
   }
 
-  console.log(`🐕 Watchdog iniciado — chequea cada ${CHECK_INTERVAL_MS / 60000} min. Ctrl+C para salir.`);
+  writeWatchdogPid();
+  process.on('exit', removeWatchdogPid);
+
+  console.log(`🐕 Watchdog iniciado (pid ${process.pid}) — chequea cada ${CHECK_INTERVAL_MS / 60000} min. Ctrl+C para salir.`);
   while (true) {
     try {
       await checkOnce();
     } catch (e) {
       console.error(`[watchdog] Error en el chequeo (no fatal): ${e.message}`);
     }
+    await maybeSendDailyDigest();
     await new Promise((r) => setTimeout(r, CHECK_INTERVAL_MS));
+  }
+}
+
+// Resumen matutino sin depender de una Tarea Programada aparte: el watchdog
+// ya está corriendo toda la noche, así que basta con que cada tick chequee
+// si ya pasó DIGEST_HOUR y todavía no se mandó el de HOY (lastDigestDate en
+// watchdog-state.json, formato YYYY-MM-DD del huso horario local).
+function todayLocalDateStr(d = new Date()) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+async function maybeSendDailyDigest() {
+  const now = new Date();
+  if (now.getHours() < DIGEST_HOUR) return;
+
+  const wstate = readWatchdogState();
+  const today = todayLocalDateStr(now);
+  if (wstate.lastDigestDate === today) return; // ya se mandó el de hoy
+
+  await sendDigest();
+  wstate.lastDigestDate = today;
+  writeWatchdogState(wstate);
+}
+
+function writeWatchdogPid() {
+  try {
+    fs.mkdirSync(LOGS_DIR, { recursive: true });
+    fs.writeFileSync(WATCHDOG_PID_PATH, String(process.pid), 'utf-8');
+  } catch {
+    // best-effort
+  }
+}
+
+function removeWatchdogPid() {
+  try {
+    if (fs.readFileSync(WATCHDOG_PID_PATH, 'utf-8').trim() === String(process.pid)) {
+      fs.unlinkSync(WATCHDOG_PID_PATH);
+    }
+  } catch {
+    // best-effort — si ya no existe o es de otro pid, no tocar nada
+  }
+}
+
+// Usado por start-flow.js (--loop) para saber si ya hay un watchdog vivo
+// antes de lanzar uno nuevo — evita watchdogs duplicados peleándose por el
+// mismo circuit breaker/reinicio.
+function isWatchdogRunning() {
+  try {
+    const pid = parseInt(fs.readFileSync(WATCHDOG_PID_PATH, 'utf-8').trim(), 10);
+    return Number.isFinite(pid) && isPidAlive(pid);
+  } catch {
+    return false;
   }
 }
 
@@ -229,4 +292,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { recentTimestamps, isPidAlive, checkOnce, sendDigest };
+module.exports = { recentTimestamps, isPidAlive, checkOnce, sendDigest, isWatchdogRunning, WATCHDOG_PID_PATH };

@@ -148,6 +148,27 @@ if (!process.env.CANCIONETERNA_HUMAN_TIMEOUT_MS) {
   }
 }
 
+// Auto-arranca watchdog.js junto con --loop: para dejarlo corriendo toda la
+// noche sin nadie mirando, Hector solo tiene que correr UN comando en vez de
+// acordarse de abrir una segunda terminal con el watchdog. Detached +
+// unref() — vive independiente de este proceso (si start-flow.js muere, el
+// watchdog sigue vivo y lo detecta/relanza). --no-watchdog lo desactiva
+// (ej. para correr --loop de día, atendido, sin querer un watchdog de fondo).
+if (process.argv.includes('--loop') && !process.argv.includes('--no-watchdog')) {
+  try {
+    const { isWatchdogRunning } = require('./watchdog');
+    if (!isWatchdogRunning()) {
+      const watchdogChild = spawn('node', ['watchdog.js'], { cwd: __dirname, detached: true, stdio: 'ignore' });
+      watchdogChild.unref();
+      console.log(`🐕 Watchdog lanzado automáticamente (pid ${watchdogChild.pid}) — corré con --no-watchdog para desactivarlo.`);
+    } else {
+      console.log('🐕 Watchdog ya estaba corriendo — no se lanzó uno nuevo.');
+    }
+  } catch (e) {
+    console.log(`⚠️ No se pudo auto-lanzar el watchdog (no crítico): ${e.message}`);
+  }
+}
+
 async function checkpoint(summary, nextAction) {
   if (!PAUSE_MODE) {
     console.log(`\n▶️  ${nextAction} (sin pausa — corré con --pause si querés confirmar con ENTER acá)\n`);
