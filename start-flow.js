@@ -1574,49 +1574,41 @@ async function runFlow({ resume = false } = {}) {
         await setSubmitLock('open');
       }
 
-      // Auto-Submit
+      // Auto-Submit — corre igual para canciones nuevas y REDOs (pedido
+      // explícito de Hector 2026-07-09: quiere que un REDO fluya "normal,
+      // común y corriente" por el mismo timer de 26-31 min, sin pausa
+      // especial — la corrección automática de run.js según el feedback de
+      // QC ya se considera confiable). Ver LESSONS.md si esto vuelve a
+      // discutirse: la versión anterior saltaba el auto-submit en REDOs para
+      // no arriesgar un redo sin cobrar, a costa de trabar el resto de la
+      // cola de --loop esperando un Submit manual sin límite de tiempo.
       if (workPage && elapsedMin >= autoSubmitMinutes && !autoSubmitTriggered) {
         autoSubmitTriggered = true;
-
-        // Salvaguarda: si esta canción es un REDO (QC ya la rechazó una vez
-        // en un ciclo anterior — ver state.isRedo, seteado por run.js),
-        // NO auto-submitear. Un REDO ya gastó un round-trip de QC; un
-        // auto-submit prematuro sobre una corrección puede volver a costar
-        // un redo sin cobrar si Gabo todavía no confirmó que el fix quedó
-        // bien (motivo original de la vieja Regla Dura #1). Se avisa por
-        // ntfy urgent y se deja el Submit en manual para esta canción.
         const currentState = state.read();
-        if (currentState?.isRedo) {
-          console.log(`\n🛑 [Auto-Submit] SALTEADO: esta canción es un REDO (state.json.isRedo=true). Submit queda manual para este ciclo.`);
-          await notify(`🛑 Auto-Submit salteado (REDO) — hacé Submit to QA manualmente cuando confirmes el fix.`, {
-            title: `[REDO] ${currentTitulo}`,
-            priority: 'high',
-            tags: 'warning'
-          }).catch(() => {});
-        } else {
-          console.log(`\n🤖 [Auto-Submit] Alcanzado el umbral aleatorio de ${autoSubmitMinutes.toFixed(1)} min. Enviando Submit to QA...`);
-          logAutoSubmitEvent({ event: 'attempt', elapsedMin, autoSubmitMinutes, titulo: currentTitulo });
-          try {
-            const submitBtn = workPage.locator('button:has-text("Complete Song"), button:has-text("Submit to QA")').first();
-            await submitBtn.click({ timeout: 5000 });
-            console.log(`  ✅ Clickeado "Submit to QA" / "Complete Song" inicial.`);
+        const redoTag = currentState?.isRedo ? ' [REDO]' : '';
 
-            // Buscar el botón de confirmación en el modal y esperar a que sea visible
-            // Usamos un text-selector robusto en lugar de getByRole por si el árbol de accesibilidad de React se rompe
-            const confirmBtn = workPage.locator('button:has-text("Yes, Complete Song"), button:has-text("Yes, Submit to QA")').first();
-            try {
-              await confirmBtn.waitFor({ state: 'visible', timeout: 6000 });
-              await confirmBtn.click({ timeout: 5000 });
-              console.log(`  ✅ Clickeado botón de confirmación modal "Yes, Complete Song" exitosamente.`);
-              logAutoSubmitEvent({ event: 'confirmed', elapsedMin, autoSubmitMinutes, titulo: currentTitulo });
-            } catch (waitErr) {
-              console.log(`  ⚠️ No se detectó botón de confirmación modal ("Yes, Complete Song") tras esperar. Quizás no requiere confirmación o ya se envió.`);
-              logAutoSubmitEvent({ event: 'clicked_no_confirm_modal', elapsedMin, autoSubmitMinutes, titulo: currentTitulo });
-            }
-          } catch (e) {
-            console.log(`  ❌ Falló el auto-submit: ${e.message}`);
-            logAutoSubmitEvent({ event: 'failed', elapsedMin, autoSubmitMinutes, titulo: currentTitulo, error: e.message });
+        console.log(`\n🤖 [Auto-Submit${redoTag}] Alcanzado el umbral aleatorio de ${autoSubmitMinutes.toFixed(1)} min. Enviando Submit to QA...`);
+        logAutoSubmitEvent({ event: 'attempt', elapsedMin, autoSubmitMinutes, titulo: currentTitulo, isRedo: !!currentState?.isRedo });
+        try {
+          const submitBtn = workPage.locator('button:has-text("Complete Song"), button:has-text("Submit to QA")').first();
+          await submitBtn.click({ timeout: 5000 });
+          console.log(`  ✅ Clickeado "Submit to QA" / "Complete Song" inicial.`);
+
+          // Buscar el botón de confirmación en el modal y esperar a que sea visible
+          // Usamos un text-selector robusto en lugar de getByRole por si el árbol de accesibilidad de React se rompe
+          const confirmBtn = workPage.locator('button:has-text("Yes, Complete Song"), button:has-text("Yes, Submit to QA")').first();
+          try {
+            await confirmBtn.waitFor({ state: 'visible', timeout: 6000 });
+            await confirmBtn.click({ timeout: 5000 });
+            console.log(`  ✅ Clickeado botón de confirmación modal "Yes, Complete Song" exitosamente.`);
+            logAutoSubmitEvent({ event: 'confirmed', elapsedMin, autoSubmitMinutes, titulo: currentTitulo, isRedo: !!currentState?.isRedo });
+          } catch (waitErr) {
+            console.log(`  ⚠️ No se detectó botón de confirmación modal ("Yes, Complete Song") tras esperar. Quizás no requiere confirmación o ya se envió.`);
+            logAutoSubmitEvent({ event: 'clicked_no_confirm_modal', elapsedMin, autoSubmitMinutes, titulo: currentTitulo, isRedo: !!currentState?.isRedo });
           }
+        } catch (e) {
+          console.log(`  ❌ Falló el auto-submit: ${e.message}`);
+          logAutoSubmitEvent({ event: 'failed', elapsedMin, autoSubmitMinutes, titulo: currentTitulo, error: e.message });
         }
       }
 
