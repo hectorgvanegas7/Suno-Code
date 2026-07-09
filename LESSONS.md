@@ -1,5 +1,86 @@
 # Lessons / gotchas
 
+## Auditoría adversarial 2026-07-09 (Fable): el watchdog mataba pipelines sanos, el Auto-Submit no chequeaba el upload, y las notificaciones con emoji nunca llegaron
+
+Auditoría independiente de los ~8 commits del bulletproofing nocturno +
+tanda completa de fixes (tests 156 → 176+, dry-run limpio). Los bugs reales
+que importan para no repetirlos:
+
+1. **El heartbeat solo latía en 2 loops (poll y espera del Submit) — el
+   watchdog mataba un pipeline SANO a mitad de cada canción.** Entre que el
+   poller agarra una canción y llega la espera del Submit pasan 15-40 min
+   (run.js, suno-fill, Create+generación+descarga de hasta 8 min, demucs)
+   sin un solo latido; el watchdog declaraba colgado a los 5 min. Peor: tras
+   el relanzamiento, el heartbeat VIEJO seguía en disco → cada tick
+   siguiente relanzaba OTRO pipeline (cascada de hasta 3 procesos
+   concurrentes antes del breaker), y un heartbeat de anoche al arrancar
+   --loop duplicaba el pipeline desde el minuto cero. **Fix:**
+   `createStageHeartbeat` (lib/heartbeat.js) — ticker de 30s durante todo
+   runFlow con TECHO por etapa (si la etapa excede su techo, deja de latir a
+   propósito y el watchdog actúa: los hangs reales se siguen detectando);
+   latido inicial al arrancar --loop; el watchdog refresca el heartbeat con
+   el pid nuevo al relanzar. **Regla:** cualquier fase nueva de runFlow que
+   pueda superar 5 min necesita su hb.setStage() con un techo mayor al
+   timeout humano de 20 min.
+
+2. **El Auto-Submit disparaba aunque el upload hubiera fallado o no
+   existiera ningún MP3** — en un REDO eso re-manda a QA exactamente la
+   versión vieja ya rechazada (redo sin cobrar). Ninguna rama de fallo
+   (upload lanzó, Create falló 3 veces, --resume sin archivos) apagaba el
+   timer. **Fix:** gate `uploadConfirmed` — sin MP3 confirmado en ESTA
+   corrida no se submitea, avisa urgente con los pasos manuales y la
+   detección del Submit manual sigue activa. **Regla:** todo disparo
+   automático irreversible necesita como precondición el ÉXITO verificado
+   del paso del que depende, no solo que "el pipeline llegó hasta acá".
+
+3. **Las notificaciones con emoji en el título NUNCA llegaron.** lib/ntfy.js
+   mandaba el título como header HTTP y fetch() de Node exige headers
+   ByteString (Latin-1): cualquier emoji fuera de Latin-1 (🛑 🔄 ⏱️ ⚠️ ✋ 🌙)
+   tiraba TypeError ANTES de tocar la red y el catch mudo se lo tragaba —
+   justo las notificaciones más críticas (watchdog, circuit breaker, timeout
+   humano, digest) fallaban el 100% de las veces, en silencio, desde
+   siempre. **Fix:** API JSON de ntfy (UTF-8 completo) + una línea de log
+   cuando un envío falla. Regresión fijada en test/ntfy.test.js. **Regla:**
+   un catch 100% mudo alrededor de I/O "best-effort" esconde bugs
+   sistemáticos — loguear al menos una línea; y cualquier string que viaje
+   en un header HTTP es Latin-1, no UTF-8.
+
+4. **`--loop` ignoraba `--resume` (hard-coded `resume: false`)** — el
+   relanzamiento `--loop --resume` del watchdog nunca resumía: re-corría
+   run.js desde cero (re-gasta la llamada LLM; un REDO no tiene caché) y
+   dependía solo de la salvaguarda anti-doble-Create. **Fix:** --resume vale
+   para el primer ciclo del loop.
+
+5. **Ctrl+C sobre --loop dejaba al watchdog vivo → "resucitaba" el pipeline
+   apagado a propósito** ~5-7 min después. **Fix:** handler de SIGINT/SIGTERM
+   en --loop que apaga el watchdog (`stopWatchdogIfRunning`) y borra el
+   heartbeat; el watchdog además es singleton y limpia su pidfile al morir
+   por señal (el evento 'exit' NO corre con el handler default de SIGINT).
+
+6. Menores de la misma tanda: el "resumen matutino" se mandaba al primer
+   tick si el watchdog arrancaba después de las 7am (o sea, siempre que se
+   lanzaba de noche) — ahora exige que venga corriendo desde antes de las 7
+   (`shouldSendDigest`, testeada); antes de matar un PID se verifica que sea
+   Node (Windows recicla PIDs — nunca taskkill a un proceso ajeno); el
+   circuit breaker tiene respaldo en memoria (disco lleno no lo desactivaba);
+   todo arranque de start-flow (incluido --dry-run) flusheaba la cola real de
+   la galería — ahora --dry-run no lo hace (misma clase de bug que "npm test
+   pegaba a Drive real", 2026-07-07); `spawn('notepad.exe')` sin gate de
+   plataforma ni listener de 'error' mataba run.js en Mac DESPUÉS de generar
+   bien la letra; `detectTruncatedWords` era ciega a su caso motivador
+   ("Fran-" conserva la vocal cantada larga — la duración no delata el corte,
+   la caída de volumen sí; rediseñada con probability como gate y
+   duración/volumen como confirmación); F0 sobre el mix completo (sin demucs)
+   reportaba un género basura con apariencia de dato — ahora solo corre sobre
+   voz aislada; loudness/f0Gender/truncatedWords no se escribían en
+   verify-report.json (solo consola); los clips de name-check/ y
+   truncated-words/ no rotaban nunca; el mock de --dry-run validaba contra la
+   survey.txt real → advertencia falsa en cada ensayo (ahora hay MOCK_SURVEY
+   consistente y el dry-run pasa limpio); el listener de descarga se armaba
+   una sola vez antes del bucle de reintentos y su timeout de 20s expiraba
+   antes del click real; CLAUDE.md seguía afirmando saveAs()+paralelo (ver
+   2026-07-07 #3 — ahora doc y comentarios describen el mecanismo real).
+
 ## Auditoría 2026-07-07: npm test pegaba a Drive real, doble-Create latente, saveAs() nunca se usó, state.json no atómico
 
 Auditoría completa de solo-lectura (Claude, 3 barridos paralelos) + tanda de

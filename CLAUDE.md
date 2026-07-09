@@ -83,9 +83,15 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
 7. **(automático)** Submit to QA se dispara solo entre el minuto 26 y 31
    (timer aleatorio anti-bot — la vieja Regla Dura #1 quedó derogada, ver
    sección al inicio de este archivo). Gabo puede clickearlo a mano antes si
-   quiere, pero no hace falta. Único caso especial: si `state.json` marca
-   `isRedo`, corre exactamente igual (pedido explícito de Hector 2026-07-09 —
-   confía en la corrección automática de run.js según el feedback de QC).
+   quiere, pero no hace falta. Si `state.json` marca `isRedo`, corre
+   exactamente igual (pedido explícito de Hector 2026-07-09 — confía en la
+   corrección automática de run.js según el feedback de QC).
+   **GATE de upload (auditoría 2026-07-09):** el Auto-Submit solo dispara si
+   en ESTA corrida se subió y confirmó un MP3 al Flow. Si el upload falló o
+   nunca hubo MP3s (Create falló 3 veces, --resume sin archivos), NO se
+   submitea — en un REDO eso re-mandaría a QA la versión VIEJA ya rechazada
+   (redo sin cobrar). En ese caso avisa urgente por ntfy con los pasos
+   manuales y la detección del Submit manual sigue activa igual.
 
 8. **(automático)** Mientras tanto `start-flow.js` queda esperando SIN límite de
    tiempo (corta solo al detectar el Submit —propio o automático— o si Chrome
@@ -222,9 +228,11 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
   (start-flow.js no es un módulo requireable). Ver LESSONS.md por el bug real que
   tenía la rama de horas exactas (inalcanzable por el selector de DOM que la
   alimentaba, arreglado en la misma auditoría 2026-07-03).
-- `lib/hygiene.js` — `rotateOldRunFiles()`: borra archivos de `logs/` y
-  `screenshots/` de más de 30 días. Se llama al final de un `start-flow.js --done`
-  exitoso (best-effort, nunca lanza ni bloquea el cierre de la canción).
+- `lib/hygiene.js` — `rotateOldRunFiles()`: borra archivos de `logs/`,
+  `screenshots/` y los clips de confirmación de oído (`Downloads/suno/
+  name-check/` y `truncated-words/`) de más de 30 días, y recorta los `.jsonl`
+  crecientes por cantidad de líneas. Se llama al final de un `start-flow.js
+  --done` exitoso (best-effort, nunca lanza ni bloquea el cierre de la canción).
 - `suno-fill.js` — llenado de Suno (canónico; suno-fill2.js fue fusionado y borrado).
   Si un selector de la UI falla, cae a `pauseForHumanInteraction` en vez de matar
   el proceso — ver `lib/playwright-helpers.js`.
@@ -298,10 +306,14 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
     descarga quedan manuales. Si `song.txt` no coincide con `state.json`, aborta con error
     en vez de mezclar canciones.
   - `node start-flow.js --dry-run` = ensayo completo sin gastar nada: run.js con
-    mock local (cero API), cero Chrome/Suno/Flow (simulados), pero ejercita DE
-    VERDAD los checkpoints de ENTER y las notificaciones ntfy (marcadas
-    [DRY-RUN]). Respalda song.txt antes y lo restaura SIEMPRE al final — el
-    mock nunca pisa una canción real en curso.
+    mock local (cero API — valida contra la encuesta MOCK de
+    `lib/llm-provider.js`, consistente con la respuesta mock, así el ensayo
+    pasa la validación completa en vez de terminar siempre "con advertencia"),
+    cero Chrome/Suno/Flow (simulados), pero ejercita DE VERDAD los checkpoints
+    de ENTER y las notificaciones ntfy (marcadas [DRY-RUN]). Respalda song.txt
+    antes y lo restaura SIEMPRE al final — el mock nunca pisa una canción real
+    en curso. Tampoco flushea la cola de la galería (eso postearía de verdad;
+    auditoría 2026-07-09).
   - `node start-flow.js --pause` = activa los 2 checkpoints de verificación
     humana (ENTER antes del Create de Suno y antes de subir el MP3 al Flow):
     pausan, hacen beep, avisan por ntfy y esperan ENTER. Por DEFAULT están
@@ -311,6 +323,10 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
     Auto-Submit se dispara solo (26-31 min), cierra, y busca la siguiente (vigía
     si la cola está vacía). Un ciclo fallido avisa por ntfy y el loop sigue. En
     --loop el checkpoint pre-Create se saltea siempre (aunque haya --pause).
+    `--loop --resume` retoma en el PRIMER ciclo lo que quedó a mitad (es lo
+    que manda el watchdog al relanzar); los ciclos siguientes arrancan de
+    cero. Ctrl+C apaga también el watchdog y borra el heartbeat (apagado
+    limpio — nada "resucita" el pipeline después).
   - **Bulletproofing para dejarlo corriendo toda la noche** (2026-07-09):
     - `--loop` activa automáticamente un timeout de interacción humana de 20 min
       (`CANCIONETERNA_HUMAN_TIMEOUT_MS`, propagado por entorno a los scripts
@@ -320,27 +336,45 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
       esa canción puntual se abandona (avisa urgente por ntfy) y el loop sigue
       con la próxima. Override manual: `--human-timeout=<minutos>` (0 =
       desactivar, volver a esperar para siempre incluso en --loop).
-    - `lib/heartbeat.js` — `logs/heartbeat.json`, actualizado en cada tick de
-      los loops de poll y de espera del Submit. Independiente de `state.json`
-      (que solo cambia cuando avanza una canción — con la cola vacía puede
-      pasar horas sin tocarse aunque todo esté sano).
+    - `lib/heartbeat.js` — `logs/heartbeat.json`. Late en TODAS las fases
+      (rediseño auditoría 2026-07-09): los loops de poll y de espera del
+      Submit lo escriben por tick, y `runFlow` entero corre bajo un **ticker
+      por etapa** (`createStageHeartbeat`) que late cada 30s con un TECHO por
+      etapa (preflight 5 min, run.js 25, suno-fill 25, create-descarga 45,
+      flow-submit/upload 25, cierre 15 — siempre > el timeout humano de 20
+      min, para que ese dispare primero). Si una etapa excede su techo, el
+      ticker deja de latir A PROPÓSITO y el watchdog actúa — así "vivo y
+      avanzando" y "colgado de verdad" siguen siendo distinguibles. Antes el
+      heartbeat solo latía en 2 loops y el watchdog mataba pipelines SANOS a
+      mitad de Create/descarga. Independiente de `state.json` (que solo
+      cambia cuando avanza una canción). Al apagar `--loop` con Ctrl+C el
+      heartbeat SE BORRA (`clearHeartbeat`) — un heartbeat viejo tirado hacía
+      que el watchdog "resucitara" un pipeline apagado a propósito.
     - `watchdog.js` — supervisor EXTERNO, corre en su propio proceso (nunca
-      comparte stdin con la terminal de start-flow.js, así que no le importa
-      si esa terminal está bloqueada). **`start-flow.js --loop` lo auto-arranca
-      solo** (2026-07-09, para que alcance con UN comando) — chequea
-      `logs/watchdog.pid` para no duplicarlo si ya hay uno vivo; `--no-watchdog`
-      lo desactiva. Chequea cada 2 min si `logs/heartbeat.json` está viejo (>5
-      min); si el PID sigue vivo lo mata (`taskkill /T /F` en Windows) y
-      relanza `node start-flow.js --loop --resume`. Circuit breaker: 3
-      reinicios en 30 min → deja de reintentar y avisa urgente en vez de
-      crash-loopear toda la noche gastando créditos. El resumen matutino
-      TAMPOCO necesita Tarea Programada aparte: el mismo loop continuo
-      revisa la hora en cada tick y manda `sendDigest()` una sola vez por
-      día, apenas pasa `DIGEST_HOUR` (7am por default) —
-      `node watchdog.js --digest` lo manda a mano si hace falta antes.
-      `logs/watchdog-events.jsonl` registra cada reinicio para revisar de
-      mañana. No mata ni relanza Chrome — sigue vivo en el puerto 9333
-      independiente de Node, `--resume` se reconecta a esa misma sesión.
+      comparte stdin con la terminal de start-flow.js). **`start-flow.js
+      --loop` lo auto-arranca solo** — chequea `logs/watchdog.pid` para no
+      duplicarlo (y el propio watchdog es singleton: si al arrancar ve otro
+      vivo, sale); `--no-watchdog` lo desactiva. **Ctrl+C sobre `--loop` lo
+      apaga también** (`stopWatchdogIfRunning`). Chequea cada 2 min si
+      `logs/heartbeat.json` está viejo (>5 min); antes de matar VERIFICA que
+      el PID sea un proceso de Node (`looksLikeNodeProcess` — Windows recicla
+      PIDs, nunca taskkill a un proceso ajeno) y relanza `node start-flow.js
+      --loop --resume` (el `--resume` se respeta en el primer ciclo del loop
+      desde 2026-07-09 — antes se ignoraba). Tras relanzar REFRESCA el
+      heartbeat con el PID nuevo (anti-cascada: sin eso, cada tick siguiente
+      relanzaba OTRO pipeline en paralelo). Circuit breaker: 3 reinicios en
+      30 min → frena y avisa urgente; el contador vive en
+      `watchdog-state.json` Y en memoria (disco lleno no lo desactiva). La
+      decisión matar/relanzar/frenar es pura y testeada (`decideAction`,
+      test/watchdog.test.js). El resumen matutino no necesita Tarea
+      Programada: cada tick chequea la hora y manda `sendDigest()` una vez
+      por día pasadas las 7am — SOLO si el watchdog venía corriendo desde
+      antes de esa hora (`shouldSendDigest`, testeada; un watchdog arrancado
+      a las 23:00 ya no manda el "resumen matutino" en su primer tick).
+      `node watchdog.js --digest` lo manda a mano. `logs/watchdog-events.jsonl`
+      registra cada reinicio. El aviso de poco disco tiene cooldown de 1h (no
+      spamea cada 2 min). No mata ni relanza Chrome — sigue vivo en el puerto
+      9333 independiente de Node, `--resume` se reconecta a esa misma sesión.
     - `lib/preflight.js`: `checkDiskSpace()` (fs.statfsSync, sin dependencia
       nueva) — corre en el preflight inicial Y cada 30 min dentro del loop de
       poll, para agarrar disco lleno (Whisper/demucs/MP3s/logs) DURANTE la
@@ -373,17 +407,19 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
     auto-verify en background sigue con su log aparte (`logs/verify-audio-auto-*.log`).
 - `lib/suno-create-dl.js` — chequea créditos de Suno, Create × 1 (Suno v5.5 genera 2
   versiones por click), espera generación y descarga ambos MP3 a Downloads/suno/.
-  La descarga usa la API nativa de Playwright de punta a punta (migración
-  2026-07-04, ver LESSONS.md) — NO hay watcher de filesystem: `clickDownloadMp3`
-  clickea ⋯ → Download → MP3 Audio y devuelve el objeto `Download` nativo
-  (capturado vía `page.on('download')`, armado ANTES del click para no perderse
-  el evento — Suno tarda 2.6-6.3s en prepararlo, medido en vivo); guardar el
-  archivo es `await download.saveAs(destPath)`, envuelto en un timeout de 8 min
-  propio porque `saveAs()` no trae uno. Cada `Download` es una referencia
-  inequívoca a una descarga concreta, así que A y B corren en paralelo sin
-  ningún riesgo de confundirse entre sí. Si falla clickear automáticamente,
-  cae a `pauseForHumanInteraction` — un click humano en "MP3 Audio" dispara el
-  mismo evento nativo, así que se detecta igual sin mecanismo aparte.
+  **Mecanismo real de descarga** (doc corregida en auditoría 2026-07-09 — la
+  versión anterior de este bloque afirmaba `saveAs()` "de punta a punta" y
+  A/B "en paralelo", que el código nunca tuvo; ya lo había detectado LESSONS
+  2026-07-07 #3): `clickDownloadMp3` clickea ⋯ → Download → MP3 Audio con el
+  listener de `page.on('download')` re-armado en CADA intento de click (Suno
+  tarda 2.6-6.3s en preparar el archivo, medido en vivo); el evento nativo
+  CONFIRMA que arrancó y `download.failure()` espera el final (techo 8 min),
+  pero el archivo se localiza con `findDownloadedFile` (título + mtime,
+  contrato en test/find-downloaded-file.test.js) y `renameSync` inmediato.
+  El loop A→B es SECUENCIAL a propósito: el rename inmediato de A evita que
+  la búsqueda por título de B agarre el archivo equivocado. Si falla clickear
+  automáticamente, cae a `pauseForHumanInteraction` — un click humano en
+  "MP3 Audio" dispara el mismo evento nativo, así que se detecta igual.
 - `lib/audio-match.js` — encuentra los 2 MP3 por título + recencia en Downloads/suno/.
   `titleMatchScore` ignora palabras ≤2 caracteres por defecto, pero si eso deja
   la lista vacía (título compuesto enteramente por palabras cortas, ej. "Fe",
@@ -422,21 +458,27 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
   cada caso detectado a `logs/pacing-feedback.jsonl` para ajustarlos más
   adelante con casos reales (esto es un log para calibración manual, NO un
   sistema de entrenamiento de un modelo).
-  `detectTruncatedWords` (2026-07-09, pedido real de Hector): distinto de
-  "nombre ausente" (la palabra no se canta) y de "pegadas" (dos palabras sin
-  hueco) — acá la palabra SÍ se canta pero Suno la corta antes de terminarla
-  (ej. "Fran-" en vez de "Frank"). Combina duración real de la palabra
-  (Whisper) muy por debajo de la esperada según su cantidad de vocales
-  (`countVowelsEs`, proxy barato de sílabas, NO es un G2P real) + probability
-  baja de Whisper para esa palabra (ambas gatean qué palabras vale la pena
-  medir, para no gastar una llamada a ffmpeg por cada palabra de la canción)
-  + caída de volumen entre la primera y la segunda mitad de la ventana de la
-  palabra (misma técnica que `detectAbruptCutoff`, aplicada a UNA palabra en
-  vez de a toda la canción — informativa, puede no medirse en clips muy
-  cortos). `report.truncatedWords`, puramente informativo (0 pts en
-  `pickBestVersion`) hasta calibrar en vivo — guarda un clip de ~0.5-1s por
-  candidata en `truncated-words/` para confirmar de oído, mismo mecanismo que
-  `name-check/`.
+  `detectTruncatedWords` (2026-07-09, pedido real de Hector; rediseñada en la
+  auditoría del mismo día): distinto de "nombre ausente" (la palabra no se
+  canta) y de "pegadas" (dos palabras sin hueco) — acá la palabra SÍ se canta
+  pero Suno la corta antes de terminarla (ej. "Fran-" en vez de "Frank").
+  Gate primario: probability baja de Whisper (<0.55) — OJO, en `--demucs` la
+  transcripción corre con `initial_prompt`=letra, que INFLA la confianza en
+  las palabras esperadas (sesgo documentado en LESSONS.md 2026-07-04), así
+  que las candidatas son pocas y medirlas es barato (cap explícito de 15,
+  logueado si se excede — nunca trunca en silencio). Confirmación: duración
+  muy por debajo de la esperada por vocales (`countVowelsEs` × 0.09s,
+  `tooShort`) O caída de volumen >8dB entre la primera y la segunda mitad de
+  la palabra (ffmpeg, misma técnica que `detectAbruptCutoff`). El diseño
+  original exigía tooShort para siquiera medir — y era ciego al caso que
+  motivó la señal: "Fran-" conserva su vocal cantada larga, la duración casi
+  no cambia; lo que delata el corte es la caída de volumen. Cada entrada
+  reporta ambos booleanos (`tooShort`, `volumeDropConfirmed`) para calibrar.
+  `report.truncatedWords` (también en verify-report.json), puramente
+  informativo (0 pts en `pickBestVersion`) hasta calibrar en vivo — guarda un
+  clip de ~0.5-1s por candidata en `truncated-words/` para confirmar de oído,
+  mismo mecanismo que `name-check/` (ambas carpetas rotan a 30 días vía
+  `lib/hygiene.js` desde 2026-07-09).
 - `lib/transcribe.py` — script Python que usa faster-whisper para transcribir.
 - `lib/clap_score.py` — script Python que evalúa calidad de audio con CLAP (modelo
   laion/clap-htsat-unfused). Recibe 1+ MP3, devuelve JSON con score 0-100 global y
@@ -470,13 +512,34 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
   clap_score.py) y clasifica género de voz cantada (Femenina >= 175 Hz,
   Masculina <= 160 Hz, 160-175 Hz zona ambigua a propósito = Indeterminado).
   Wrapper `runF0GenderCheck` en `lib/audio-analysis.js`, mismo patrón de
-  graceful degrade que CLAP/NISQA. `report.f0Gender` compara contra el campo
-  `voz` de song.txt (`expectedGender`, pasado desde `verify-audio.js`) y marca
-  `mismatch` si no coinciden — PURAMENTE INFORMATIVO (0 pts en
-  `pickBestVersion`), no calibrado en vivo todavía.
-- `lib/ntfy.js` — notificaciones push vía ntfy.sh. Tópico privado con sufijo aleatorio
-  (ntfy.sh no tiene auth — un nombre adivinable deja leer/mandar notificaciones a
-  cualquiera). Si el tópico cambia otra vez, avisar: hay que re-suscribirse en la app.
+  graceful degrade que CLAP/NISQA. **Corre SOLO sobre la voz aislada por
+  demucs** (auditoría 2026-07-09): sin aislar, pyin sobre la mezcla la
+  dominan bajo/instrumentos y el "género detectado" es ruido con apariencia
+  de dato — en modo rápido (sin --demucs) la señal se salta con un error
+  explícito en vez de reportar basura. `report.f0Gender` (también en
+  verify-report.json) compara contra el campo `voz` de song.txt
+  (`expectedGender`, pasado desde `verify-audio.js`) y marca `mismatch` si no
+  coinciden — PURAMENTE INFORMATIVO (0 pts en `pickBestVersion`), no
+  calibrado en vivo todavía.
+- `lib/ntfy.js` — notificaciones push vía ntfy.sh, publicadas con la **API
+  JSON** (POST a la raíz, tópico en el body). NUNCA volver a mandar el título
+  como header HTTP: fetch() de Node exige headers Latin-1 y cualquier emoji
+  en el título tiraba TypeError silencioso — las notificaciones críticas
+  (watchdog 🛑/🔄, timeout humano ⏱️, digest 🌙) jamás llegaron al celular
+  hasta el fix del 2026-07-09 (bug real, ver LESSONS.md; regresión fijada en
+  test/ntfy.test.js). Un envío fallido ahora deja una línea en consola/log en
+  vez de tragarse el error 100% mudo. Tópico privado con sufijo aleatorio
+  (ntfy.sh no tiene auth — un nombre adivinable deja leer/mandar
+  notificaciones a cualquiera). Si el tópico cambia otra vez, avisar: hay que
+  re-suscribirse en la app.
+  **Mapa de notificaciones del flujo normal** (para saber qué esperar en el
+  celular por cada canción de noche): "Canción Asignada" → (si algo requiere
+  humano: "🚨/✋" con timeout visible) → "✅ Tiempo Seguro (25m)" → "🤖 Submit
+  enviado" (o "🛑 Auto-Submit bloqueado" si no hay MP3 subido — urgente, con
+  pasos manuales) → "✅ Canción cerrada — <título>" con fila y pendientes.
+  A la mañana: "🌙 Resumen de la noche" (submits ok/fallidos/bloqueados,
+  reinicios del watchdog, disco), con "✅ Noche limpia" arriba si no hay nada
+  que mirar.
 - `lib/suno-selectors.js` — data-testid/aria-label/texto de la UI de Suno usados por
   `suno-fill.js`, `lib/suno-create-dl.js` y `start-flow.js`, centralizados acá (mismo
   patrón que `lib/flow-helpers.js`) para que un cambio de selector no quede
@@ -504,12 +567,13 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
 - `sheets.js` — wrapper standalone de `lib/sheets-core.js` (registro en Google Sheet)
 - `lib/playwright-helpers.js` — helpers de Playwright (clickByText, setSliderValue,
   expandIfCollapsed, connectToSunoTab, isLoggedIn). Además:
-  - `isPortUp(port)` / `ensurePortIsFree(port)` — chequeo de puerto CDP antes de
-    lanzar o conectar Chrome, para fallar con un mensaje claro en vez de un stack
-    trace feo. `run.js` usa `ensurePortIsFree(9333)` para asegurarse de que no hay
-    una sesión de Suno abierta antes de lanzar su propio Chrome; `flow-submit.js`,
-    `suno-fill.js` y `upload-to-flow.js` usan `isPortUp` al revés (avisan si Suno
-    NO está abierto antes de conectarse).
+  - `isPortUp(port)` — chequeo de puerto CDP antes de lanzar o conectar
+    Chrome, para fallar con un mensaje claro en vez de un stack trace feo.
+    `run.js` lo usa para decidir si lanza el Chrome compartido del 9333 o se
+    conecta al existente; `flow-submit.js`, `suno-fill.js` y
+    `upload-to-flow.js` lo usan al revés (avisan si Suno NO está abierto
+    antes de conectarse). (`ensurePortIsFree` ya no existe — doc corregida
+    2026-07-09: el pipeline entero comparte UNA instancia en el 9333.)
   - `pauseForHumanInteraction(reason, options)` — fallback interactivo: beep +
     aviso por ntfy + pausa esperando un ENTER en la terminal. Reemplaza los
     `process.exit(1)` viejos ante fallos de UI (selector roto, cambio de Suno/Flow)
