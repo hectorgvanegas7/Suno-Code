@@ -26,6 +26,7 @@ const { spawn } = require('child_process');
 const { clickByText, isPortUp } = require('./lib/playwright-helpers');
 const { enterFlowAndEnsureAssignment } = require('./lib/flow-helpers');
 const { generate, MOCK_SURVEY } = require('./lib/llm-provider');
+const { notify } = require('./lib/ntfy');
 const pipelineState = require('./lib/pipeline-state');
 const { getSurveyHash, readCache, writeCache } = require('./lib/cache-helpers');
 const { hardValidate, validateContentForWrite, extractField, convertJsonToMarkdown, isSafeToPatch } = require('./lib/song-validate');
@@ -232,7 +233,7 @@ Suno is singing in Latin American Spanish, so it will mispronounce names that ha
 
 2. **Nothing invented (with one exception).** Do not invent facts, major life events, or specific memories not in the survey. However, if the survey is extremely generic (e.g., "I love her way of being"), you MUST infer small, universally relatable micro-actions (e.g., a subtle smile, looking out the window, the way she walks) to ground the emotion in a cinematic scene. Never just list the generic adjective.
 
-3. **Consistent address form (Spanish).** Use tú, usted, or vos based on the survey — never mix. This includes imperative phrases (e.g. "no tardes" = tú / "no tarde" = usted / "no tardés" = vos). Verify every single line including the Outro.
+3. **Consistent address form (Spanish).** Use tú, usted, or vos based on the survey — never mix. This includes imperative phrases (e.g. "no tardes" = tú / "no tarde" = usted / "no tardés" = vos). Verify every single line including the Outro. ⚠️ ABSOLUTE: if the survey says tú, the word "vos" and voseo verb forms (sos, tenés, podés, querés, hacés, decís...) must NEVER appear — not even to complete a rhyme with "voz", "dos" or "sol". The rhyme rules NEVER override this rule: if a rhyme needs "vos", rewrite the whole line instead. (Real failure: "quise saber más de vos" in a tú song — unacceptable, the client notices immediately.)
 
 4. **Voice = who dedicates, not who receives.** If a wife dedicates to her husband, the voice is feminine. Always check the "who is dedicating" field.
 
@@ -567,7 +568,25 @@ async function generateSongWithSelfCorrection(surveyContent, baseUserMessageOver
   console.log(`\n⚠️ No se logró pasar la validación después de ${MAX_GENERATION_ATTEMPTS} intentos. Se guardará con advertencia.`);
   // Parseo de best-effort si falló, para que validateContentForWrite no rompa del todo
   const { parsedJson } = hardValidate(lastResponse, surveyContent);
-  return { fullResponse: lastResponse, parsedJson, passedQA: false };
+  return { fullResponse: lastResponse, parsedJson, passedQA: false, lastFailures };
+}
+
+// ── REGLA INQUEBRANTABLE (pedido explícito de Hector 2026-07-09) ─────────────
+// Categorías de fallo que JAMÁS pueden llegar a Suno/al Flow, ni siquiera con
+// el banner de "revisar manualmente": si sobreviven a los 3 intentos de
+// regeneración, run.js ABORTA (exit != 0, cero créditos gastados) en vez de
+// continuar con la advertencia. Nació del bug real de "más de vos" con trato
+// tú ("Luz Que No Buscaba"): el checklist del modelo se auto-calificó ✓ y el
+// pipeline siguió de largo hasta generar el audio. El resto de los fallos
+// (métrica, estructura menor) mantienen el comportamiento de siempre
+// (advertencia + revisión manual) — abortar por TODO convertiría cualquier
+// falso positivo del validador en una cola trabada.
+const FATAL_FAILURE_PATTERNS = [
+  /^Mezcla de trato/,
+];
+
+function findFatalFailures(failures) {
+  return (failures || []).filter((f) => FATAL_FAILURE_PATTERNS.some((rx) => rx.test(f)));
 }
 
 // ─── DESCONEXIÓN GARANTIZADA DE LA SESIÓN CDP ─────────────────────────────────
@@ -788,6 +807,23 @@ process.on('uncaughtException', async (err) => {
       passedQA = result.passedQA;
       if (passedQA && !isDryRun) {
         writeCache(surveyHash, result);
+      }
+
+      // REGLA INQUEBRANTABLE: los fallos fatales (mezcla de trato) NUNCA
+      // siguen de largo con el banner de advertencia — abortan acá, antes de
+      // song.txt, antes de Suno, antes de gastar un solo crédito. Ver
+      // FATAL_FAILURE_PATTERNS arriba y LESSONS.md 2026-07-09 ("más de vos").
+      if (!passedQA) {
+        const fatal = findFatalFailures(result.lastFailures);
+        if (fatal.length > 0) {
+          console.error('\n🛑 REGLA INQUEBRANTABLE VIOLADA — el pipeline se detiene SIN gastar créditos:');
+          fatal.forEach((f) => console.error(`  • ${f}`));
+          await notify(
+            `La letra violó una regla inquebrantable tras ${MAX_GENERATION_ATTEMPTS} intentos y el pipeline se detuvo ANTES de Suno (cero créditos gastados):\n${fatal.join('\n')}\n\nCorré de nuevo: node start-flow.js`,
+            { title: '🛑 Letra rechazada — regla inquebrantable', priority: 'urgent', tags: 'no_entry' }
+          ).catch(() => {});
+          throw new Error(`Regla inquebrantable violada tras ${MAX_GENERATION_ATTEMPTS} intentos: ${fatal.join('; ')}`);
+        }
       }
     }
     // Validación obligatoria antes de escribir: si la respuesta no tiene título ni

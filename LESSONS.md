@@ -1,5 +1,53 @@
 # Lessons / gotchas
 
+## "más de vos" con trato tú llegó al AUDIO generado — hardValidate nunca validó el trato tú (2026-07-09, "Luz Que No Buscaba", en vivo)
+
+Primera corrida observada en vivo tras la auditoría: encuesta con trato "Tú",
+y el Verse 1 cerró con "Cuando te fuiste de ahí yo quise saber más de VOS".
+Pasó TODA la cadena (checklist del modelo ✓ en trato_consistente,
+hardValidate limpio, Suno generó el audio cantándolo) y se frenó A MANO ~14
+min antes del Auto-Submit. Créditos gastados en una letra inaceptable.
+
+**Por qué "nunca había pasado" y ahora sí (dos causas que se juntaron):**
+1. **El chequeo de mezcla de trato SOLO existía para trato "usted"** — para
+   tú y vos no había NINGUNA validación dura, desde siempre. El hueco estaba
+   tan naturalizado que los propios fixtures de test tenían "Sos ejemplo puro
+   de humanidad" (voseo) con trato tú en SIETE lugares y nadie lo vio nunca.
+2. Las reglas nuevas de composición del 2026-07-07/08 (rima fuerte AABB/ABAB
+   + vocales abiertas al final de línea) empujan al modelo a rimar con
+   -os/-oz ("voz", "dos", "sol") — y "vos" es la rima perfecta. La presión
+   nueva del prompt EXPUSO el hueco viejo del validador. Exactamente el
+   patrón contra el que avisa la regla de mantenimiento de CLAUDE.md ("cada
+   regla nueva del SYSTEM_PROMPT debe chequearse contra el validador"): las
+   reglas de rima entraron sin preguntarse qué podían romper.
+
+**El checklist del modelo NO es defensa:** se auto-calificó ✓ en
+trato_consistente con el "vos" adentro. La auto-evaluación del LLM es
+orientativa; lo duro tiene que vivir en hardValidate.
+
+**Fix (tres capas, pedido explícito de Hector: REGLA INQUEBRANTABLE):**
+1. `hardValidate` sección I generalizada a los TRES tratos
+   (`TRATO_MISMATCH_MARKERS` en lib/song-validate.js): tú → voseo (vos, sos,
+   tenés, podés...), vos → tuteo exclusivo (contigo, eres, tienes, ti...),
+   usted → lo de siempre. Mismos límites acentuados (nunca \b).
+2. Regla 3 del SYSTEM_PROMPT reforzada con la prohibición ABSOLUTA explícita
+   + el anti-ejemplo real ("más de vos") + "las reglas de rima NUNCA pisan
+   esta regla: reescribí la línea entera".
+3. `FATAL_FAILURE_PATTERNS` en run.js: si una mezcla de trato sobrevive los
+   3 intentos de regeneración, run.js ABORTA (exit ≠ 0, ntfy urgente, cero
+   créditos) en vez de continuar con el banner de advertencia — el banner
+   con --loop de noche no lo lee nadie. Extensible a otras categorías
+   inaceptables agregando un patrón a la lista.
+
+**Regresión fijada** en test/song-validate.test.js con la línea exacta del
+incidente + voseo verbal + falsos positivos ("versos" contiene "sos") + vos
+declarado con tuteo. Tests 176 → 180.
+
+**Takeaway:** un validador que solo cubre UNA rama de una regla de tres ramas
+no es cobertura parcial — es una promesa falsa de cobertura. Y cuando el
+prompt gana reglas que incentivan un patrón (rima en -os), revisar qué
+palabra "prohibida" es justo la que mejor satisface el incentivo.
+
 ## Auditoría adversarial 2026-07-09 (Fable): el watchdog mataba pipelines sanos, el Auto-Submit no chequeaba el upload, y las notificaciones con emoji nunca llegaron
 
 Auditoría independiente de los ~8 commits del bulletproofing nocturno +

@@ -13,7 +13,11 @@ function buildResponse({
   estiloSuno = 'Balada, piano suave, Latin American Spanish, neutral accent, seseo',
   verse1 = ['Una tarde tranquila el cielo se abrió', 'Recuerdo esa risa que jamás cambió', 'El tiempo pasaba lento y sereno', 'Algo en mi pecho supo que eras bueno'],
   chorus1 = ['Frank, hoy te canto con todo mi amor', 'Gracias por darme siempre tu calor', 'Cada momento contigo brilla mejor', 'Eres mi orgullo y mi mayor honor'],
-  chorus2 = ['Frank, admiro tu fuerza y tu bondad', 'Marcaste mi vida con sinceridad', 'Nunca dudé de tu generosidad', 'Sos ejemplo puro de humanidad',],
+  // OJO: la línea 4 decía "Sos ejemplo puro de humanidad" — un VOSEO colado
+  // en el propio fixture con trato tú, que nadie detectó durante meses porque
+  // hardValidate no validaba el trato tú (el mismo hueco del bug real
+  // "más de vos" del 2026-07-09). Confirmación involuntaria del gap.
+  chorus2 = ['Frank, admiro tu fuerza y tu bondad', 'Marcaste mi vida con sinceridad', 'Nunca dudé de tu generosidad', 'Eres ejemplo puro de humanidad',],
   verse2 = ['Después de un turno largo volvías feliz', 'Sacabas fuerzas para hacernos reír', 'Cada tropiezo lo hiciste sentir', 'Como un paso más hacia el porvenir'],
   bridge = ['Aquella noche me tomaste la mano', 'Y prometiste cuidar cada verano', 'Ese instante quedó grabado cercano', 'Fue la prueba de un amor soberano'],
   outro = ['Hoy te prometo un cariño sincero', 'Serás mi guía por todo el sendero', 'Con esta canción te digo primero', 'Te voy a amar por siempre entero'],
@@ -102,6 +106,49 @@ test('mezcla de trato real (vos con usted declarado) sí se detecta', () => {
   assert.ok(failures.some((f) => f.startsWith('Mezcla de trato')), 'debería detectar la mezcla de trato real');
 });
 
+test('BUG REAL 2026-07-09 ("Luz Que No Buscaba"): "más de vos" con trato tú se detecta', () => {
+  // La línea exacta que llegó al audio generado en vivo: las reglas de rima
+  // fuerte empujan a rimar con "voz/dos/sol" y el modelo cerró el verso con
+  // "vos" — y el validador no miraba el trato tú, así que pasó limpio hasta
+  // gastar créditos. Frenado a mano antes del Submit.
+  const response = buildResponse({
+    trato: 'tú',
+    verse1: ['En un salón de escuela te escuché por primera vez', 'Zamara te decían, un nombre que después perdí', 'No hablabas mucho pero algo en tu mirar quedó', 'Cuando te fuiste de ahí yo quise saber más de vos'],
+  });
+  const { valid, failures } = hardValidate(response, SURVEY_SINGLE);
+  assert.equal(valid, false);
+  assert.ok(
+    failures.some((f) => f.startsWith('Mezcla de trato') && /"vos"/.test(f)),
+    `debería detectar "vos" con trato tú, fallos: ${failures.join(' | ')}`
+  );
+});
+
+test('mezcla de trato: voseo verbal ("sos"/"tenés") con trato tú se detecta', () => {
+  const response = buildResponse({
+    trato: 'tú',
+    bridge: ['Aquella noche me tomaste la mano', 'Sos la promesa que cuidó el verano', 'Ese instante quedó grabado cercano', 'Fue la prueba de un amor soberano'],
+  });
+  const { failures } = hardValidate(response, SURVEY_SINGLE);
+  assert.ok(failures.some((f) => f.startsWith('Mezcla de trato') && /"sos"/i.test(f)));
+});
+
+test('mezcla de trato: voseo DENTRO de otra palabra ("versos" contiene "sos") no dispara falso positivo con trato tú', () => {
+  // Mismo criterio de límites acentuados que usted ("vení" vs "venía").
+  const response = buildResponse({
+    trato: 'tú',
+    verse2: ['Los versos que te escribo nacen de este amor', 'Sacabas fuerzas para hacernos reír', 'Cada tropiezo lo hiciste sentir', 'Como un paso más hacia el porvenir'],
+  });
+  const { failures } = hardValidate(response, SURVEY_SINGLE);
+  const mismatchFailures = failures.filter((f) => f.startsWith('Mezcla de trato'));
+  assert.deepEqual(mismatchFailures, [], `"versos" no es voseo: ${mismatchFailures.join(' | ')}`);
+});
+
+test('mezcla de trato: marcadores de tú ("contigo"/"eres") con trato vos se detectan', () => {
+  // El fixture base usa tuteo ("contigo", "Eres") — declarar trato vos debe fallar.
+  const { failures } = hardValidate(buildResponse({ trato: 'vos' }), SURVEY_SINGLE);
+  assert.ok(failures.some((f) => f.startsWith('Mezcla de trato')));
+});
+
 test('ítem true condicional "(si aplica)" pasa', () => {
   const response = buildResponse({
     checklist: { "destinatarios_multiples_balanceados": true },
@@ -142,7 +189,7 @@ test('cualquier línea de checklist en false cuenta como fallo', () => {
 test('extracción de nombres multi-destinatario: "Mis hijos Christopher y Soraya" no confunde "mis" con un nombre', () => {
   // Bug real (LESSONS.md): tomar la primera palabra del campo daba "Mis" como
   // nombre y el validador exigía que los choruses empezaran con "Mis".
-  const chorus1 = ['Christopher, hoy quiero darte mi calor', 'Sos ejemplo de esfuerzo y de valor', 'Cada día me llenás de honor', 'Gracias por tu enorme corazón'];
+  const chorus1 = ['Christopher, hoy quiero darte mi calor', 'Eres ejemplo de esfuerzo y de valor', 'Cada día me llenas de honor', 'Gracias por tu enorme corazón'];
   const chorus2 = ['Soraya, tu risa ilumina el hogar', 'Con tu fuerza me enseñaste a soñar', 'Nunca vas a dejar de brillar', 'Los dos son mi razón de celebrar'];
   const response = buildResponse({
     chorus1,
@@ -158,7 +205,7 @@ test('extracción de nombres multi-destinatario: "Mis hijos Christopher y Soraya
 
 test('2 destinatarios: ambos nombres en el mismo coro viola la regla posicional (Chorus 1 = Nombre 1, Chorus 2 = Nombre 2)', () => {
   const response = buildResponse({
-    chorus1: ['Christopher y Soraya, los dos son mi calor', 'Sos ejemplo de esfuerzo y de valor', 'Cada día me llenás de honor', 'Gracias por su enorme corazón'],
+    chorus1: ['Christopher y Soraya, los dos son mi calor', 'Eres ejemplo de esfuerzo y de valor', 'Cada día me llenas de honor', 'Gracias por su enorme corazón'],
     chorus2: ['Ustedes dos iluminan el hogar', 'Con su fuerza me enseñaron a soñar', 'Nunca van a dejar de brillar', 'Los dos son mi razón de celebrar'],
     checklist: { "destinatarios_multiples_balanceados": true },
   });
@@ -235,7 +282,7 @@ test('encuesta larga y verbosa (miles de caracteres) no rompe extractFirstNames 
 
   const response = buildResponse({
     chorus1: ['José, hoy te canto con todo mi amor', 'Gracias por darme siempre tu calor', 'Cada momento contigo brilla mejor', 'Eres mi orgullo y mi mayor honor'],
-    chorus2: ['María, admiro tu fuerza y tu bondad', 'Marcaste mi vida con sinceridad', 'Nunca dudé de tu generosidad', 'Sos ejemplo puro de humanidad'],
+    chorus2: ['María, admiro tu fuerza y tu bondad', 'Marcaste mi vida con sinceridad', 'Nunca dudé de tu generosidad', 'Eres ejemplo puro de humanidad'],
     checklist: { "destinatarios_multiples_balanceados": true },
     advertencias: advertenciasLarga,
   });
@@ -291,7 +338,7 @@ test('respelling fonético (lib/name-dictionary.json) que cambia la primera letr
   const SURVEY_GEOVANNY = "What's their name?: Geovanny";
   const response = buildResponse({
     chorus1: ['Yeováni, hoy te canto con todo mi amor', 'Gracias por darme siempre tu calor', 'Cada momento contigo brilla mejor', 'Eres mi orgullo y mi mayor honor'],
-    chorus2: ['Yeováni, admiro tu fuerza y tu bondad', 'Marcaste mi vida con sinceridad', 'Nunca dudé de tu generosidad', 'Sos ejemplo puro de humanidad'],
+    chorus2: ['Yeováni, admiro tu fuerza y tu bondad', 'Marcaste mi vida con sinceridad', 'Nunca dudé de tu generosidad', 'Eres ejemplo puro de humanidad'],
     foneticaAplicada: true,
   });
   const { valid, failures } = hardValidate(response, SURVEY_GEOVANNY);
@@ -327,7 +374,7 @@ test('nombre corto que colisiona con una palabra común ("al") no dispara falsa 
   const surveyAl = "What's their name?: Al";
   const response = buildResponse({
     chorus1: ['Aal, hoy te canto con todo mi amor', 'Gracias por darme siempre tu calor', 'Cada momento contigo brilla mejor', 'Eres mi orgullo y mi mayor honor'],
-    chorus2: ['Aal, admiro tu fuerza y tu bondad', 'Marcaste mi vida con sinceridad', 'Nunca dudé de tu generosidad', 'Sos ejemplo puro de humanidad'],
+    chorus2: ['Aal, admiro tu fuerza y tu bondad', 'Marcaste mi vida con sinceridad', 'Nunca dudé de tu generosidad', 'Eres ejemplo puro de humanidad'],
     verse1: ['Salía de una pizzería una tarde cualquiera', 'Ibas con tu amiga sonriendo al caminar', 'Todo se veía igual, como un cristal', 'Te invité a compartir la pizza sin imaginar'],
   });
   const { failures } = hardValidate(response, surveyAl);
@@ -342,7 +389,7 @@ test('nombre corto SÍ capitalizado y como palabra propia en Verse 1 sigue detec
   const surveyAl = "What's their name?: Al";
   const response = buildResponse({
     chorus1: ['Aal, hoy te canto con todo mi amor', 'Gracias por darme siempre tu calor', 'Cada momento contigo brilla mejor', 'Eres mi orgullo y mi mayor honor'],
-    chorus2: ['Aal, admiro tu fuerza y tu bondad', 'Marcaste mi vida con sinceridad', 'Nunca dudé de tu generosidad', 'Sos ejemplo puro de humanidad'],
+    chorus2: ['Aal, admiro tu fuerza y tu bondad', 'Marcaste mi vida con sinceridad', 'Nunca dudé de tu generosidad', 'Eres ejemplo puro de humanidad'],
     verse1: ['Al, siempre fuiste mi mejor amigo', 'Recuerdo esa risa que jamás cambió', 'El tiempo pasaba lento y sereno', 'Algo en mi pecho supo que eras bueno'],
   });
   const { failures } = hardValidate(response, surveyAl);
@@ -359,7 +406,7 @@ test('conteo de ocurrencias en Chorus no se infla por una palabra que contiene e
   const surveyAl = "What's their name?: Al";
   const response = buildResponse({
     chorus1: ['Aal, tu amor brilla como un cristal', 'Gracias por darme siempre tu calor', 'Cada momento contigo brilla mejor', 'Eres mi orgullo y mi mayor honor'],
-    chorus2: ['Aal, admiro tu fuerza y tu bondad', 'Marcaste mi vida con sinceridad', 'Nunca dudé de tu generosidad', 'Sos ejemplo puro de humanidad'],
+    chorus2: ['Aal, admiro tu fuerza y tu bondad', 'Marcaste mi vida con sinceridad', 'Nunca dudé de tu generosidad', 'Eres ejemplo puro de humanidad'],
     verse1: ['Salía de una pizzería una tarde cualquiera', 'Todo se veía normal y sereno', 'El tiempo pasaba lento aquel día', 'Algo en mi pecho supo que eras bueno'],
   });
   const { failures } = hardValidate(response, surveyAl);
