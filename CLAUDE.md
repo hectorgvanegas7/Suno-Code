@@ -406,6 +406,21 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
   cada caso detectado a `logs/pacing-feedback.jsonl` para ajustarlos más
   adelante con casos reales (esto es un log para calibración manual, NO un
   sistema de entrenamiento de un modelo).
+  `detectTruncatedWords` (2026-07-09, pedido real de Hector): distinto de
+  "nombre ausente" (la palabra no se canta) y de "pegadas" (dos palabras sin
+  hueco) — acá la palabra SÍ se canta pero Suno la corta antes de terminarla
+  (ej. "Fran-" en vez de "Frank"). Combina duración real de la palabra
+  (Whisper) muy por debajo de la esperada según su cantidad de vocales
+  (`countVowelsEs`, proxy barato de sílabas, NO es un G2P real) + probability
+  baja de Whisper para esa palabra (ambas gatean qué palabras vale la pena
+  medir, para no gastar una llamada a ffmpeg por cada palabra de la canción)
+  + caída de volumen entre la primera y la segunda mitad de la ventana de la
+  palabra (misma técnica que `detectAbruptCutoff`, aplicada a UNA palabra en
+  vez de a toda la canción — informativa, puede no medirse en clips muy
+  cortos). `report.truncatedWords`, puramente informativo (0 pts en
+  `pickBestVersion`) hasta calibrar en vivo — guarda un clip de ~0.5-1s por
+  candidata en `truncated-words/` para confirmar de oído, mismo mecanismo que
+  `name-check/`.
 - `lib/transcribe.py` — script Python que usa faster-whisper para transcribir.
 - `lib/clap_score.py` — script Python que evalúa calidad de audio con CLAP (modelo
   laion/clap-htsat-unfused). Recibe 1+ MP3, devuelve JSON con score 0-100 global y
