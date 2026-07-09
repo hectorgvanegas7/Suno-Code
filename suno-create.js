@@ -25,7 +25,7 @@ const { ensureCreateClickable } = require('./lib/suno-create-dl');
   await page.screenshot({ path: 'suno-after-create.png' });
   console.log('Listo. Chrome queda abierto.');
 
-  // browser.close() sobre connectOverCDP solo desconecta el socket — Chrome
+  // browser.close sobre connectOverCDP solo desconecta el socket — Chrome
   // sigue corriendo. Sin esta desconexión, Node queda colgado para siempre.
   await browser.close().catch(() => {});
 })().catch((err) => {

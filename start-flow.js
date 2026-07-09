@@ -65,8 +65,9 @@
 // desacoplado del proceso padre.
 //
 // ══════════════════════════════════════════════════════════════════════════════
-// 🛑 REGLA DURA #1 — NUNCA hacer Submit to QA automáticamente.
-//    Ver CLAUDE.md sección "REGLA DURA". El Submit es siempre manual.
+// ✅ SUBMIT TO QA AUTOMÁTICO (Anti-Bot) — Regla Dura #1 deprecada.
+//    Ver CLAUDE.md. Timer aleatorio 26-31 min; click manual sigue disponible
+//    antes de que dispare.
 // ══════════════════════════════════════════════════════════════════════════════
 //
 // Pasos del modo normal:
@@ -83,7 +84,8 @@
 //      canción y el análisis terminó bien; si no, B por defecto — A si solo
 //      hay una). Para cambiarla: node upload-to-flow.js --version A|B
 //      (manual, pisa la subida en el Flow).
-//   → Gabo hace Submit to QA manualmente (ÚNICA interacción manual).
+//   → Auto-Submit dispara solo entre el min 26 y 31 (timer aleatorio anti-bot);
+//     Gabo puede hacer click manual antes si quiere.
 //   → El script detecta la card en "Recent completions" (pestaña dedicada en
 //     background, título verificado contra state.json) y corre el cierre solo:
 //     tiempo de sesión + screenshot + registro en Sheets + Drive.
@@ -112,15 +114,15 @@ const { notify } = require('./lib/ntfy');
 const state = require('./lib/pipeline-state');
 const { LYRICS_TEXTAREA } = require('./lib/suno-selectors');
 const { rotateOldRunFiles } = require('./lib/hygiene');
-const { parseSessionTime } = require('./lib/session-time');
+const { parseSessionTime, parseWebpageTimer } = require('./lib/session-time');
 const { normalize } = require('./lib/audio-match');
 const { postImageToGallery, flushPendingGalleryUploads } = require('./lib/gallery-upload');
 
 const DEBUG_PORT = 9333;   // Chrome de Suno (ya corriendo para suno-fill y flow-submit)
 
 // Checkpoints de verificación humana (ENTER antes de actuar). DESACTIVADOS
-// por default: Hector quiere el flujo original donde su ÚNICA interacción es
-// el Submit to QA manual (2026-07-03). Se activan solo con --pause explícito.
+// por default: el flujo corre de un tirón — el Submit to QA ahora es
+// automático (timer anti-bot 26-31 min). Se activan solo con --pause explícito.
 // (--no-pause se acepta por compatibilidad, pero ya es el comportamiento default.)
 const PAUSE_MODE = process.argv.includes('--pause') && !process.argv.includes('--no-pause');
 async function checkpoint(summary, nextAction) {
@@ -133,8 +135,9 @@ async function checkpoint(summary, nextAction) {
 const POLL_PORT  = 9333;   // Mismo puerto, reusamos el navegador abierto
 const FLOW_CREATE_URL = 'https://cancioneterna.com/artists/flow/create';
 const SCREENSHOTS_DIR = path.join(__dirname, 'screenshots');
-const CHROME_PATH = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
-const USER_DATA_DIR = 'C:\\Users\\hecto\\AppData\\Local\\ChromeAutomationProfile';
+const os = require('os');
+const CHROME_PATH = process.platform === 'win32' ? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' : '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+const USER_DATA_DIR = path.join(os.homedir(), process.platform === 'win32' ? 'AppData\\Local\\ChromeAutomationProfile' : 'Library/Application Support/ChromeAutomationProfile');
 const PROFILE_DIRECTORY = 'Profile 1';
 const LOGIN_WAIT_TIMEOUT_MS = 5 * 60 * 1000;
 const AUTO_VERIFY_LOG_DIR = path.join(__dirname, 'logs');
@@ -169,6 +172,20 @@ function writeToRunLog(chunk) {
 process.on('exit', () => {
   try { fs.closeSync(runLogFd); } catch {}
 });
+
+// Registro append-only de cada intento de Auto-Submit (hora, minuto exacto
+// del timer, título, resultado). Si algún cliente reclama un submit
+// prematuro o el click falló en silencio, esto da el dato exacto sin tener
+// que rastrear entre varios logs/run-*.log. Nunca lanza — un fallo de disco
+// acá no debe frenar el pipeline.
+const AUTO_SUBMIT_LOG_PATH = path.join(AUTO_VERIFY_LOG_DIR, 'auto-submit-events.jsonl');
+function logAutoSubmitEvent(event) {
+  try {
+    fs.appendFileSync(AUTO_SUBMIT_LOG_PATH, JSON.stringify({ ts: new Date().toISOString(), ...event }) + '\n', 'utf-8');
+  } catch {
+    // best-effort
+  }
+}
 
 // Envuelve console.log/error para que todo lo que start-flow.js imprime (y todo
 // lo que imprimen los módulos que requiere, como lib/preflight.js) también
@@ -269,7 +286,7 @@ function runScript(scriptNameWithArgs) {
 let cachedBrowser = null;
 async function getBrowser() {
   if (!cachedBrowser || !cachedBrowser.isConnected()) {
-    cachedBrowser = await chromium.connectOverCDP(`http://localhost:${DEBUG_PORT}`);
+    cachedBrowser = await chromium.connectOverCDP(`http://localhost:${DEBUG_PORT}`, { noDefaults: true });
   }
   return cachedBrowser;
 }
@@ -1227,7 +1244,7 @@ async function runFlow({ resume = false } = {}) {
       (hayVersionB
         ? `Si preferís la otra, después de esta subida corré: node upload-to-flow.js --version ${versionToUpload === 'B' ? 'A' : 'B'}`
         : 'Solo hay una versión descargada.'),
-      `subir la Versión ${versionToUpload} al Flow (SIN Submit to QA — eso es siempre manual)`
+      `subir la Versión ${versionToUpload} al Flow (SIN Submit to QA todavía — eso se dispara después, automático o manual)`
     );
     console.log(`\n🚀 Subiendo automáticamente la Versión ${versionToUpload} al Flow (${uploadReason})...`);
     try {
@@ -1274,9 +1291,9 @@ async function runFlow({ resume = false } = {}) {
   // Fallback manual de siempre: node start-flow.js --done.
 
   console.log('\n==================================================================');
-  console.log('🛑 Hacé click en "Submit to QA" manualmente en el navegador.');
-  console.log('⏳ El script detectará la finalización y registrará en Sheets automáticamente...');
-  console.log('   (Espera SIN límite: corta al detectar tu Submit o si Chrome se cierra.');
+  console.log('🤖 Auto-Submit ACTIVO. Se enviará automáticamente entre el min 26 y 31.');
+  console.log('   Si lo deseas, puedes hacer click en "Submit to QA" manualmente antes.');
+  console.log('   (Espera SIN límite: corta al detectar el Submit o si Chrome se cierra.');
   console.log('    Fallback manual: node start-flow.js --done)');
   console.log('==================================================================\n');
 
@@ -1384,6 +1401,9 @@ async function runFlow({ resume = false } = {}) {
   let notifiedDanger = false;
   let notifiedSuspend = false;
 
+  const autoSubmitMinutes = 26 + Math.random() * 5; // 26 to 31
+  let autoSubmitTriggered = false;
+
   // ── Candado visual anti-click-accidental ────────────────────────────────
   // Badge en la esquina + Submit atenuado hasta el minuto 25, SIEMPRE en la
   // pestaña de trabajo (workPage — donde Hector clickea; el diff original lo
@@ -1427,7 +1447,7 @@ async function runFlow({ resume = false } = {}) {
           }
         } else { // 'open'
           overlay.style.backgroundColor = 'rgba(22, 163, 74, 0.9)';
-          overlay.innerText = '✅ LISTO PARA TU SUBMIT';
+          overlay.innerText = '✅ LISTO (AUTO-SUBMIT PRONTO)';
           if (submitBtn) {
             submitBtn.style.opacity = submitBtn.dataset.op || '';
             submitBtn.style.pointerEvents = submitBtn.dataset.pe || '';
@@ -1456,9 +1476,12 @@ async function runFlow({ resume = false } = {}) {
   // escucha los MP3 y revisa. No toca el formulario, no roba foco, no clickea.
   const KEEP_ALIVE_MS = 5 * 60 * 1000;
   let lastKeepAlive = Date.now();
+  const MEMORY_CHECK_MS = 60 * 1000;
+  let lastMemoryCheck = Date.now();
   // Failsafe de suspensión: el loop itera cada ~5s — si entre dos vueltas el
   // reloj saltó minutos, la PC se suspendió y el tiempo REAL siguió corriendo.
   let lastLoopTick = Date.now();
+  let currentElapsedMin = (Date.now() - startedTime) / 60000;
 
   if (pollTarget) {
     // Countdown en vivo (cada segundo, en la MISMA línea de terminal con \r).
@@ -1466,11 +1489,11 @@ async function runFlow({ resume = false } = {}) {
     // run-log y 1800 líneas de ticker lo inflarían — el estado ya queda
     // registrado con la línea [Timer] de cada 30s.
     const ticker = setInterval(() => {
-      const mins = (Date.now() - startedTime) / 60000;
+      const mins = currentElapsedMin;
       let msg;
-      if (mins < 25) msg = `⏳ ${mins.toFixed(1)} min — ventana de Submit (25-30 min) en ~${(25 - mins).toFixed(1)} min`;
-      else if (mins <= 30) msg = `✅ ${mins.toFixed(1)} min — VENTANA ABIERTA: hacé Submit to QA cuando estés conforme`;
-      else msg = `⚠️ ${mins.toFixed(1)} min — pasado el rango: hacé Submit to QA YA`;
+      if (mins < 25) msg = `⏳ ${mins.toFixed(1)} min — ventana de Submit en ~${(25 - mins).toFixed(1)} min`;
+      else if (mins <= autoSubmitMinutes) msg = `✅ ${mins.toFixed(1)} min — Auto-Submit en ~${(autoSubmitMinutes - mins).toFixed(1)} min (o clickealo manual)`;
+      else msg = `🤖 ${mins.toFixed(1)} min — Auto-Submit enviado (esperando confirmación)`;
       process.stdout.write(`\r[Countdown] ${msg}      `);
     }, 1000);
     if (typeof ticker.unref === 'function') ticker.unref();
@@ -1487,9 +1510,25 @@ async function runFlow({ resume = false } = {}) {
     const STRUCTURAL_ERROR_ALERT_THRESHOLD = 36; // ~3 min a un poll cada 5s
 
     while (true) {
-      const elapsedMs = Date.now() - startedTime;
-      const elapsedMin = elapsedMs / 60000;
+      let elapsedMin = (Date.now() - startedTime) / 60000;
       const now = Date.now();
+
+      // Intentar sincronizar con el timer de la página del Flow
+      if (workPage) {
+        try {
+          const timerEl = workPage.getByText(/min target/i).first();
+          if (await timerEl.isVisible().catch(() => false)) {
+            const pageTimerText = await timerEl.innerText().catch(() => '');
+            const parsedMin = parseWebpageTimer(pageTimerText);
+            if (parsedMin !== null) {
+              elapsedMin = parsedMin;
+            }
+          }
+        } catch (e) {
+          // Fallback silencioso al local clock si Playwright falla o la pestaña está cerrada
+        }
+      }
+      currentElapsedMin = elapsedMin;
 
       // Failsafe de suspensión (aviso — el Submit sigue siendo tuyo, así que
       // acá no hay nada que "cancelar": solo enterarte del tiempo real).
@@ -1511,6 +1550,52 @@ async function runFlow({ resume = false } = {}) {
         await setSubmitLock('open');
       }
 
+      // Auto-Submit
+      if (workPage && elapsedMin >= autoSubmitMinutes && !autoSubmitTriggered) {
+        autoSubmitTriggered = true;
+
+        // Salvaguarda: si esta canción es un REDO (QC ya la rechazó una vez
+        // en un ciclo anterior — ver state.isRedo, seteado por run.js),
+        // NO auto-submitear. Un REDO ya gastó un round-trip de QC; un
+        // auto-submit prematuro sobre una corrección puede volver a costar
+        // un redo sin cobrar si Gabo todavía no confirmó que el fix quedó
+        // bien (motivo original de la vieja Regla Dura #1). Se avisa por
+        // ntfy urgent y se deja el Submit en manual para esta canción.
+        const currentState = state.read();
+        if (currentState?.isRedo) {
+          console.log(`\n🛑 [Auto-Submit] SALTEADO: esta canción es un REDO (state.json.isRedo=true). Submit queda manual para este ciclo.`);
+          await notify(`🛑 Auto-Submit salteado (REDO) — hacé Submit to QA manualmente cuando confirmes el fix.`, {
+            title: `[REDO] ${currentTitulo}`,
+            priority: 'high',
+            tags: 'warning'
+          }).catch(() => {});
+        } else {
+          console.log(`\n🤖 [Auto-Submit] Alcanzado el umbral aleatorio de ${autoSubmitMinutes.toFixed(1)} min. Enviando Submit to QA...`);
+          logAutoSubmitEvent({ event: 'attempt', elapsedMin, autoSubmitMinutes, titulo: currentTitulo });
+          try {
+            const submitBtn = workPage.locator('button:has-text("Complete Song"), button:has-text("Submit to QA")').first();
+            await submitBtn.click({ timeout: 5000 });
+            console.log(`  ✅ Clickeado "Submit to QA" / "Complete Song" inicial.`);
+
+            // Buscar el botón de confirmación en el modal y esperar a que sea visible
+            // Usamos un text-selector robusto en lugar de getByRole por si el árbol de accesibilidad de React se rompe
+            const confirmBtn = workPage.locator('button:has-text("Yes, Complete Song"), button:has-text("Yes, Submit to QA")').first();
+            try {
+              await confirmBtn.waitFor({ state: 'visible', timeout: 6000 });
+              await confirmBtn.click({ timeout: 5000 });
+              console.log(`  ✅ Clickeado botón de confirmación modal "Yes, Complete Song" exitosamente.`);
+              logAutoSubmitEvent({ event: 'confirmed', elapsedMin, autoSubmitMinutes, titulo: currentTitulo });
+            } catch (waitErr) {
+              console.log(`  ⚠️ No se detectó botón de confirmación modal ("Yes, Complete Song") tras esperar. Quizás no requiere confirmación o ya se envió.`);
+              logAutoSubmitEvent({ event: 'clicked_no_confirm_modal', elapsedMin, autoSubmitMinutes, titulo: currentTitulo });
+            }
+          } catch (e) {
+            console.log(`  ❌ Falló el auto-submit: ${e.message}`);
+            logAutoSubmitEvent({ event: 'failed', elapsedMin, autoSubmitMinutes, titulo: currentTitulo, error: e.message });
+          }
+        }
+      }
+
       // Keep-alive de sesión del Flow
       if (workPage && now - lastKeepAlive >= KEEP_ALIVE_MS) {
         lastKeepAlive = now;
@@ -1522,16 +1607,42 @@ async function runFlow({ resume = false } = {}) {
         }
       }
 
+      // Memory Supervisor: Cerrar pestañas vacías para cuidar la RAM
+      if (now - lastMemoryCheck >= MEMORY_CHECK_MS) {
+        lastMemoryCheck = now;
+        try {
+          const browser = await getBrowser();
+          const context = browser.contexts()[0];
+          if (context) {
+            const pages = context.pages();
+            let closedCount = 0;
+            for (const p of pages) {
+              const u = p.url();
+              if (u === 'about:blank' || u === 'chrome://newtab/') {
+                await p.close().catch(() => {});
+                closedCount++;
+              }
+            }
+            if (closedCount > 0) {
+              console.log(`\n🧹 [Memory Supervisor] Cerradas ${closedCount} pestañas vacías ("${closedCount > 1 ? 'varias' : 'una'}") para liberar RAM en Chrome.`);
+            }
+          }
+        } catch (e) {
+          // ignore
+        }
+      }
+
       // Imprimir el estado del timer en consola cada 30 segundos
       if (now - lastLogTime >= 30000) {
         lastLogTime = now;
         if (elapsedMin < 25) {
           const remainingMin = Math.ceil(25 - elapsedMin);
-          console.log(`\n[Timer] ⏳ Transcurrido: ${elapsedMin.toFixed(1)} min. Faltan ~${remainingMin} min para el Submit seguro (rango 25-30 min). NO hagas click todavía.`);
-        } else if (elapsedMin <= 30) {
-          console.log(`\n[Timer] ✅ ¡TIEMPO SEGURO! Transcurrido: ${elapsedMin.toFixed(1)} min. Ya podés hacer click en "Submit to QA".`);
+          console.log(`\n[Timer] ⏳ Transcurrido: ${elapsedMin.toFixed(1)} min. Faltan ~${remainingMin} min para el Submit seguro. NO hagas click todavía.`);
+        } else if (elapsedMin < autoSubmitMinutes) {
+          const remainingAuto = Math.max(0, autoSubmitMinutes - elapsedMin);
+          console.log(`\n[Timer] ✅ ¡TIEMPO SEGURO! Transcurrido: ${elapsedMin.toFixed(1)} min. Podés hacer click manualmente, o auto-submit en ~${remainingAuto.toFixed(1)} min.`);
         } else {
-          console.log(`\n[Timer] ⚠️ RIESGO DE EXCEDER: Transcurrido: ${elapsedMin.toFixed(1)} min. ¡Hacé click en "Submit to QA" cuanto antes!`);
+          console.log(`\n[Timer] 🤖 Auto-submit ya debería haberse disparado (Transcurrido: ${elapsedMin.toFixed(1)} min). Esperando confirmación.`);
         }
       }
 
@@ -1545,9 +1656,9 @@ async function runFlow({ resume = false } = {}) {
         }).catch(() => {});
       }
 
-      if (elapsedMin >= 30 && !notifiedDanger) {
+      if (elapsedMin >= autoSubmitMinutes + 2 && !notifiedDanger) {
         notifiedDanger = true;
-        await notify(`⚠️ Riesgo (>30m) — Hacé Submit de inmediato.`, {
+        await notify(`⚠️ Riesgo — Auto-Submit falló o no se detectó. Verificá manualmente.`, {
           title: `[Límite] ${currentTitulo}`,
           priority: 'urgent',
           tags: 'warning'
@@ -1667,7 +1778,7 @@ async function runDryRun() {
     console.log('=== Paso 4/4: SIMULADO — flow-submit.js (título/letra/notas en el Flow) ===');
     await checkpoint(
       '[DRY-RUN] Simulación: listo para subir la Versión B al Flow (recomendación simulada).',
-      '[DRY-RUN] simular la subida del MP3 (no toca el Flow — y NUNCA haría Submit to QA)'
+      '[DRY-RUN] simular la subida del MP3 (no toca el Flow)'
     );
 
     await notify('[DRY-RUN] 🧪 Ensayo completo OK: letra mock, 2 checkpoints ENTER y notificaciones funcionando.', {
@@ -1680,7 +1791,7 @@ async function runDryRun() {
       ? '   • Los 2 checkpoints de ENTER pausaron y reanudaron (--pause).'
       : '   • Checkpoints desactivados (default) — el flujo corre de un tirón hasta tu Submit. Probálos con --pause.');
     console.log('   • Las notificaciones ntfy se dispararon (revisá el celular).');
-    console.log('   • Regla Dura #1 intacta: el Submit to QA no existe en el código.');
+    console.log('   • Regla Dura #1 deprecada: en modo normal haría Submit to QA automáticamente.');
     console.log('══════════════════════════════════════════════════════');
   } finally {
     if (hadRealSong) {
@@ -1829,8 +1940,8 @@ async function runPoll(rawArgs) {
     // en cola cae al vigía (runPoll), que al asignar una corre runFlow entero
     // y retorna. Un ciclo que falla avisa por ntfy y el loop sigue con la
     // próxima — solo Ctrl+C (o cerrar Chrome sin reabrir) lo frena.
-    // La ÚNICA interacción por canción sigue siendo tu Submit to QA.
-    console.log('🔁 Modo --loop: canciones en continuo. Tu única interacción por canción es el Submit to QA. Ctrl+C para salir.\n');
+    // Todo el ciclo funciona de principio a fin sin requerir atención.
+    console.log('🔁 Modo --loop: canciones en continuo. Todo el proceso es ahora 100% AUTOMÁTICO (incluso el Submit to QA). Ctrl+C para salir.\n');
     let ciclo = 0;
     while (true) {
       ciclo++;

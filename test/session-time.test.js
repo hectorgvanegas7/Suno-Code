@@ -9,7 +9,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { parseSessionTime } = require('../lib/session-time');
+const { parseSessionTime, parseWebpageTimer } = require('../lib/session-time');
 
 test('parseSessionTime: "26 min session" (solo minutos)', () => {
   assert.deepEqual(parseSessionTime('26 min session'), { timeHHMM: '00:26', totalTimeDecimal: 0.43 });
@@ -39,4 +39,22 @@ test('parseSessionTime: texto vacío/null/undefined devuelve null', () => {
   assert.equal(parseSessionTime(''), null);
   assert.equal(parseSessionTime(null), null);
   assert.equal(parseSessionTime(undefined), null);
+});
+
+test('parseWebpageTimer: MM:SS con punto medio', () => {
+  assert.equal(parseWebpageTimer('32:21 · 20 min target'), 32.35);
+});
+
+test('parseWebpageTimer: MM:SS con guión', () => {
+  assert.equal(parseWebpageTimer('05:12 - 20 min target'), 5.2);
+});
+
+test('parseWebpageTimer: HH:MM:SS con punto medio', () => {
+  assert.equal(parseWebpageTimer('1:12:30 · 20 min target'), 72.5);
+});
+
+test('parseWebpageTimer: texto inválido devuelve null', () => {
+  assert.equal(parseWebpageTimer('32:21 sin target'), null);
+  assert.equal(parseWebpageTimer(''), null);
+  assert.equal(parseWebpageTimer(null), null);
 });

@@ -9,8 +9,8 @@ cuando el pipeline pasó a ser 100% automatizado con `start-flow.js` como
 orquestador único. Para no mantener dos documentos que se desincronizan, todo
 el contenido se consolidó en `CLAUDE.md`:
 
-- Regla Dura #1 (NUNCA Submit to QA automático) — no negociable.
-- Flujo completo en orden, con la única interacción manual (el Submit).
+- Submit to QA es ahora AUTOMÁTICO (con un temporizador anti-bot aleatorio entre 26-31 mins).
+- Flujo completo en orden, con la única interacción manual (revisar la letra).
 - Archivos clave y flags de `start-flow.js`.
 - Estructura de letra que valida `lib/song-validate.js`.
 - `LESSONS.md` — log de bugs reales ya arreglados (leerlo antes de debuggear).

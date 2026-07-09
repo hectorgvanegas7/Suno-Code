@@ -212,6 +212,7 @@ async function findNotesField(page) {
   console.log('Deteniéndose acá. Revisá el screenshot antes de subir el MP3 y hacer Submit to QA manualmente.');
 
   console.log('Dejando la pestaña del Flow abierta para tu revisión manual.');
+  await browser.close().catch(() => {});
   exitAfterDelay(0);
 })().catch((err) => {
   console.error('flow-submit.js falló:', err);

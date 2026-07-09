@@ -14,6 +14,7 @@ token.json
 # Efímeros del pipeline (se pisan en cada corrida)
 state.json
 verify-report.json
+suno-lyrics-cache.json
 title.txt
 chrome_log.txt
 selector-drift-report.md

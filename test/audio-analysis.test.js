@@ -6,7 +6,8 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { pickBestVersion, lastMeaningfulLine, checkNamePacing, detectMergedWordPairs } = require('../lib/audio-analysis');
+const { pickBestVersion, lastMeaningfulLine, checkNamePacing, detectMergedWordPairs, computeMissingNames } = require('../lib/audio-analysis');
+const { applyPhoneticReplacements } = require('../lib/song-file');
 
 function buildReport(overrides = {}) {
   return {
@@ -192,4 +193,47 @@ test('lastMeaningfulLine: trunca líneas muy largas', () => {
   const result = lastMeaningfulLine(longLine, 300);
   assert.equal(result.length, 301); // 300 chars + el "…"
   assert.ok(result.endsWith('…'));
+});
+
+// ─── Regresión 2026-07-08: falsos "nombre ausente" por comparar contra la ────
+// letra CRUDA en vez de la letra con el reemplazo fonético ya aplicado. La
+// migración a Windows movió el reemplazo fonético a un paso posterior
+// (applyPhoneticReplacements en suno-fill.js/verify-audio.js) y dejó
+// `lyricsText` crudo en algunos call-sites — esto reproduce el bug real y
+// confirma el fix de verify-audio.js (aplicar applyPhoneticReplacements ANTES
+// de llamar a analyzeAudio/computeMissingNames).
+function buildJamieLyrics() {
+  return [
+    '[Verse 1]',
+    'Algo algo algo algo',
+    'algo algo algo algo',
+    'algo algo algo algo',
+    'algo algo algo algo',
+    '',
+    '[Chorus 1]',
+    'Jamie llegaste con amor y luz',
+    'segunda linea del coro',
+    'tercera linea del coro',
+    'cuarta linea del coro',
+  ].join('\n');
+}
+const JAMIE_TRANSCRIPTION = 'algo algo algo algo yeimi llegaste con amor y luz segunda linea del coro tercera linea del coro cuarta linea del coro';
+
+test('computeMissingNames: SIN aplicar el reemplazo fonético reintroduce el falso "ausente" (bug 2026-07-08)', () => {
+  const rawLyrics = buildJamieLyrics(); // "Jamie" crudo, como en song.txt si el LLM no siguió la regla estricta
+  const missing = computeMissingNames(['Jamie'], rawLyrics, JAMIE_TRANSCRIPTION, []);
+  assert.deepEqual(missing, ['Jamie']);
+});
+
+test('computeMissingNames: CON el reemplazo fonético aplicado (como hace verify-audio.js) no marca falso "ausente"', () => {
+  const rawLyrics = buildJamieLyrics();
+  const phoneticLyrics = applyPhoneticReplacements(rawLyrics); // "Jamie" -> "Yeimi" vía lib/name-dictionary.json
+  const missing = computeMissingNames(['Jamie'], phoneticLyrics, JAMIE_TRANSCRIPTION, []);
+  assert.deepEqual(missing, []);
+});
+
+test('computeMissingNames: nombre realmente ausente de la transcripción sí se marca', () => {
+  const phoneticLyrics = applyPhoneticReplacements(buildJamieLyrics());
+  const missing = computeMissingNames(['Jamie'], phoneticLyrics, 'una transcripcion que no menciona a nadie por su nombre', []);
+  assert.deepEqual(missing, ['Jamie']);
 });

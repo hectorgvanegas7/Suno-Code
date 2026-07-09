@@ -20,6 +20,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 const { chromium } = require('playwright');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 const { clickByText, isPortUp } = require('./lib/playwright-helpers');
@@ -36,7 +37,8 @@ const isDryRun = args.includes('--dry-run');
 const providerArg = args.find(a => a.startsWith('--provider='));
 const provider = providerArg ? providerArg.split('=')[1] : 'claude';
 
-const USER_DATA_DIR = 'C:\\Users\\hecto\\AppData\\Local\\ChromeAutomationProfile';
+const USER_DATA_DIR = path.join(os.homedir(), process.platform === 'win32' ? 'AppData\\Local\\ChromeAutomationProfile' : 'Library/Application Support/ChromeAutomationProfile');
+const CHROME_PATH_GLOBAL = process.platform === 'win32' ? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' : '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const PROFILE_DIRECTORY = 'Profile 1';
 const TARGET_URL = 'https://cancioneterna.com/artists/flow';
 const SURVEY_PATH = path.join(__dirname, 'survey.txt');
@@ -221,6 +223,7 @@ Suno is singing in Latin American Spanish, so it will mispronounce names that ha
 - If a name STARTS WITH A VOWEL (especially "A"), Suno tends to add a phantom "H"/"J" sound at the start (e.g. "Al" sung like "Jal"/"Hal"). Double the initial vowel to prevent it: "Al" → "Aal" | "Ana" → "Aana" | "Alma" → "Aalma" | "Andrea" → "Aandrea". Apply this before any other respelling rule when the name begins with a vowel.
 - Never use English phonetic rules (like "Dez-ray" or "Pee-air") because Suno is reading in Spanish. Write exactly how you want it pronounced in Spanish syllables.
 - Never spell a name out acrostic-style ("MARIA - M de mi amor, A de...") — it sounds forced and breaks the emotion.
+- **If a "🚨 REGLA ESTRICTA DE PRONUNCIACIÓN" appears later in this message** with an exact spelling for a specific name, that spelling is already calibrated by ear against real Suno output — use it exactly as given instead of applying the general rules above to that particular name.
 - Always flag any respelling you used in the **Advertencias** field of the response so it can be reviewed before sending to Suno.
 
 ### GENERAL RULES
@@ -265,6 +268,44 @@ Suno is singing in Latin American Spanish, so it will mispronounce names that ha
     - Even if the user uses a cliché in the survey, elevate it to a fresh, specific poetic image (e.g. if they say "you are my light", write "you kept the porch lamp on when I was lost"). Find a fresh way to say it every time.
 
 19. **Conversational Flow.** Use natural, warm, conversational language. Avoid overly complex, academic, or rigid words (e.g. "existencia", "diferencias") that sound robotic when sung.
+
+### PROFESSIONAL SONGWRITING CRAFT (ADVANCED)
+
+These go beyond structural correctness — they separate a professional song from a generic one. Apply all of them.
+
+20. **One Central Image (the "conceit").** Pick ONE concrete image or object from the survey (a place, an object, a recurring gesture) and build the ENTIRE song around it — introduce it in Verse 1, develop it in Verse 2, let the Chorus elevate it emotionally, and resolve it in the Outro. Do not scatter 4-5 unrelated images across the song; a professional song feels like it's about one thing seen from different angles, not a list of nice moments.
+
+21. **Circular Ending (callback to Verse 1).** The Outro must callback to the SPECIFIC concrete image or moment from Verse 1 — not just restate the Chorus's sentiment in different words. This is what makes a song feel complete instead of just stopping. Example: if Verse 1 opens on "la cocina a las seis de la mañana", the Outro should return to that kitchen, that hour, changed by everything the song just said.
+
+22. **Specific (Verse) vs. Universal (Chorus) contrast.** Verses live in concrete, personal, small detail (an object, a specific moment, a sensory detail) — that's what makes THIS survey's song different from every other song. Choruses lift to universal, repeatable, anthemic language that anyone could feel — that's what makes it singable and emotionally big. If a verse sounds as generic as the chorus, it has failed; if a chorus is as specific as a verse, it won't be memorable.
+
+23. **Concrete nouns over abstract nouns.** Whenever the survey gives you ANY concrete detail (an object, a place, an activity, a physical gesture), use it instead of abstract nouns like "amor", "vida", "tiempo", "recuerdos". Abstract nouns are only acceptable in the Chorus, where they serve the universal-lift purpose of rule 22 — never as a substitute for a concrete detail you could have used in a Verse.
+
+24. **Natural word order — never invert syntax to force a rhyme.** Spanish has flexible word order, but forcing it for rhyme sounds like a bad translation ("tu amor a mí me dio" instead of "me diste tu amor"). If a rhyme requires unnatural syntax, find a different rhyme or restructure the line — natural spoken order always wins over a forced rhyme.
+
+25. **The Bridge must contain a real pivot, not just another detail.** The Bridge is the one place in the song allowed to shift: either a tense shift (present/past → future, e.g. "cuando ya no esté", "algún día que falte") or a perspective shift (zooming out from the personal detail to the larger truth the whole song has been building toward). A Bridge that's just one more vulnerable anecdote in the same tense/perspective as the Verses is a missed opportunity, not a real Bridge.
+
+26. **The "quotable line" test.** The key line of Chorus 1 (usually the hook, right after the name) should be strong enough to stand alone out of context — something a listener would want as a photo caption or a screenshot to send someone. If the line only makes sense embedded in the song, it's not doing its job as the hook.
+
+27. **One metaphor per line.** Never stack two or more different images in the same line (e.g. "la luz que enciende mi camino de cristal" mixes a light metaphor and a glass/path metaphor). One image, fully developed, per line — layering metaphors reads as amateur and confuses the musical AI's phrasing.
+
+28. **Verb tense as a narrative arc across sections.** Use tense deliberately, not just consistently: Verses in past tense (the memory), Chorus in present tense (the current devotion), Bridge shifting to future (the promise, "cuando ya no esté", "algún día que falte"). This creates a real narrative arc instead of the whole song sitting flat in one tense.
+
+29. **A sensory anchor in every Verse.** Each Verse must include at least one concrete sensory detail (a smell, a sound, a texture, a specific color) tied to a real fact from the survey — not just generic visual description. This is what makes the scene feel lived-in instead of stated.
+
+30. **Chorus 1 / Chorus 2 parallelism, not repetition.** Chorus 2 should mirror Chorus 1's syllable pattern and rhyme scheme (same musical shape) while escalating emotionally or revealing something new — real variation on a theme, not the same idea with swapped words.
+
+31. **Negative space — not every line at maximum intensity.** A professional song breathes: simpler, quieter "setup" lines before the line that hits hardest. If every single line is emotionally maximal, the song reads as overwritten (purple prose) and the real emotional peaks lose their power from lack of contrast.
+
+32. **No explanatory connector words.** Avoid "porque", "por eso", "entonces" and similar literal connectors — a songwriter implies causation by juxtaposing images, not by explaining it like a spoken essay. If a line needs "porque" to make sense, restructure it so the connection is felt, not stated.
+
+33. **Rich rhyme over poor rhyme (rima rica vs. rima pobre).** Avoid rhyming two words from the same grammatical category with the same inflection (e.g. two "-ando" gerunds, or two words with the same plural "-es" ending) — this is "rima pobre" in Spanish poetics and sounds lazy. Prefer rhymes across different grammatical categories (noun/verb, adjective/noun) for a richer, more sophisticated sound.
+
+34. **"Would a real person say this out loud?" filter.** Beyond general conversational flow (rule 19), run every line through a stricter final filter: would someone from the survey's actual register/region say this in real conversation, or does it only exist in flowery written poetry? Cut anything that fails this test, even if it rhymes well.
+
+35. **Consistent metrical anchor position for the hook.** The name or key hook phrase should land in the SAME metrical position across every Chorus (not just "first word") — same syllable count leading into it — so the ear locks onto it on repeat listens instead of it landing in a slightly different spot each time.
+
+36. **Stress lands at line-end.** Prefer words whose natural spoken stress falls on the last syllable of the line (where the melodic/rhyme weight naturally sits), especially at Chorus endings — avoids forcing Suno to sing an unnatural emphasis on an unstressed syllable to make the rhyme land.
 
 ### SUNO STYLE PROMPT — MANDATORY RULE
 
@@ -338,7 +379,21 @@ Respond with EXACTLY this JSON format and nothing else. Do not wrap in markdown 
     "rima_fuerte_evidente": true,
     "adaptacion_poetica_sin_copypaste": true,
     "coros_con_gancho": true,
-    "vocales_abiertas_en_coro": true
+    "vocales_abiertas_en_coro": true,
+    "un_solo_motivo_central": true,
+    "cierre_circular_con_verse_1": true,
+    "contraste_especifico_vs_universal": true,
+    "sin_inversion_poetica_forzada": true,
+    "bridge_con_giro_real": true,
+    "linea_de_gancho_quotable": true,
+    "una_metafora_por_linea": true,
+    "arco_de_tiempo_verbal_por_seccion": true,
+    "ancla_sensorial_en_cada_verso": true,
+    "paralelismo_chorus_1_y_2": true,
+    "espacio_negativo_sin_maxima_intensidad_constante": true,
+    "sin_conectores_explicativos": true,
+    "rima_rica_no_pobre": true,
+    "gancho_en_misma_posicion_metrica": true
   },
   "foneticaAplicada": true,
   "advertencias": "[any phonetic re-spelling used, or other concerns for manual review — write 'Ninguna' if none]"
@@ -577,7 +632,7 @@ process.on('uncaughtException', async (err) => {
     if (!isDryRun) {
       if (!(await isPortUp(9333))) {
         console.log('Lanzando Chrome en puerto de debug 9333...');
-        const chromeBin = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+        const chromeBin = CHROME_PATH_GLOBAL;
         spawn(
           chromeBin,
           [
@@ -600,7 +655,7 @@ process.on('uncaughtException', async (err) => {
         console.log('Chrome ya está abierto en el puerto de debug 9333. Conectando...');
       }
 
-      const browser = await chromium.connectOverCDP('http://localhost:9333');
+      const browser = await chromium.connectOverCDP('http://localhost:9333', { noDefaults: true });
       activeBrowser = browser;
       const contexts = browser.contexts();
       if (contexts.length === 0) {
@@ -676,12 +731,14 @@ process.on('uncaughtException', async (err) => {
     // --- Inyección del Diccionario de Nombres ---
     let dictInjection = '';
     const extractedNames = extractFirstNames(surveyContent);
+    let namesNotInDict = extractedNames;
     if (extractedNames.length > 0) {
       try {
         const dictPath = path.join(__dirname, 'lib', 'name-dictionary.json');
         if (fs.existsSync(dictPath)) {
           const dict = JSON.parse(fs.readFileSync(dictPath, 'utf-8'));
           const matches = [];
+          namesNotInDict = extractedNames.filter((name) => !dict[name.toLowerCase()]);
           for (const name of extractedNames) {
             const lowerName = name.toLowerCase();
             if (dict[lowerName]) {
@@ -730,6 +787,31 @@ process.on('uncaughtException', async (err) => {
     // Validación obligatoria antes de escribir: si la respuesta no tiene título ni
     // secciones, es truncación o chain-of-thought crudo — no guardar como song.txt
     // válido ni seguir hacia suno-fill.
+    // Log de curación del diccionario fonético: cuando el LLM respelleó por su
+    // cuenta (foneticaAplicada=true) un nombre que NO estaba en
+    // lib/name-dictionary.json, dejarlo anotado acá para revisar de oído y
+    // agregarlo a mano más adelante — en vez de depender de que alguien se
+    // acuerde de mirar las Advertencias de cada song.txt. Best-effort, nunca
+    // bloquea el pipeline. Se salta en --dry-run (mock, no es un caso real).
+    if (!isDryRun && parsedJson?.foneticaAplicada === true && namesNotInDict.length > 0) {
+      try {
+        const logsDir = path.join(__dirname, 'logs');
+        fs.mkdirSync(logsDir, { recursive: true });
+        fs.appendFileSync(
+          path.join(logsDir, 'phonetic-candidates.jsonl'),
+          JSON.stringify({
+            ts: new Date().toISOString(),
+            songId,
+            candidateNames: namesNotInDict,
+            advertencias: parsedJson.advertencias || null,
+          }) + '\n',
+          'utf-8'
+        );
+      } catch {
+        // best-effort
+      }
+    }
+
     const writeCheck = validateContentForWrite(parsedJson);
     if (!writeCheck.ok) {
       console.error('\n❌ VALIDACIÓN PRE-ESCRITURA FALLÓ — respuesta sin estructura mínima:');

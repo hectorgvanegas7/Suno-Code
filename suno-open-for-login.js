@@ -9,8 +9,10 @@
 // See LESSONS.md: "CDP lifecycle pattern".
 const { spawn } = require('child_process');
 
-const CHROME_PATH = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
-const USER_DATA_DIR = 'C:\\Users\\hecto\\AppData\\Local\\ChromeAutomationProfile';
+const os = require('os');
+const path = require('path');
+const CHROME_PATH = process.platform === 'win32' ? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' : '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+const USER_DATA_DIR = path.join(os.homedir(), process.platform === 'win32' ? 'AppData\\Local\\ChromeAutomationProfile' : 'Library/Application Support/ChromeAutomationProfile');
 const PROFILE_DIRECTORY = 'Profile 1';
 const DEBUG_PORT = 9333;
 

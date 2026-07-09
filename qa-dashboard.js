@@ -387,8 +387,13 @@ app.get('/', (req, res) => {
   res.send(html);
 });
 
-app.listen(PORT, () => {
-  console.log(`QA Dashboard corriendo en http://localhost:${PORT}`);
+// Bindeado explícitamente a 127.0.0.1: sin esto, Express escucha en todas las
+// interfaces (0.0.0.0) pese a que el log de abajo dice "localhost" — este
+// dashboard muestra encuestas/letras/audio de clientes reales, así que en
+// una wifi compartida cualquier otro dispositivo en la red podría acceder
+// (bug real de privacidad, detectado 2026-07-08).
+app.listen(PORT, '127.0.0.1', () => {
+  console.log(`QA Dashboard corriendo en http://localhost:${PORT} (solo esta máquina)`);
   // Auto-open browser
   require('child_process').exec(`start http://localhost:${PORT}`);
 });

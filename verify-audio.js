@@ -29,8 +29,11 @@ const fs = require('fs');
 const path = require('path');
 const { findSunoMp3s, SUNO_DIR } = require('./lib/audio-match');
 const { extractFirstNames } = require('./lib/text-helpers');
-const { analyzeAudio, prepareVocals, cleanupVocalsTmp, transcribeFiles, runClapScoreWithVocalIsolation, runNisqaScore, resolveVocalOrMixPaths, stripStructuralTags, printReport, pickBestVersion, parseLyricsFromSongFile, parseTituloFromSongFile, getDurationAsync, formatDuration, formatElapsed, SONG_PATH } = require('./lib/audio-analysis');
+const { applyPhoneticReplacements, readSunoLyricsCache, parseSongFile } = require('./lib/song-file');
+const { analyzeAudio, prepareVocals, cleanupVocalsTmp, transcribeFiles, runClapScoreWithVocalIsolation, runNisqaScore, runF0GenderCheck, resolveVocalOrMixPaths, stripStructuralTags, printReport, pickBestVersion, parseLyricsFromSongFile, parseTituloFromSongFile, getDurationAsync, formatDuration, formatElapsed, SONG_PATH } = require('./lib/audio-analysis');
 const { notify } = require('./lib/ntfy');
+
+const SUNO_LYRICS_CACHE_PATH = path.join(__dirname, 'suno-lyrics-cache.json');
 
 function parseArgs(argv) {
   const args = {};
@@ -50,11 +53,23 @@ function parseArgs(argv) {
   // Leer título y letra de song.txt (o arg manual)
   let titulo = args.title || null;
   let lyricsText = '';
+  let expectedGender = null;
 
   if (fs.existsSync(SONG_PATH)) {
     const content = fs.readFileSync(SONG_PATH, 'utf-8');
     if (!titulo) titulo = parseTituloFromSongFile(content);
-    lyricsText = parseLyricsFromSongFile(content) || '';
+    const voz = parseSongFile(content).voz;
+    if (voz) expectedGender = /femenin/i.test(voz) ? 'Femenina' : /masculin/i.test(voz) ? 'Masculina' : null;
+    // Preferir el cache que escribió suno-fill.js con la letra YA fonetizada
+    // (exactamente lo que se tipeó en Suno) — fuente única, ver
+    // lib/song-file.js. Si no hay cache (o es de otra canción/song.txt
+    // cambió desde entonces), recalcular acá con el mismo helper: sin esto,
+    // la comparación contra la transcripción usa la ortografía cruda de la
+    // encuesta mientras el audio real canta la variante fonética (dict o
+    // LLM), reintroduciendo falsos "nombre ausente" (ver LESSONS.md,
+    // auditoría 2026-07-03 y regresión 2026-07-08).
+    const cachedLyrics = readSunoLyricsCache(SUNO_LYRICS_CACHE_PATH, content);
+    lyricsText = cachedLyrics !== null ? cachedLyrics : applyPhoneticReplacements(parseLyricsFromSongFile(content) || '');
   }
 
   if (!titulo) {
@@ -123,6 +138,7 @@ function parseArgs(argv) {
     let batch;
     let clapBatch;
     let nisqaBatch;
+    let f0Batch;
     try {
       const cleanLyrics = stripStructuralTags(lyricsText);
       batch = transcribeFiles([prepA.targetPath, prepB.targetPath], {
@@ -153,6 +169,11 @@ function parseArgs(argv) {
         [prepA.demucs.used ? prepA.targetPath : null, prepB.demucs.used ? prepB.targetPath : null],
       );
       nisqaBatch = runNisqaScore(nisqaPaths, { device: useDemucs ? 'cuda' : null });
+
+      // F0 — género de voz (CPU, informativo). Sobre la voz aislada si demucs
+      // corrió, mismo criterio de paths que NISQA. Igual que CLAP/NISQA, corre
+      // ANTES del finally por el mismo motivo (cleanupVocalsTmp borra el .wav).
+      f0Batch = runF0GenderCheck(nisqaPaths);
     } finally {
       cleanupVocalsTmp(prepA);
       cleanupVocalsTmp(prepB);
@@ -169,6 +190,8 @@ function parseArgs(argv) {
       transcriptionOutcome: batch.results[0],
       clapOutcome: clapBatch.results[0],
       nisqaOutcome: nisqaBatch.results[0],
+      expectedGender,
+      f0Outcome: f0Batch.results[0],
     });
     reportB = await analyzeAudio(versionB.path, {
       label: 'Versión B',
@@ -181,6 +204,8 @@ function parseArgs(argv) {
       transcriptionOutcome: batch.results[1],
       clapOutcome: clapBatch.results[1],
       nisqaOutcome: nisqaBatch.results[1],
+      expectedGender,
+      f0Outcome: f0Batch.results[1],
     });
   } else {
     console.log('⏳ Analizando Versión A... (puede tardar 1-3 minutos si Whisper necesita transcribir)');
@@ -191,6 +216,7 @@ function parseArgs(argv) {
       useDemucs: !!args.demucs,
       duration: durationA,
       firstNames,
+      expectedGender,
     });
   }
 

@@ -95,7 +95,7 @@ async function main() {
   const reportText = report.join('\n');
   fs.writeFileSync('selector-drift-report.md', reportText);
   console.log('\nReporte guardado en selector-drift-report.md');
-  await browser.close();
+  await browser.close().catch(() => {});
 }
 
 main().catch(console.error);

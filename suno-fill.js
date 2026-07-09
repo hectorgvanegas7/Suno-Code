@@ -3,10 +3,11 @@ const fs = require('fs');
 const path = require('path');
 const { safeClick, setSliderValue, expandIfCollapsed, withReloadRetry, connectToSunoTab, pauseForHumanInteraction, isPortUp } = require('./lib/playwright-helpers');
 const { LYRICS_TEXTAREA, TITLE_INPUT, STYLE_TEXTAREA, MORE_OPTIONS_TOGGLE_TEXT, WEIRDNESS_SLIDER_LABEL, STYLE_INFLUENCE_SLIDER_LABEL, EXPAND_LYRICS_BOX_LABEL } = require('./lib/suno-selectors');
-const { parseSongFile } = require('./lib/song-file');
+const { parseSongFile, applyPhoneticReplacements, writeSunoLyricsCache } = require('./lib/song-file');
 const state = require('./lib/pipeline-state');
 
 const SONG_PATH = path.join(__dirname, 'song.txt');
+const SUNO_LYRICS_CACHE_PATH = path.join(__dirname, 'suno-lyrics-cache.json');
 
 // Fills every field of Suno's Advanced create form. All text-based selectors
 // live in here so that withReloadRetry can re-run this entire function from
@@ -105,7 +106,12 @@ async function fillSunoForm(page, titulo, voz, estilo, lyrics, genderTarget) {
   if (!hashCheck.ok) {
     console.warn(`⚠️  ${hashCheck.reason}`);
   }
-  const { titulo, voz, estilo, lyrics } = parseSongFile(songContent);
+  let { titulo, voz, estilo, lyrics } = parseSongFile(songContent);
+  lyrics = applyPhoneticReplacements(lyrics);
+  // Cachea la letra YA fonetizada (lo que efectivamente se va a tipear en
+  // Suno) para que verify-audio.js compare contra esto en vez de recalcularlo
+  // por su cuenta — ver lib/song-file.js.
+  writeSunoLyricsCache(SUNO_LYRICS_CACHE_PATH, songContent, lyrics);
   if (!titulo || !voz || !estilo || !lyrics) {
     const faltan = [
       !titulo && '**Título:**',

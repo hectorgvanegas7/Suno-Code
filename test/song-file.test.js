@@ -6,7 +6,10 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { parseSongFile, buildFlowNotes, buildRedoAwareNotes } = require('../lib/song-file');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { parseSongFile, buildFlowNotes, buildRedoAwareNotes, applyPhoneticReplacements, writeSunoLyricsCache, readSunoLyricsCache } = require('../lib/song-file');
 
 function buildSongTxt({ withNotes = true, withDashSeparator = true } = {}) {
   const header = [
@@ -95,4 +98,48 @@ test('buildRedoAwareNotes: con REDO agrega "Redo Fix, corregido" DEBAJO de la no
   assert.equal(result, '7.03.2026. Hector. PS0180. Letra + Suno.\n\nRedo Fix, corregido');
   assert.match(result, /^7\.03\.2026\. Hector\. PS0180\. Letra \+ Suno\./);
   assert.match(result, /Redo Fix, corregido$/);
+});
+
+test('applyPhoneticReplacements: reemplaza nombres usando el diccionario manteniendo capitalización', () => {
+  const input = 'Hola Maryuri y brayan, esto es para Geovanny.';
+  // Maryuri -> Mariúri (Mantiene mayúscula inicial)
+  // brayan -> bráian (En minúscula porque empezó en minúscula)
+  // Geovanny -> Yeováni (Mantiene mayúscula inicial)
+  const result = applyPhoneticReplacements(input);
+  assert.equal(result, 'Hola Mariúri y bráian, esto es para Yeováni.');
+});
+
+test('applyPhoneticReplacements: respeta saltos de línea y no altera palabras incompletas', () => {
+  const input = 'Maryuri cantaba\nmientras brayando estaba.';
+  const result = applyPhoneticReplacements(input);
+  // brayando no debería ser reemplazado porque no es la palabra completa
+  assert.equal(result, 'Mariúri cantaba\nmientras brayando estaba.');
+});
+
+test('writeSunoLyricsCache/readSunoLyricsCache: round-trip devuelve la letra cacheada si song.txt no cambió', () => {
+  const cachePath = path.join(os.tmpdir(), `suno-lyrics-cache-test-${process.pid}.json`);
+  try {
+    const songContent = buildSongTxt();
+    writeSunoLyricsCache(cachePath, songContent, 'Hola Mariúri, letra ya fonetizada.');
+    const cached = readSunoLyricsCache(cachePath, songContent);
+    assert.equal(cached, 'Hola Mariúri, letra ya fonetizada.');
+  } finally {
+    fs.rmSync(cachePath, { force: true });
+  }
+});
+
+test('readSunoLyricsCache: devuelve null si song.txt cambió desde que se escribió el cache', () => {
+  const cachePath = path.join(os.tmpdir(), `suno-lyrics-cache-test-stale-${process.pid}.json`);
+  try {
+    writeSunoLyricsCache(cachePath, buildSongTxt(), 'letra de la canción vieja');
+    const cached = readSunoLyricsCache(cachePath, buildSongTxt({ withNotes: false })); // contenido distinto
+    assert.equal(cached, null);
+  } finally {
+    fs.rmSync(cachePath, { force: true });
+  }
+});
+
+test('readSunoLyricsCache: devuelve null si el archivo no existe', () => {
+  const cachePath = path.join(os.tmpdir(), `suno-lyrics-cache-test-missing-${process.pid}.json`);
+  assert.equal(readSunoLyricsCache(cachePath, buildSongTxt()), null);
 });
