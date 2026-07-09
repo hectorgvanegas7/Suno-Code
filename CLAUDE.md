@@ -296,10 +296,39 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
     flujo normal es el Submit to QA. No afecta la Regla Dura #1 (el Submit to
     QA no existe en el código, con o sin flag).
   - `node start-flow.js --loop` = canciones en continuo: corre el flujo completo,
-    espera el Submit manual, cierra, y busca la siguiente (vigía si la cola está
-    vacía). Un ciclo fallido avisa por ntfy y el loop sigue. En --loop el
-    checkpoint pre-Create se saltea siempre (aunque haya --pause). La única
-    interacción por canción sigue siendo el Submit to QA.
+    Auto-Submit se dispara solo (26-31 min), cierra, y busca la siguiente (vigía
+    si la cola está vacía). Un ciclo fallido avisa por ntfy y el loop sigue. En
+    --loop el checkpoint pre-Create se saltea siempre (aunque haya --pause).
+  - **Bulletproofing para dejarlo corriendo toda la noche** (2026-07-09):
+    - `--loop` activa automáticamente un timeout de interacción humana de 20 min
+      (`CANCIONETERNA_HUMAN_TIMEOUT_MS`, propagado por entorno a los scripts
+      hijo) sobre `pauseForHumanInteraction`/`confirmToContinue`
+      (`lib/playwright-helpers.js`): sin esto, un selector roto o créditos
+      agotados trababa la cola ENTERA hasta que alguien apretara ENTER — ahora
+      esa canción puntual se abandona (avisa urgente por ntfy) y el loop sigue
+      con la próxima. Override manual: `--human-timeout=<minutos>` (0 =
+      desactivar, volver a esperar para siempre incluso en --loop).
+    - `lib/heartbeat.js` — `logs/heartbeat.json`, actualizado en cada tick de
+      los loops de poll y de espera del Submit. Independiente de `state.json`
+      (que solo cambia cuando avanza una canción — con la cola vacía puede
+      pasar horas sin tocarse aunque todo esté sano).
+    - `watchdog.js` — supervisor EXTERNO, corre en su propio proceso/terminal
+      (nunca comparte stdin con la terminal de start-flow.js, así que no le
+      importa si esa terminal está bloqueada). `node watchdog.js` chequea cada
+      2 min si `logs/heartbeat.json` está viejo (>5 min); si el PID sigue vivo
+      lo mata (`taskkill /T /F` en Windows) y relanza
+      `node start-flow.js --loop --resume`. Circuit breaker: 3 reinicios en 30
+      min → deja de reintentar y avisa urgente en vez de crash-loopear toda la
+      noche gastando créditos. `node watchdog.js --digest` manda un resumen
+      por ntfy (Auto-Submits, reinicios, última canción, espacio en disco) —
+      pensado para una Tarea Programada a hora fija (ej. 7am).
+      `logs/watchdog-events.jsonl` registra cada reinicio para revisar de
+      mañana. No mata ni relanza Chrome — sigue vivo en el puerto 9333
+      independiente de Node, `--resume` se reconecta a esa misma sesión.
+    - `lib/preflight.js`: `checkDiskSpace()` (fs.statfsSync, sin dependencia
+      nueva) — corre en el preflight inicial Y cada 30 min dentro del loop de
+      poll, para agarrar disco lleno (Whisper/demucs/MP3s/logs) DURANTE la
+      noche, no solo al arrancar.
   - Reintento automático del Create INICIAL (`MAX_CREATE_RETRIES`, fijo en 2,
     no configurable por flag): si `createAndDownload()` falla del todo (0 MP3
     descargados — ver LESSONS.md), antes el pipeline se quedaba sin subir nada

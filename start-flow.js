@@ -109,7 +109,7 @@ const path = require('path');
 const { chromium } = require('playwright');
 const { isLoggedIn, clickByText, isPortUp, confirmToContinue } = require('./lib/playwright-helpers');
 const { enterFlowAndEnsureAssignment, FLOW_URL } = require('./lib/flow-helpers');
-const { runPreflight } = require('./lib/preflight');
+const { runPreflight, checkDiskSpace } = require('./lib/preflight');
 const { notify } = require('./lib/ntfy');
 const state = require('./lib/pipeline-state');
 const { LYRICS_TEXTAREA } = require('./lib/suno-selectors');
@@ -117,6 +117,7 @@ const { rotateOldRunFiles } = require('./lib/hygiene');
 const { parseSessionTime, parseWebpageTimer } = require('./lib/session-time');
 const { normalize } = require('./lib/audio-match');
 const { postImageToGallery, flushPendingGalleryUploads } = require('./lib/gallery-upload');
+const { writeHeartbeat } = require('./lib/heartbeat');
 
 const DEBUG_PORT = 9333;   // Chrome de Suno (ya corriendo para suno-fill y flow-submit)
 
@@ -125,6 +126,28 @@ const DEBUG_PORT = 9333;   // Chrome de Suno (ya corriendo para suno-fill y flow
 // automático (timer anti-bot 26-31 min). Se activan solo con --pause explícito.
 // (--no-pause se acepta por compatibilidad, pero ya es el comportamiento default.)
 const PAUSE_MODE = process.argv.includes('--pause') && !process.argv.includes('--no-pause');
+
+// Bulletproofing para --loop (dejar el pipeline corriendo toda la noche sin
+// nadie mirando): sin esto, cualquier pauseForHumanInteraction/confirmToContinue
+// (selector roto, créditos agotados, etc.) espera ENTER para SIEMPRE — una
+// sola canción rota traba la cola entera hasta la mañana. Se propaga por
+// entorno (heredado automáticamente por los child process que spawnea
+// runScript) para no tener que enchufar un flag manual en cada script hijo.
+// --human-timeout=<minutos> lo overridea (0 = desactivar, volver a esperar
+// para siempre incluso en --loop); si ya viene seteado en el entorno
+// (ej. un watchdog externo lo fija) no se pisa.
+const DEFAULT_LOOP_HUMAN_TIMEOUT_MIN = 20;
+if (!process.env.CANCIONETERNA_HUMAN_TIMEOUT_MS) {
+  const humanTimeoutArg = process.argv.find((a) => a.startsWith('--human-timeout='));
+  const humanTimeoutMin = humanTimeoutArg
+    ? parseFloat(humanTimeoutArg.split('=')[1])
+    : (process.argv.includes('--loop') ? DEFAULT_LOOP_HUMAN_TIMEOUT_MIN : 0);
+  if (humanTimeoutMin > 0) {
+    process.env.CANCIONETERNA_HUMAN_TIMEOUT_MS = String(Math.round(humanTimeoutMin * 60000));
+    console.log(`⏱️  Timeout de interacción humana activo: ${humanTimeoutMin} min (una canción rota no traba la cola en --loop).`);
+  }
+}
+
 async function checkpoint(summary, nextAction) {
   if (!PAUSE_MODE) {
     console.log(`\n▶️  ${nextAction} (sin pausa — corré con --pause si querés confirmar con ENTER acá)\n`);
@@ -1512,6 +1535,7 @@ async function runFlow({ resume = false } = {}) {
     while (true) {
       let elapsedMin = (Date.now() - startedTime) / 60000;
       const now = Date.now();
+      writeHeartbeat({ mode: 'flow', titulo: currentTitulo, elapsedMin: Math.round(elapsedMin * 10) / 10 });
 
       // Intentar sincronizar con el timer de la página del Flow
       if (workPage) {
@@ -1858,7 +1882,20 @@ async function runPoll(rawArgs) {
   }
 
   // Bucle de polling.
+  let lastDiskCheck = 0;
+  const DISK_CHECK_INTERVAL_MS = 30 * 60 * 1000; // cada 30 min, no en cada tick de 10-15s
   while (true) {
+    writeHeartbeat({ mode: 'poll', intervalLabel });
+
+    if (Date.now() - lastDiskCheck > DISK_CHECK_INTERVAL_MS) {
+      lastDiskCheck = Date.now();
+      const diskProblem = checkDiskSpace();
+      if (diskProblem) {
+        log(`⚠️ ${diskProblem}`);
+        await notify(`⚠️ ${diskProblem}`, { title: 'Poco espacio en disco', priority: 'high', tags: 'floppy_disk' }).catch(() => {});
+      }
+    }
+
     let pollResult = { found: false };
     try {
       pollResult = await pollOnce(log);
