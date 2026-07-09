@@ -10,7 +10,9 @@
 ## ════════════════════════════════════════════════════════════════════
 
 Pipeline para crear canciones cristianas personalizadas (negocio tipo SongFinch).
-Esta carpeta es un repo git (sin remoto). Hacé commit antes de cambios grandes.
+Esta carpeta es un repo git con remoto en GitHub (`origin/main`,
+hectorgvanegas7/Suno-Code) — se usa para sincronizar entre la PC de Windows y
+la Mac. Hacé commit (y push) antes de cambios grandes.
 
 ## Flujo completo (en orden)
 
@@ -32,7 +34,8 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
    de QC, lee el feedback + letra actual y pide el fix preciso + una pasada de
    mejora a 9-10/10, en vez de generar desde cero. NO escribe en los campos del Flow.
 
-2. **(manual)** Gabo revisa/edita `song.txt`.
+2. **(opcional, no bloquea)** `song.txt` se abre en Notepad para que Gabo lo revise/edite
+   si quiere — el proceso NO espera a que se cierre, sigue de largo solo.
 
 3. **Suno** — `suno-fill.js` llena el formulario (título/letra/estilo/sliders).
    Si falla un selector de la UI, cae a un fallback interactivo (`pauseForHumanInteraction`
@@ -77,16 +80,21 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
    El QA Dashboard (`qa-dashboard.js`) ya NO forma parte de la orquestación —
    quedó como herramienta standalone opcional (`node qa-dashboard.js`).
 
-7. **(manual)** Gabo hace Submit to QA en el Flow. Es la ÚNICA interacción
-   manual del flujo normal.
+7. **(automático)** Submit to QA se dispara solo entre el minuto 26 y 31
+   (timer aleatorio anti-bot — la vieja Regla Dura #1 quedó derogada, ver
+   sección al inicio de este archivo). Gabo puede clickearlo a mano antes si
+   quiere, pero no hace falta. Único caso especial: si `state.json` marca
+   `isRedo`, corre exactamente igual (pedido explícito de Hector 2026-07-09 —
+   confía en la corrección automática de run.js según el feedback de QC).
 
 8. **(automático)** Mientras tanto `start-flow.js` queda esperando SIN límite de
-   tiempo (pedido de Gabo 2026-07-03 — corta solo al detectar el Submit o si
-   Chrome se cierra; fallback: `--done`) y detecta el Submit solo. Muestra un
+   tiempo (corta solo al detectar el Submit —propio o automático— o si Chrome
+   se cierra; fallback: `--done`) y detecta el Submit solo. Muestra un
    **candado visual** en la pestaña de trabajo (badge rojo "🔒 AÚN NO" + botón
    Submit atenuado hasta el minuto 25, verde después — cosmético y fail-open:
-   nunca clickea nada, un F5 lo limpia, y se restaura al salir del loop). Al arrancar la espera hace un **pre-chequeo del botón "Submit to QA"**
-   (solo verificación, jamás click — Regla Dura #1): si no está visible avisa por
+   nunca clickea nada por sí solo, un F5 lo limpia, y se restaura al salir del
+   loop). Al arrancar la espera hace un **pre-chequeo del botón "Submit to QA"**
+   (solo verificación): si no está visible avisa por
    consola + ntfy para descubrir un cambio de UI temprano. Mientras espera muestra
    un **countdown en vivo por segundo** en la terminal (con `\r`, no infla el
    run-log; el registro en disco sigue siendo la línea [Timer] de cada 30s), hace
@@ -111,8 +119,11 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
    queda como fallback si la sesión se cortó antes o venció el timeout (avisa
    por ntfy en ese caso).
 
-9. **(manual)** Gabo llena Remarks + pega Flow Screenshot. Si el tiempo no se pudo
-   auto-detectar (aviso en consola), también llena Total Time y Time a mano.
+9. **(automático)** Flow Screenshot ya queda pegado (imagen flotante vía
+   `postImageToGallery`, ver Paso 8b) y Remarks queda vacío salvo REDO
+   ("Redo Fix" automático) — confirmado 2026-07-09, no requiere intervención
+   manual. Único fallback manual real que queda: si la extracción de tiempo
+   falló (aviso en consola), Total Time y Time se llenan a mano.
 
 ## Reglas importantes
 
@@ -122,10 +133,11 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
   reales (ej. el bloque "Advertencias" colándose dentro de la letra). Nunca saltearla.
 - **Checkpoints de verificación humana (opt-in)**: con `--pause`, start-flow.js
   pausa con ENTER (beep + ntfy) ANTES del Create de Suno y ANTES de subir el MP3
-  al Flow. Por default NO pausan (la única interacción manual es el Submit).
+  al Flow. Por default NO pausan — el flujo entero, incluido el Submit, corre
+  de un tirón sin ninguna interacción manual.
   `confirmToContinue` en `lib/playwright-helpers.js` (checkpoint amistoso)
   convive con `pauseForHumanInteraction` (fallback de emergencia) — no
-  confundirlos. El Submit manual no se toca jamás.
+  confundirlos.
   Además, suno-fill.js ahora DETIENE (pausa interactiva) si la relectura del
   formulario no coincide con song.txt (secciones faltantes o final truncado),
   en vez de solo loguearlo y dejar que el Create gaste créditos en una letra rota.
@@ -270,11 +282,12 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
   - `node start-flow.js` = flujo completo (genera, llena Suno, Create, descarga MP3,
     corre verify-audio.js con `--demucs` en paralelo con el llenado del Flow, muestra
     la recomendación, sube automáticamente la versión recomendada (B por defecto si
-    no hay reporte confiable) y queda esperando hasta 30 min desde la asignación
-    a detectar el Submit to QA manual — pestaña dedicada en background, título
-    verificado contra state.json, timer en consola + avisos ntfy a los 25 y 30
-    min — para cerrar solo (Sheets + Drive). Fallback:
-    `start-flow.js --done` si la sesión se cortó antes o venció el timeout.
+    no hay reporte confiable), dispara el Submit to QA solo entre el min 26 y 31
+    (timer anti-bot), y queda esperando SIN límite de tiempo a detectarlo —
+    pestaña dedicada en background, título verificado contra state.json — para
+    cerrar solo (Sheets + Drive, incluido el Flow Screenshot vía
+    `postImageToGallery`). Fallback: `start-flow.js --done` si la sesión se
+    cortó antes.
   - `node start-flow.js --no-auto-create` = igual pero sin Create/descarga automáticos.
   - `node start-flow.js --no-auto-verify` = igual pero sin correr verify-audio.js
     (sin verify-report.json no hay recomendación ni auto-upload — todo queda manual).
@@ -292,9 +305,8 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
   - `node start-flow.js --pause` = activa los 2 checkpoints de verificación
     humana (ENTER antes del Create de Suno y antes de subir el MP3 al Flow):
     pausan, hacen beep, avisan por ntfy y esperan ENTER. Por DEFAULT están
-    DESACTIVADOS (decisión de Gabo 2026-07-03): la única interacción manual del
-    flujo normal es el Submit to QA. No afecta la Regla Dura #1 (el Submit to
-    QA no existe en el código, con o sin flag).
+    DESACTIVADOS — el flujo normal no tiene ninguna interacción manual, ni
+    siquiera el Submit (ver Auto-Submit más abajo).
   - `node start-flow.js --loop` = canciones en continuo: corre el flujo completo,
     Auto-Submit se dispara solo (26-31 min), cierra, y busca la siguiente (vigía
     si la cola está vacía). Un ciclo fallido avisa por ntfy y el loop sigue. En
