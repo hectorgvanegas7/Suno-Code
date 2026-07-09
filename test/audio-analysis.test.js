@@ -253,18 +253,24 @@ test('countVowelsEs: cuenta vocales españolas incluyendo tildes', () => {
   assert.equal(countVowelsEs(''), 1); // mínimo 1, nunca 0
 });
 
-test('detectTruncatedWords: palabra corta + probability baja se marca como candidata', async () => {
+test('detectTruncatedWords: palabra corta + probability baja se marca (tooShort confirma)', async () => {
   const segments = [buildSegment([
     { word: 'Frank', start: 10.0, end: 10.05, probability: 0.3 }, // 0.05s para 1 vocal (esperado ~0.09s) + prob baja
   ])];
   const result = await detectTruncatedWords(FAKE_MP3_PATH, segments);
   assert.equal(result.length, 1);
   assert.equal(result[0].word, 'Frank');
+  assert.equal(result[0].tooShort, true);
   assert.equal(result[0].clipPath, null); // ffmpeg no disponible sobre un archivo inexistente
   assert.equal(result[0].volumeDropDb, null);
+  assert.equal(result[0].volumeDropConfirmed, false);
 });
 
-test('detectTruncatedWords: palabra con duración normal NO se marca aunque tenga probability baja', async () => {
+test('detectTruncatedWords: probability baja + duración normal SÍ es candidata (rediseño 2026-07-09), pero sin confirmación de volumen (ffmpeg no disponible) no se reporta', async () => {
+  // El caso real "Fran-" en vez de "Frank" conserva su vocal cantada larga —
+  // la duración casi no cambia. Por eso probability baja sola alcanza para
+  // MEDIR la palabra; para reportarla hace falta que la confirme la duración
+  // corta O la caída de volumen (acá ffmpeg no corre → sin confirmación → []).
   const segments = [buildSegment([
     { word: 'Frank', start: 10.0, end: 10.5, probability: 0.3 }, // 0.5s, de sobra para 1 vocal
   ])];

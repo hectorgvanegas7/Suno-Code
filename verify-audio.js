@@ -170,10 +170,29 @@ function parseArgs(argv) {
       );
       nisqaBatch = runNisqaScore(nisqaPaths, { device: useDemucs ? 'cuda' : null });
 
-      // F0 — género de voz (CPU, informativo). Sobre la voz aislada si demucs
-      // corrió, mismo criterio de paths que NISQA. Igual que CLAP/NISQA, corre
-      // ANTES del finally por el mismo motivo (cleanupVocalsTmp borra el .wav).
-      f0Batch = runF0GenderCheck(nisqaPaths);
+      // F0 — género de voz (CPU, informativo). SOLO sobre la voz aislada por
+      // demucs: sin aislar, pyin sobre la mezcla la dominan bajo/instrumentos
+      // y el "género detectado" es ruido con apariencia de dato (auditoría
+      // 2026-07-09). Igual que CLAP/NISQA, corre ANTES del finally
+      // (cleanupVocalsTmp borra el .wav de voz).
+      const isolatedPaths = [prepA.demucs.used ? prepA.targetPath : null, prepB.demucs.used ? prepB.targetPath : null];
+      const toRunF0 = isolatedPaths.filter(Boolean);
+      const f0NoVocalsError = 'sin voz aislada (demucs) — F0 sobre el mix completo no es confiable, no se corre';
+      if (toRunF0.length > 0) {
+        const ranF0 = runF0GenderCheck(toRunF0);
+        let ranIdx = 0;
+        f0Batch = {
+          results: isolatedPaths.map((p) => p
+            ? ranF0.results[ranIdx++]
+            : { medianF0Hz: null, voicedRatio: null, detectedGender: null, error: f0NoVocalsError }),
+          f0Ms: ranF0.f0Ms,
+        };
+      } else {
+        f0Batch = {
+          results: isolatedPaths.map(() => ({ medianF0Hz: null, voicedRatio: null, detectedGender: null, error: f0NoVocalsError })),
+          f0Ms: null,
+        };
+      }
     } finally {
       cleanupVocalsTmp(prepA);
       cleanupVocalsTmp(prepB);
@@ -246,6 +265,13 @@ function parseArgs(argv) {
         pacingIssuesCount: reportA.pacingIssues.length,
         clap: reportA.clap,
         nisqa: reportA.nisqa,
+        // Señales informativas nuevas — también van al JSON: antes solo
+        // existían en la consola y el reporte persistido las omitía, así que
+        // eran invisibles para start-flow y para revisión posterior
+        // (auditoría 2026-07-09).
+        loudness: reportA.loudness ?? null,
+        f0Gender: reportA.f0Gender ?? null,
+        truncatedWords: reportA.truncatedWords ?? [],
         summary: reportA.summary,
       },
       reportB: reportB ? {
@@ -264,6 +290,9 @@ function parseArgs(argv) {
         pacingIssuesCount: reportB.pacingIssues.length,
         clap: reportB.clap,
         nisqa: reportB.nisqa,
+        loudness: reportB.loudness ?? null,
+        f0Gender: reportB.f0Gender ?? null,
+        truncatedWords: reportB.truncatedWords ?? [],
         summary: reportB.summary,
       } : null,
       timestamp: new Date().toISOString(),
