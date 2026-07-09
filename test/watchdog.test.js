@@ -1,13 +1,14 @@
 // test/watchdog.test.js — Suite de regresión local para la lógica pura de
-// watchdog.js (recentTimestamps, isPidAlive). checkOnce/sendDigest tocan
-// disco/red/procesos reales y no se testean acá (mismo criterio que
-// verify-audio.js/qa-dashboard.js — scripts de entrada, no lib/).
-// 100% offline. Corré con: npm test
+// watchdog.js: recentTimestamps, isPidAlive, decideAction (la decisión de
+// matar/relanzar/frenar, extraída de checkOnce para poder testearla — antes
+// checkOnce no tenía NINGÚN test) y shouldSendDigest (el gating del resumen
+// matutino). checkOnce/sendDigest completos tocan disco/red/procesos reales
+// y no se testean acá. 100% offline. Corré con: npm test
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
-const { recentTimestamps, isPidAlive, isWatchdogRunning, WATCHDOG_PID_PATH } = require('../watchdog');
+const { recentTimestamps, isPidAlive, isWatchdogRunning, decideAction, shouldSendDigest, looksLikeNodeProcess, WATCHDOG_PID_PATH } = require('../watchdog');
 
 test('recentTimestamps: filtra solo los timestamps dentro de la ventana', () => {
   const now = Date.now();
@@ -75,4 +76,91 @@ test('isWatchdogRunning: false si no existe logs/watchdog.pid', () => {
   } finally {
     if (original !== null) fs.writeFileSync(WATCHDOG_PID_PATH, original, 'utf-8');
   }
+});
+
+// ─── decideAction: la decisión matar/relanzar/frenar, ahora testeable ────────
+
+const STALE = 5 * 60 * 1000;
+
+test('decideAction: sin heartbeat → no-heartbeat (nunca actúa a ciegas)', () => {
+  assert.equal(decideAction({ heartbeat: null, nowMs: Date.now(), recentRestartCount: 0 }), 'no-heartbeat');
+});
+
+test('decideAction: heartbeat fresco → healthy, sin importar cuántos reinicios recientes haya', () => {
+  const now = Date.now();
+  const heartbeat = { ts: new Date(now - 60 * 1000).toISOString(), pid: 1234 };
+  assert.equal(decideAction({ heartbeat, nowMs: now, recentRestartCount: 0 }), 'healthy');
+  assert.equal(decideAction({ heartbeat, nowMs: now, recentRestartCount: 99 }), 'healthy');
+});
+
+test('decideAction: heartbeat viejo con pocos reinicios → restart', () => {
+  const now = Date.now();
+  const heartbeat = { ts: new Date(now - STALE - 60 * 1000).toISOString(), pid: 1234 };
+  assert.equal(decideAction({ heartbeat, nowMs: now, recentRestartCount: 0 }), 'restart');
+  assert.equal(decideAction({ heartbeat, nowMs: now, recentRestartCount: 2 }), 'restart');
+});
+
+test('decideAction: heartbeat viejo con 3+ reinicios recientes → circuit-breaker (nunca crash-loopea toda la noche)', () => {
+  const now = Date.now();
+  const heartbeat = { ts: new Date(now - STALE - 60 * 1000).toISOString(), pid: 1234 };
+  assert.equal(decideAction({ heartbeat, nowMs: now, recentRestartCount: 3 }), 'circuit-breaker');
+});
+
+test('decideAction: heartbeat con ts corrupto (NaN) se trata como viejo, no como sano para siempre', () => {
+  const heartbeat = { ts: 'no-es-una-fecha', pid: 1234 };
+  assert.equal(decideAction({ heartbeat, nowMs: Date.now(), recentRestartCount: 0 }), 'restart');
+});
+
+// ─── shouldSendDigest: el resumen matutino, sin el bug de las 23:00 ──────────
+
+function at(dateStr) { return new Date(dateStr); }
+
+test('shouldSendDigest: watchdog corriendo desde anoche + pasa las 7am + no se mandó hoy → true', () => {
+  assert.equal(shouldSendDigest({
+    now: at('2026-07-09T07:02:00'),
+    startedAt: at('2026-07-08T23:00:00').toISOString(),
+    lastDigestDate: '2026-07-08',
+  }), true);
+});
+
+test('shouldSendDigest: watchdog recién arrancado a las 23:00 NO manda el "resumen matutino" en su primer tick (bug real 2026-07-09)', () => {
+  assert.equal(shouldSendDigest({
+    now: at('2026-07-09T23:02:00'),
+    startedAt: at('2026-07-09T23:00:00').toISOString(),
+    lastDigestDate: null,
+  }), false);
+});
+
+test('shouldSendDigest: antes de la hora del digest → false', () => {
+  assert.equal(shouldSendDigest({
+    now: at('2026-07-09T05:30:00'),
+    startedAt: at('2026-07-08T22:00:00').toISOString(),
+    lastDigestDate: null,
+  }), false);
+});
+
+test('shouldSendDigest: ya se mandó el de hoy → false (una sola vez por día)', () => {
+  assert.equal(shouldSendDigest({
+    now: at('2026-07-09T09:00:00'),
+    startedAt: at('2026-07-08T22:00:00').toISOString(),
+    lastDigestDate: '2026-07-09',
+  }), false);
+});
+
+test('shouldSendDigest: watchdog arrancado a las 10am de hoy no manda el de hoy (arrancó después del corte de las 7)', () => {
+  assert.equal(shouldSendDigest({
+    now: at('2026-07-09T10:05:00'),
+    startedAt: at('2026-07-09T10:00:00').toISOString(),
+    lastDigestDate: null,
+  }), false);
+});
+
+// ─── looksLikeNodeProcess: validación anti PID reciclado ─────────────────────
+
+test('looksLikeNodeProcess: el propio proceso del test (Node) es reconocido como Node', () => {
+  assert.equal(looksLikeNodeProcess(process.pid), true);
+});
+
+test('looksLikeNodeProcess: un PID inexistente devuelve false', () => {
+  assert.equal(looksLikeNodeProcess(999999999), false);
 });

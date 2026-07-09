@@ -117,7 +117,7 @@ const { rotateOldRunFiles } = require('./lib/hygiene');
 const { parseSessionTime, parseWebpageTimer } = require('./lib/session-time');
 const { normalize } = require('./lib/audio-match');
 const { postImageToGallery, flushPendingGalleryUploads } = require('./lib/gallery-upload');
-const { writeHeartbeat } = require('./lib/heartbeat');
+const { writeHeartbeat, clearHeartbeat, createStageHeartbeat } = require('./lib/heartbeat');
 
 const DEBUG_PORT = 9333;   // Chrome de Suno (ya corriendo para suno-fill y flow-submit)
 
@@ -156,6 +156,11 @@ if (!process.env.CANCIONETERNA_HUMAN_TIMEOUT_MS) {
 // (ej. para correr --loop de día, atendido, sin querer un watchdog de fondo).
 if (process.argv.includes('--loop') && !process.argv.includes('--no-watchdog')) {
   try {
+    // Latido inicial ANTES de lanzar el watchdog: un heartbeat viejo de una
+    // corrida anterior tirado en logs/ haría que el watchdog recién lanzado
+    // lo viera stale en su primer tick y relanzara un SEGUNDO pipeline en
+    // paralelo con este (bug real, auditoría 2026-07-09).
+    writeHeartbeat({ mode: 'loop-start' });
     const { isWatchdogRunning } = require('./watchdog');
     if (!isWatchdogRunning()) {
       const watchdogChild = spawn('node', ['watchdog.js'], { cwd: __dirname, detached: true, stdio: 'ignore' });
@@ -167,6 +172,27 @@ if (process.argv.includes('--loop') && !process.argv.includes('--no-watchdog')) 
   } catch (e) {
     console.log(`⚠️ No se pudo auto-lanzar el watchdog (no crítico): ${e.message}`);
   }
+}
+
+// Apagado INTENCIONAL de --loop (Ctrl+C / kill): sin esto, el watchdog
+// detached sobrevivía, veía el heartbeat envejecer a los ~5 min y "resucitaba"
+// el pipeline que Hector acababa de apagar a propósito — potencialmente
+// gastando créditos con nadie mirando (bug real, auditoría 2026-07-09).
+// Se apaga el watchdog (aunque lo haya lanzado otra corrida) y se borra el
+// heartbeat para que ningún watchdog futuro actúe sobre datos viejos.
+if (process.argv.includes('--loop')) {
+  const gracefulLoopStop = (signal, exitCode) => {
+    console.log(`\n🛑 ${signal} recibido — apagando --loop de forma limpia...`);
+    try {
+      const { stopWatchdogIfRunning } = require('./watchdog');
+      if (stopWatchdogIfRunning()) console.log('🐕 Watchdog apagado (no va a resucitar el pipeline).');
+    } catch {}
+    clearHeartbeat();
+    console.log('✅ Heartbeat limpiado. Chrome queda abierto como siempre.');
+    process.exit(exitCode);
+  };
+  process.on('SIGINT', () => gracefulLoopStop('SIGINT', 130));
+  process.on('SIGTERM', () => gracefulLoopStop('SIGTERM', 143));
 }
 
 async function checkpoint(summary, nextAction) {
@@ -894,6 +920,15 @@ async function runDone(passedCompletion = null) {
     }
     console.log(`⏱️  Te queda a mano en la hoja: ${pending.join(', ')}.`);
 
+    // Notificación de cierre — la buena noticia también merece un push: de
+    // noche, la secuencia "🤖 Submit enviado" → "✅ registrada" en el celular
+    // confirma que el ciclo completo cerró sin tener que revisar logs.
+    await notify(
+      `"${result.titulo}" registrada en la hoja${result.tabName ? ` (${result.tabName}${result.row ? `, fila ${result.row}` : ''})` : ''}${timeHHMM ? ` · sesión ${timeHHMM}` : ''}.` +
+      (pending.length > 0 ? `\nQueda a mano: ${pending.join(', ')}.` : '\nNada pendiente a mano. 🎉'),
+      { title: `✅ Canción cerrada — ${result.titulo}`, priority: 'default', tags: 'white_check_mark' }
+    ).catch(() => {});
+
     if (result.remark) {
       console.log(`📝 Remarks auto-completado: "${result.remark}"`);
     } else {
@@ -990,7 +1025,24 @@ async function tryDriveScreenshot(localPngPath, sheetRow, tabName) {
 // suno-fill: no sabemos si Create llegó a clickearse, y un Create doble gasta
 // créditos de Suno — por eso en resume NUNCA se re-clickea Create; se buscan los
 // MP3 en disco con ventana amplia y, si no están, Create/descarga quedan manuales.
-async function runFlow({ resume = false } = {}) {
+async function runFlow(opts = {}) {
+  // Ticker de heartbeat por etapa (lib/heartbeat.js): mantiene el heartbeat
+  // latiendo durante TODO runFlow — las fases largas (run.js, Create+descarga
+  // de hasta 8 min, demucs) pasaban >5 min sin latir y el watchdog mataba un
+  // pipeline sano a mitad de canción (bug real, auditoría 2026-07-09). Cada
+  // etapa declara su techo: si lo excede, el ticker deja de latir a propósito
+  // y el watchdog actúa (hang real). Los techos de etapas que pueden contener
+  // una pausa humana son SIEMPRE > CANCIONETERNA_HUMAN_TIMEOUT_MS (20 min),
+  // para que el timeout humano dispare antes que el kill del watchdog.
+  const hb = createStageHeartbeat();
+  try {
+    return await runFlowInner(opts, hb);
+  } finally {
+    hb.stop();
+  }
+}
+
+async function runFlowInner({ resume = false } = {}, hb) {
   let resumeStage = null;
   if (resume) {
     const st = state.read();
@@ -1008,6 +1060,7 @@ async function runFlow({ resume = false } = {}) {
   const skipGenerate = resumeStage !== null;
 
   console.log(`📝 Log de esta corrida: ${RUN_LOG_PATH}`);
+  hb.setStage('preflight', { maxMinutes: 5 });
   console.log('=== Paso 0/4: preflight ===');
   const pre = runPreflight();
   if (!pre.ok) {
@@ -1032,6 +1085,7 @@ async function runFlow({ resume = false } = {}) {
     console.log(`  song.txt OK: "${songTitulo || stTitulo}"`);
   } else {
     console.log('\n=== Paso 1/4: generando letra (run.js) ===\n');
+    hb.setStage('run.js (letra)', { maxMinutes: 25 });
     const preRunState = state.read();
     const providerArg = process.argv.find((a) => a.startsWith('--provider='));
     const providerFlag = providerArg ? ` ${providerArg}` : '';
@@ -1093,6 +1147,7 @@ async function runFlow({ resume = false } = {}) {
   }
 
   if (!skipSunoFill) {
+    hb.setStage('sesion-suno', { maxMinutes: 10 });
     console.log('\n=== Paso 2/4: verificando sesión de Suno ===');
     if (await checkSunoSessionReady()) {
       console.log('Sesión de Suno confirmada.');
@@ -1107,6 +1162,7 @@ async function runFlow({ resume = false } = {}) {
     console.log('\n=== Paso 3/4: SALTEADO (--resume) — el formulario de Suno ya estaba llenado ===');
   } else {
     console.log('\n=== Paso 3/4: llenando formulario de Suno (suno-fill.js) ===\n');
+    hb.setStage('suno-fill', { maxMinutes: 25 });
     await runScript('suno-fill.js');
     state.write({ stage: state.STAGES.SUNO_FILLED });
   }
@@ -1161,6 +1217,9 @@ async function runFlow({ resume = false } = {}) {
     }
     console.log('\n=== Paso 3b/4: Create + generación + descarga (suno-create-dl.js) ===');
     console.log('  (Pasá --no-auto-create para saltar este paso y hacer Create a mano)\n');
+    // Peor caso legítimo: reintentos de Create (3×) con generación + descargas
+    // de 8 min — techo generoso; una pausa humana (20 min) también entra.
+    hb.setStage('create-descarga', { maxMinutes: 45 });
 
     // Reintentos si la descarga falla POR COMPLETO (0 archivos — createAndDownload
     // lanza). Bug real (2026-07-04, ver LESSONS.md): si este primer intento
@@ -1223,6 +1282,7 @@ async function runFlow({ resume = false } = {}) {
     console.log('\n=== Paso 4/4: SALTEADO (--resume) — el Flow ya estaba llenado ===');
   } else {
     console.log('\n=== Paso 4/4: llenando título/letra/notas en el Flow (flow-submit.js) ===');
+    hb.setStage('flow-submit', { maxMinutes: 25 });
     await openFlowTabAndEnsureAssignment();
     await runScript('flow-submit.js');
     state.write({ stage: state.STAGES.FLOW_FILLED });
@@ -1232,11 +1292,19 @@ async function runFlow({ resume = false } = {}) {
   // recomendar versión. runVerifyAudio nunca rechaza — resuelve false si falló.
   if (verifyPromise) {
     console.log('\n⏳ Esperando a que termine el análisis de audio (corre desde el Paso 3c)...');
+    hb.setStage('esperando-verify-audio', { maxMinutes: 25 });
     verifyOk = await verifyPromise;
   }
 
   const REPORT_PATH = path.join(__dirname, 'verify-report.json');
   const currentTitulo = state.read()?.titulo || null;
+
+  // ¿Hay un MP3 NUEVO confirmado en el Flow en ESTA corrida? El Auto-Submit
+  // solo puede disparar si esto es true — si el upload falló (o nunca hubo
+  // MP3s), submitear igual mandaría a QA lo que hubiera antes: en un REDO,
+  // exactamente la versión vieja ya rechazada por QC (riesgo real de redo
+  // sin cobrar — auditoría 2026-07-09).
+  let uploadConfirmed = false;
 
   // ── Paso 5: Recomendación + Upload automático de la MEJOR versión ──────────
   // Se sube la versión que recomienda verify-report.json (pickBestVersion:
@@ -1291,9 +1359,11 @@ async function runFlow({ resume = false } = {}) {
       `subir la Versión ${versionToUpload} al Flow (SIN Submit to QA todavía — eso se dispara después, automático o manual)`
     );
     console.log(`\n🚀 Subiendo automáticamente la Versión ${versionToUpload} al Flow (${uploadReason})...`);
+    hb.setStage('upload-al-flow', { maxMinutes: 25 });
     try {
       await runScript(`upload-to-flow.js --version ${versionToUpload}`);
       state.write({ stage: state.STAGES.FLOW_FILLED });
+      uploadConfirmed = true;
       console.log(`\n✅ Versión ${versionToUpload} subida al Flow exitosamente.`);
       const otra = versionToUpload === 'B' ? 'A' : 'B';
       if (hayVersionB) {
@@ -1333,6 +1403,11 @@ async function runFlow({ resume = false } = {}) {
   // Sin deadline (pedido de Gabo 2026-07-03): la espera del Submit es
   // indefinida — corta solo cuando se detecta el Submit o se cierra Chrome.
   // Fallback manual de siempre: node start-flow.js --done.
+
+  // La espera del Submit es indefinida por diseño y su loop escribe su propio
+  // heartbeat en cada tick de 5s — el techo enorme de esta "etapa" solo evita
+  // que el ticker de 30s compita reportando una etapa vencida.
+  hb.setStage('esperando-submit', { maxMinutes: 24 * 60 });
 
   console.log('\n==================================================================');
   console.log('🤖 Auto-Submit ACTIVO. Se enviará automáticamente entre el min 26 y 31.');
@@ -1608,28 +1683,53 @@ async function runFlow({ resume = false } = {}) {
         const currentState = state.read();
         const redoTag = currentState?.isRedo ? ' [REDO]' : '';
 
-        console.log(`\n🤖 [Auto-Submit${redoTag}] Alcanzado el umbral aleatorio de ${autoSubmitMinutes.toFixed(1)} min. Enviando Submit to QA...`);
-        logAutoSubmitEvent({ event: 'attempt', elapsedMin, autoSubmitMinutes, titulo: currentTitulo, isRedo: !!currentState?.isRedo });
-        try {
-          const submitBtn = workPage.locator('button:has-text("Complete Song"), button:has-text("Submit to QA")').first();
-          await submitBtn.click({ timeout: 5000 });
-          console.log(`  ✅ Clickeado "Submit to QA" / "Complete Song" inicial.`);
-
-          // Buscar el botón de confirmación en el modal y esperar a que sea visible
-          // Usamos un text-selector robusto en lugar de getByRole por si el árbol de accesibilidad de React se rompe
-          const confirmBtn = workPage.locator('button:has-text("Yes, Complete Song"), button:has-text("Yes, Submit to QA")').first();
+        // GATE de upload (auditoría 2026-07-09): sin un MP3 nuevo confirmado
+        // en esta corrida, NO se submitea — en un REDO el Flow todavía tiene
+        // la versión vieja rechazada por QC, y submitearla de nuevo es un
+        // redo sin cobrar. Se avisa urgente y se sigue esperando un Submit
+        // MANUAL (el loop de detección continúa normal).
+        if (!uploadConfirmed) {
+          notifiedDanger = true; // el aviso genérico de "+2 min" sobraría — este es más preciso
+          console.log(`\n🛑 [Auto-Submit${redoTag}] BLOQUEADO: no hay un MP3 subido/confirmado en esta corrida. NO se envía a QA.`);
+          console.log('   Subí a mano: node upload-to-flow.js --version A|B  → después hacé Submit manual (la detección sigue activa).');
+          logAutoSubmitEvent({ event: 'blocked-no-upload', elapsedMin, autoSubmitMinutes, titulo: currentTitulo, isRedo: !!currentState?.isRedo });
+          await notify(
+            `El timer llegó (min ${elapsedMin.toFixed(1)}) pero NO hay un MP3 subido/confirmado en esta corrida — no se envía a QA${currentState?.isRedo ? ' (REDO: el Flow todavía tiene la versión VIEJA rechazada)' : ''}.\n\nPara destrabar:\n1. node upload-to-flow.js --version A|B\n2. Submit manual en el Flow (la auto-detección del cierre sigue activa)\nO cerrá después con: node start-flow.js --done`,
+            { title: `🛑 Auto-Submit bloqueado — ${currentTitulo}`, priority: 'urgent', tags: 'no_entry' }
+          ).catch(() => {});
+        } else {
+          console.log(`\n🤖 [Auto-Submit${redoTag}] Alcanzado el umbral aleatorio de ${autoSubmitMinutes.toFixed(1)} min. Enviando Submit to QA...`);
+          logAutoSubmitEvent({ event: 'attempt', elapsedMin, autoSubmitMinutes, titulo: currentTitulo, isRedo: !!currentState?.isRedo });
           try {
-            await confirmBtn.waitFor({ state: 'visible', timeout: 6000 });
-            await confirmBtn.click({ timeout: 5000 });
-            console.log(`  ✅ Clickeado botón de confirmación modal "Yes, Complete Song" exitosamente.`);
-            logAutoSubmitEvent({ event: 'confirmed', elapsedMin, autoSubmitMinutes, titulo: currentTitulo, isRedo: !!currentState?.isRedo });
-          } catch (waitErr) {
-            console.log(`  ⚠️ No se detectó botón de confirmación modal ("Yes, Complete Song") tras esperar. Quizás no requiere confirmación o ya se envió.`);
-            logAutoSubmitEvent({ event: 'clicked_no_confirm_modal', elapsedMin, autoSubmitMinutes, titulo: currentTitulo, isRedo: !!currentState?.isRedo });
+            const submitBtn = workPage.locator('button:has-text("Complete Song"), button:has-text("Submit to QA")').first();
+            await submitBtn.click({ timeout: 5000 });
+            console.log(`  ✅ Clickeado "Submit to QA" / "Complete Song" inicial.`);
+
+            // Buscar el botón de confirmación en el modal y esperar a que sea visible
+            // Usamos un text-selector robusto en lugar de getByRole por si el árbol de accesibilidad de React se rompe
+            const confirmBtn = workPage.locator('button:has-text("Yes, Complete Song"), button:has-text("Yes, Submit to QA")').first();
+            try {
+              await confirmBtn.waitFor({ state: 'visible', timeout: 6000 });
+              await confirmBtn.click({ timeout: 5000 });
+              console.log(`  ✅ Clickeado botón de confirmación modal "Yes, Complete Song" exitosamente.`);
+              logAutoSubmitEvent({ event: 'confirmed', elapsedMin, autoSubmitMinutes, titulo: currentTitulo, isRedo: !!currentState?.isRedo });
+              await notify(
+                `Submit to QA enviado en el minuto ${elapsedMin.toFixed(1)}${redoTag}. El cierre (Sheets + Drive + screenshot) sigue solo — te aviso cuando quede registrada.`,
+                { title: `🤖 Submit enviado — ${currentTitulo}`, priority: 'high', tags: 'robot' }
+              ).catch(() => {});
+            } catch (waitErr) {
+              console.log(`  ⚠️ No se detectó botón de confirmación modal ("Yes, Complete Song") tras esperar. Quizás no requiere confirmación o ya se envió.`);
+              logAutoSubmitEvent({ event: 'clicked_no_confirm_modal', elapsedMin, autoSubmitMinutes, titulo: currentTitulo, isRedo: !!currentState?.isRedo });
+            }
+          } catch (e) {
+            console.log(`  ❌ Falló el auto-submit: ${e.message}`);
+            logAutoSubmitEvent({ event: 'failed', elapsedMin, autoSubmitMinutes, titulo: currentTitulo, error: e.message });
+            await notify(
+              `El click del Auto-Submit FALLÓ en el minuto ${elapsedMin.toFixed(1)}: ${String(e.message).slice(0, 120)}\nHacé el Submit manual en el Flow — la detección del cierre sigue activa.`,
+              { title: `❌ Auto-Submit falló — ${currentTitulo}`, priority: 'urgent', tags: 'x' }
+            ).catch(() => {});
+            notifiedDanger = true; // ya avisamos con detalle — el aviso genérico de "+2 min" sobraría
           }
-        } catch (e) {
-          console.log(`  ❌ Falló el auto-submit: ${e.message}`);
-          logAutoSubmitEvent({ event: 'failed', elapsedMin, autoSubmitMinutes, titulo: currentTitulo, error: e.message });
         }
       }
 
@@ -1747,6 +1847,7 @@ async function runFlow({ resume = false } = {}) {
     console.log(`\n✅ ¡Detección automática exitosa!`);
     console.log(`   Canción: "${completion.title}"`);
     console.log(`   Tiempo de sesión: ${completion.sessionText}`);
+    hb.setStage('cierre', { maxMinutes: 15 });
     await runDone(completion);
   } else {
     console.log('\n⚠️ No se detectó el clic en "Submit to QA" (Chrome se cerró).');
@@ -1945,12 +2046,17 @@ async function runPoll(rawArgs) {
 
 // ─── Entrada ──────────────────────────────────────────────────────────────────
 (async () => {
-  // 1. Flush de imágenes pendientes a la galería antes de cualquier otra cosa
-  const WEB_APP_URL = process.env.GALLERY_WEBAPP_URL;
-  const WEB_APP_SECRET = process.env.GALLERY_WEBAPP_SECRET;
-  await flushPendingGalleryUploads({ secret: WEB_APP_SECRET, url: WEB_APP_URL });
-
   const rawArgs = process.argv.slice(2);
+
+  // 1. Flush de imágenes pendientes a la galería antes de cualquier otra cosa.
+  // NUNCA en --dry-run: el ensayo promete "cero red/side-effects" y este flush
+  // postea de verdad a la galería si hay pendientes de otra corrida (misma
+  // clase de bug que "npm test pegaba a Drive real", LESSONS 2026-07-07).
+  if (!rawArgs.includes('--dry-run')) {
+    const WEB_APP_URL = process.env.GALLERY_WEBAPP_URL;
+    const WEB_APP_SECRET = process.env.GALLERY_WEBAPP_SECRET;
+    await flushPendingGalleryUploads({ secret: WEB_APP_SECRET, url: WEB_APP_URL });
+  }
 
   // Typo guard: "-- done" o "-- poll" (Node los recibe como dos args separados:
   // ['--', 'done'] en vez de ['--done']). join('') los funde igual que si no
@@ -1996,7 +2102,13 @@ async function runPoll(rawArgs) {
     while (true) {
       ciclo++;
       try {
-        await runFlow({ resume: false });
+        // --resume vale SOLO para el primer ciclo (retomar lo que quedó a
+        // mitad tras un kill/crash — es lo que manda el watchdog al relanzar).
+        // Antes se ignoraba siempre (hard-coded false): el relanzamiento
+        // "--loop --resume" del watchdog nunca resumía nada (bug real,
+        // auditoría 2026-07-09). Los ciclos siguientes siempre arrancan de
+        // cero, como corresponde a una canción nueva.
+        await runFlow({ resume: ciclo === 1 && rawArgs.includes('--resume') });
       } catch (err) {
         if (err.noSong) {
           console.log('\nNo hay canciones en cola — vigía activa (10-15s) hasta que caiga la próxima...\n');
