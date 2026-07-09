@@ -1,5 +1,30 @@
 # Lessons / gotchas
 
+## Suno renombró el aria-label del botón "⋯" — Download MP3 fallaba para A y B (2026-07-09, en vivo, madrugada)
+
+Loop nocturno abandonó una canción tras 20 min: "No se pudo clickear Download
+-> MP3 Audio" para la versión A y luego para la versión B (dos avisos ntfy,
+3:59am y 4:02am). `clickDownloadMp3` (lib/suno-create-dl.js) no encontraba el
+botón de opciones de la card porque Suno cambió `aria-label="More options"` a
+`aria-label="More from Suno"` — `MORE_OPTIONS_MENU_ARIA_SELECTOR` en
+lib/suno-selectors.js apuntaba al valor viejo. `suno-selector-drift.js` no
+había detectado esto (no se corrió después del cambio de Suno). Confirmado
+con evidencia de DOM en vivo (Antigravity, conectado al Chrome del puerto
+9333) antes de aplicar el fix. Fix: selector actualizado en
+lib/suno-selectors.js. El fallback a `pauseForHumanInteraction` sí funcionó
+como diseñado (no mató el proceso, avisó y esperó) — pero nadie estaba
+despierto a las 4am, así que la canción se abandonó por timeout como corresponde.
+
+En la misma madrugada, `readRecentCompletion` (start-flow.js, selector
+`.rounded-xl:has(.font-medium.text-slate-900)`) también tiró timeout
+("Auto-detección del Submit con problemas", 4:15am) — verificado en vivo que
+el selector NO cambió (mismo DOM que siempre). Causa más probable: el panel
+"Recent completions" estaba genuinamente vacío en ese momento puntual
+(latencia del backend de Suno/Flow en registrar la canción recién
+completada), no un rediseño de UI. No requiere fix de selector; si se repite
+seguido conviene revisar si el timeout de 10s de esa espera es corto para la
+latencia real del panel.
+
 ## "más de vos" con trato tú llegó al AUDIO generado — hardValidate nunca validó el trato tú (2026-07-09, "Luz Que No Buscaba", en vivo)
 
 Primera corrida observada en vivo tras la auditoría: encuesta con trato "Tú",
