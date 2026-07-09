@@ -795,11 +795,29 @@ process.on('uncaughtException', async (err) => {
 
     let fullResponse, parsedJson, passedQA;
 
+    // La caché guarda letras que pasaron el QA de SU momento — si el
+    // validador se endureció después (ej. la regla inquebrantable de trato,
+    // 2026-07-09), una letra cacheada puede violar las reglas ACTUALES.
+    // Re-validar antes de usarla: si viola una regla fatal, se descarta y se
+    // regenera (caso real: la letra con "más de vos" quedó cacheada porque
+    // el validador viejo no miraba el trato tú).
+    let usableCache = null;
     if (cachedResponse && !isRedo) {
+      const recheck = hardValidate(cachedResponse.fullResponse, surveyContent);
+      const fatalInCache = findFatalFailures(recheck.failures);
+      if (fatalInCache.length > 0) {
+        console.log('♻️→🗑️  La letra en caché viola una regla inquebrantable ACTUAL — se descarta y se regenera:');
+        fatalInCache.forEach((f) => console.log(`  • ${f}`));
+      } else {
+        usableCache = cachedResponse;
+      }
+    }
+
+    if (usableCache) {
       console.log('♻️  Usando letra en caché local (se omitió la llamada al LLM)...');
-      fullResponse = cachedResponse.fullResponse;
-      parsedJson = cachedResponse.parsedJson;
-      passedQA = cachedResponse.passedQA;
+      fullResponse = usableCache.fullResponse;
+      parsedJson = usableCache.parsedJson;
+      passedQA = usableCache.passedQA;
     } else {
       const result = await generateSongWithSelfCorrection(surveyContent, finalBaseUserMessage);
       fullResponse = result.fullResponse;
