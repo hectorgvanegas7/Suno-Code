@@ -31,7 +31,8 @@ const pipelineState = require('./lib/pipeline-state');
 const { getSurveyHash, readCache, writeCache } = require('./lib/cache-helpers');
 const { hardValidate, validateContentForWrite, extractField, convertJsonToMarkdown, isSafeToPatch } = require('./lib/song-validate');
 const { patchSongLines } = require('./lib/song-corrector');
-const { extractFirstNames } = require('./lib/text-helpers');
+const { extractFirstNames, extractLyricNameVariants } = require('./lib/text-helpers');
+const { checkGrammarAndSpelling } = require('./lib/languagetool-check');
 
 const args = process.argv.slice(2);
 const isDryRun = args.includes('--dry-run');
@@ -502,6 +503,80 @@ const DEFAULT_MAX_TOKENS = 8192;
 const MAX_TOKENS_ESCALATION_STEP = 4000;
 const MAX_TOKENS_CEILING = 16000; // por encima de esto conviene streaming, que generate() no usa (fetch simple)
 
+// ── Capa 2 de QA ortográfico/gramatical: LanguageTool ──────────────────────
+// lib/spanish-spellcheck.js (Capa 1, corre DENTRO de hardValidate, offline)
+// atrapa palabras inválidas contra un diccionario, pero no resuelve
+// ambigüedad gramatical real ("esta" demostrativo vs "está" verbo — ambas
+// son palabras válidas, un diccionario no puede saber cuál corresponde).
+// Este gate llama a LanguageTool (lib/languagetool-check.js) DESPUÉS de que
+// hardValidate ya dio valid:true, como red de seguridad adicional — pedido
+// explícito de Hector tras el bug real de "Fogata en la Arena" ("que eso
+// NUNCA FALLE", ver LESSONS.md). Nunca falla en silencio: si LanguageTool
+// no responde, la canción NO se asume limpia — se marca para revisión
+// manual en vez de mandarla igual.
+const MAX_GRAMMAR_PATCH_ROUNDS = 2;
+
+async function runGrammarGate(parsedJson, surveyContent) {
+  const firstNames = extractFirstNames(surveyContent);
+  const lyricsText = Object.values(parsedJson.letras || {}).flat().join('\n');
+  const phoneticVariants = Object.values(extractLyricNameVariants(lyricsText, firstNames));
+  let dictVariants = [];
+  try {
+    const dictPath = path.join(__dirname, 'lib', 'name-dictionary.json');
+    if (fs.existsSync(dictPath)) {
+      dictVariants = Object.values(JSON.parse(fs.readFileSync(dictPath, 'utf-8')));
+    }
+  } catch (e) {
+    // Best-effort — si no se puede leer, el filtro de exclusión queda más
+    // corto pero el gate igual corre (no bloquea la entrega por esto).
+  }
+  const excludeWords = [...firstNames, ...phoneticVariants, ...dictVariants];
+
+  let currentJson = parsedJson;
+  for (let round = 0; round <= MAX_GRAMMAR_PATCH_ROUNDS; round++) {
+    const result = await checkGrammarAndSpelling(currentJson.letras, { excludeWords });
+
+    if (!result.ok) {
+      console.warn(`\n⚠️ LanguageTool no disponible (${result.error}) — se entrega con advertencia de revisión manual en vez de asumir que la letra está limpia.`);
+      return {
+        clean: false,
+        unavailable: true,
+        parsedJson: currentJson,
+        failures: [`LanguageTool no disponible (${result.error}) — revisar ortografía/gramática a mano antes de mandar a Suno`],
+      };
+    }
+
+    if (result.issues.length === 0) {
+      console.log(round === 0 ? '✅ LanguageTool: sin errores de ortografía/gramática.' : `✅ LanguageTool: limpio tras ${round} ronda(s) de corrección.`);
+      return { clean: true, parsedJson: currentJson, fullResponse: JSON.stringify(currentJson) };
+    }
+
+    console.log(`\n📝 LanguageTool encontró ${result.issues.length} error(es) de ortografía/gramática:`);
+    result.issues.forEach((i) => console.log(`  • [${i.section}] línea ${i.lineIndex + 1}: ${i.detail}`));
+
+    if (round === MAX_GRAMMAR_PATCH_ROUNDS) {
+      return {
+        clean: false,
+        parsedJson: currentJson,
+        failures: result.issues.map((i) => `LanguageTool: [${i.section}] línea ${i.lineIndex + 1}: ${i.detail}`),
+      };
+    }
+
+    try {
+      const patchedJson = await patchSongLines(currentJson, result.issues);
+      const revalidated = hardValidate(JSON.stringify(patchedJson), surveyContent);
+      if (!revalidated.valid) {
+        console.log(`⚠️ El parche de LanguageTool rompió una regla estructural (${revalidated.failures.join(' | ')}) — se detiene el gate, sigue el flujo normal.`);
+        return { clean: false, parsedJson: patchedJson, failures: revalidated.failures };
+      }
+      currentJson = revalidated.parsedJson;
+    } catch (e) {
+      console.log(`⚠️ Corrector barato falló parcheando errores de LanguageTool (${e.message}) — se entrega con advertencia de revisión manual.`);
+      return { clean: false, parsedJson: currentJson, failures: result.issues.map((i) => `LanguageTool: [${i.section}] línea ${i.lineIndex + 1}: ${i.detail}`) };
+    }
+  }
+}
+
 async function generateSongWithSelfCorrection(surveyContent, baseUserMessageOverride) {
   const baseUserMessage = baseUserMessageOverride || `Here is the survey for this song:\n\n${surveyContent}`;
   let userMessage = baseUserMessage;
@@ -519,7 +594,25 @@ async function generateSongWithSelfCorrection(surveyContent, baseUserMessageOver
 
     if (valid) {
       console.log('✅ Validación estructural + QA: todos los ítems pasaron.');
-      return { fullResponse: lastResponse, parsedJson, passedQA: true };
+
+      const grammarResult = await runGrammarGate(parsedJson, surveyContent);
+      if (grammarResult.clean) {
+        return { fullResponse: grammarResult.fullResponse, parsedJson: grammarResult.parsedJson, passedQA: true };
+      }
+      if (grammarResult.unavailable) {
+        // Problema de red, no de contenido — gastar los MAX_GENERATION_ATTEMPTS
+        // regenerando la letra entera no lo arregla. Se entrega de una con la
+        // advertencia en vez de quemar reintentos/tokens en vano.
+        const fullResponse = JSON.stringify(grammarResult.parsedJson);
+        return { fullResponse, parsedJson: grammarResult.parsedJson, passedQA: false, lastFailures: grammarResult.failures };
+      }
+
+      // LanguageTool sí respondió pero quedaron errores tras sus propias
+      // rondas de parcheo — cae al flujo normal de abajo (logueo +
+      // instrucciones correctivas para el próximo intento), igual que
+      // cualquier otro fallo de hardValidate.
+      lastFailures = grammarResult.failures;
+      lastResponse = JSON.stringify(grammarResult.parsedJson);
     }
 
     console.log(`❌ Fallos en intento ${attempt}:`);

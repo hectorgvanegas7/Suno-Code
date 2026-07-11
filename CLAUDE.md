@@ -184,6 +184,40 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
   fonético, hash de song.txt, rotación de logs, parseo de sesión).
   ⚠️ Cada regla nueva del `SYSTEM_PROMPT` de `run.js` debe chequearse contra este
   validador Y agregarse un caso al test.
+- `lib/spanish-spellcheck.js` — `findAccentTypos(text)`: chequeo GENERAL de
+  tildes/eñes faltantes en cualquier palabra de la letra (no solo nombres
+  propios), contra un diccionario real de español (`nspell` + `dictionary-es`,
+  hunspell — deps reales en `package.json`, no listas a mano). Usado por la
+  sección H2 de `hardValidate`. Bug real que lo originó (2026-07-11, "Fogata
+  en la Arena"): "ano" en vez de "año", "pequena" en vez de "pequeña" — ver
+  LESSONS.md para el diseño de 2 capas (palabra ya válida se deja pasar,
+  si no es válida se prueban variantes con tilde/eñe) y el
+  `ENYE_TYPOS_BLOCKLIST` chico que cubre homógrafos reales que el diccionario
+  aceptaría sin más (ano/sueno/montana/papa/mama/jamas/ademas/ultimo/
+  publico/medico). Agregar ahí cualquier homógrafo nuevo detectado en vivo.
+- `lib/languagetool-check.js` — `checkGrammarAndSpelling(sections, opts)`:
+  Capa 2 de QA ortográfico/gramatical (2026-07-11, pedido explícito de
+  Hector tras el mismo bug de "Fogata en la Arena": "que eso NUNCA FALLE").
+  A diferencia de `spanish-spellcheck.js` (diccionario offline, no resuelve
+  ambigüedad gramatical), llama a LanguageTool (`api.languagetool.org/v2/
+  check`, gratis, sin API key — o `process.env.LANGUAGETOOL_URL` para
+  apuntar a una instancia self-hosted en Docker más adelante, no instalada
+  todavía) que SÍ entiende gramática real: "esta" (demostrativo) vs "está"
+  (verbo estar) es el caso de manual que un diccionario nunca puede
+  resolver. Solo las categorías `TYPOS`/`GRAMMAR`/`CONFUSIONS`/`DIACRITICS`
+  cuentan como error duro — el resto queda informativo para no pelear con
+  la licencia poética del SYSTEM_PROMPT. Filtra nombres/respellings
+  fonéticos conocidos (`extractFirstNames`/`extractLyricNameVariants` de
+  `lib/text-helpers.js` + `lib/name-dictionary.json`) antes de reportar,
+  porque LanguageTool SÍ marca nombres como "Maryuri"/"Aandrea" como
+  errores de ortografía si no se excluyen. Gate async nuevo en `run.js`
+  (`runGrammarGate`), corre DESPUÉS de que `hardValidate` da `valid:true` —
+  `hardValidate` se mantiene 100% síncrono/offline a propósito. Si
+  LanguageTool no responde, la canción NO se asume limpia (nunca falla en
+  silencio) — se marca para revisión manual sin gastar los 3 intentos de
+  regeneración en un problema de red. Ver LESSONS.md para el detalle
+  completo y `IDEAS.md` para la Capa 3 (proofreading LLM) todavía no
+  implementada.
 - `lib/llm-provider.js` — `generate(provider, surveyText, systemPrompt, isDryRun)`:
   unifica las llamadas a Anthropic (`claude-sonnet-5`) y Gemini (`gemini-3.5-flash`)
   en un solo lugar. En `isDryRun` devuelve siempre el mismo texto mock, sin llamar a

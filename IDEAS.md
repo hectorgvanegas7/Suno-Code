@@ -7,6 +7,10 @@ Este archivo recopila propuestas de arquitectura, robustez y ahorro de costos pa
 *   **Checkpoint de Caché en el Self-Correction Loop:**
     *   *Detalle:* Configurar los parámetros de Anthropic para cachear la historia de mensajes del bucle de corrección en vez de volver a enviar todo el prompt del sistema y la respuesta fallida entera a precio completo.
 
+## 1b. QA ortográfico/gramatical — Capa 3 (proofreading LLM independiente)
+*   **Contexto:** ya existen 2 capas reales (2026-07-11): `lib/spanish-spellcheck.js` (diccionario offline, dentro de `hardValidate`) y `lib/languagetool-check.js` (gramática/ortografía real vía LanguageTool, gate async en `run.js`). Ver LESSONS.md.
+*   **Detalle:** un tercer pase, opcional y NO implementado todavía, con un modelo barato (Haiku) INDEPENDIENTE del que generó la letra, cuyo único trabajo sea proofreading (nunca estilo/contenido) — pensado para casos semánticos que ni un diccionario ni LanguageTool pueden atrapar (una palabra real, bien escrita, pero mal elegida en contexto). Deliberadamente no se construyó junto con las otras 2 capas — hay que calibrar esas primero en producción antes de agregar una tercera capa (mismo criterio que ya usa este repo para CLAP/NISQA/loudness: "informativo hasta calibrar en vivo", no sumar señales sin datos reales de cuánto aportan).
+
 ## 2. Simplificación y Arquitectura
 *   **Unificación de run.js y run-gemini.js:**
     *   *Detalle:* Fusionar la lógica en un solo archivo `run.js` y utilizar flags como `node run.js --gemini` o variables de entorno (`PROVIDER=gemini`) para alternar el modelo, evitando la desincronización de las reglas de validación en `hardValidate`.

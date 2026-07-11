@@ -85,6 +85,52 @@ test('caso base válido pasa sin fallos', () => {
   assert.equal(valid, true, `esperaba válido, fallos: ${failures.join(' | ')}`);
 });
 
+test('eñe perdida ("ano" en vez de "año", "pequena" en vez de "pequeña") se detecta y queda parcheable', () => {
+  // Bug real (2026-07-11, "Fogata en la Arena"): pasó hardValidate entero con
+  // "ano" en vez de "año" y "pequena" en vez de "pequeña" — nada chequeaba
+  // ortografía de palabras comunes, solo nombres propios.
+  const response = buildResponse({
+    chorus1: ['Frank, hoy cumples otro ano de vida', 'Gracias por darme siempre tu calor', 'Cada momento contigo brilla mejor', 'Eres mi orgullo y mi mayor honor'],
+    verse2: ['Recuerdo tus pequenas manos de niño', 'Sacabas fuerzas para hacernos reír', 'Cada tropiezo lo hiciste sentir', 'Como un paso más hacia el porvenir'],
+  });
+  const { valid, failures, patchableIssues } = hardValidate(response, SURVEY_SINGLE);
+  assert.equal(valid, false);
+  const enyeFailures = failures.filter((f) => f.startsWith('Eñe/tilde perdida'));
+  assert.equal(enyeFailures.length, 2, `esperaba 2 fallos de eñe, encontrados: ${enyeFailures.join(' | ')}`);
+  assert.ok(enyeFailures.some((f) => f.includes('"ano"') && f.includes('"año"')));
+  assert.ok(enyeFailures.some((f) => f.includes('"pequenas"')));
+  assert.equal(isSafeToPatch(failures), true, 'debería quedar como caso parcheable barato, no forzar regen completo');
+  assert.equal(patchableIssues.filter((p) => p.kind === 'enye_typo').length, 2);
+});
+
+test('eñe/tilde perdida: chequeo GENERAL contra diccionario detecta palabras fuera de la lista de bloqueo fija ("corazon"/"cancion")', () => {
+  // A diferencia del caso anterior (blocklist explícita para homógrafos como
+  // "ano"), esto prueba que el chequeo NO depende de una lista fija de pares
+  // conocidos — lib/spanish-spellcheck.js compara contra un diccionario real
+  // de español (nspell + dictionary-es), así que cualquier palabra inválida
+  // sin tilde queda cubierta, no solo las ya vistas antes.
+  const response = buildResponse({
+    outro: ['Guardo en mi corazon tu dulce cancion', 'Serás mi guía por todo el sendero', 'Con esta canción te digo primero', 'Te voy a amar por siempre entero'],
+  });
+  const { valid, failures } = hardValidate(response, SURVEY_SINGLE);
+  assert.equal(valid, false);
+  const enyeFailures = failures.filter((f) => f.startsWith('Eñe/tilde perdida'));
+  assert.ok(enyeFailures.some((f) => f.includes('"corazon"') && f.includes('"corazón"')), `esperaba detectar "corazon", encontrados: ${enyeFailures.join(' | ')}`);
+});
+
+test('eñe/tilde perdida: palabras ambiguas válidas en ambas formas ("mas"/"solo"/"aun") NO disparan falso positivo', () => {
+  // "mas" (conjunción "pero"), "solo" (adjetivo "en soledad") y "aun"
+  // ("incluso") son palabras reales de por sí, sin tilde — no se puede saber
+  // por ortografía sola si el LLM quiso decir "más"/"sólo"/"aún". El chequeo
+  // debe abstenerse en vez de forzar una corrección posiblemente incorrecta.
+  const response = buildResponse({
+    bridge: ['Mas allá del tiempo te sigo esperando', 'Solo tu amor calma mi corazón', 'Aun en la noche siento tu bendición', 'Fue la prueba de un amor soberano'],
+  });
+  const { failures } = hardValidate(response, SURVEY_SINGLE);
+  const enyeFailures = failures.filter((f) => f.startsWith('Eñe/tilde perdida'));
+  assert.deepEqual(enyeFailures, [], `no debería marcar palabras ambiguas, encontrado: ${enyeFailures.join(' | ')}`);
+});
+
 test('límites de palabra con tildes: "venía"/"decírselo" no disparan falso mezcla de trato con usted', () => {
   // Bug real (LESSONS.md): \b de JS no trata á é í ó ú ñ como word chars, así
   // que \bvení\b matchea DENTRO de "venía" y \bdecí\b DENTRO de "decírselo".

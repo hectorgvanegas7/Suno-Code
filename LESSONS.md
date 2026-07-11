@@ -1,5 +1,107 @@
 # Lessons / gotchas
 
+## "Fogata en la Arena" salió con "ano" en vez de "año" y "pequena" en vez de "pequeña" — hardValidate no chequeaba ortografía de palabras comunes (2026-07-11)
+
+El LLM generó la letra con la eñe perdida en dos palabras normales (no
+nombres propios) y pasó `hardValidate()` entero: el validador solo chequea
+ortografía exacta para nombres propios (`STANDARD_SPANISH_NAMES`/
+`canonicalStandardSpanishName`) y una lista fija de frases incoherentes
+conocidas (`KNOWN_INCOHERENT`) — nunca existió un chequeo de ortografía para
+vocabulario común. "ano" en particular es grave: es una palabra real
+distinta ("año" sin la eñe), no un error obvio de spellchecker.
+
+**Fix (primera pasada, insuficiente):** una lista fija de pares conocidos
+(`ENYE_TYPOS`) en `lib/song-validate.js`. Funcionaba para "ano"/"pequena"
+pero Hector pidió explícitamente generalizarlo — una lista a mano solo
+atrapa los casos ya vistos, y "que eso NUNCA FALLE" no se cumple con una
+lista curada que se queda corta apenas aparece una palabra nueva.
+
+**Fix real (generalizado):** `lib/spanish-spellcheck.js` — chequeo contra un
+diccionario real de español (`nspell` + `dictionary-es`, hunspell, nuevas
+dependencias en `package.json`) que cubre CUALQUIER palabra de la letra, no
+una lista fija. Estrategia de 2 capas para evitar falsos positivos:
+1. Si la palabra ya es válida tal cual (con o sin tilde) se deja pasar —
+   cubre ambigüedades reales del español ("mas"/"solo"/"aun", válidas en
+   ambas formas) sin forzar una corrección que podría estar mal.
+2. Si NO es válida, se generan variantes agregando tilde/eñe en 1-2
+   posiciones (a→á, e→é, i→í, o→ó, u→ú, n→ñ); si alguna variante SÍ es
+   válida, se marca como probable error y se sugiere esa variante
+   ("corazon"→"corazón", "cancion"→"canción", sin necesidad de tenerlas
+   en ninguna lista).
+
+Gap real encontrado en pruebas: el propio diccionario a veces reconoce como
+"válida" la forma sin eñe/tilde de una palabra porque ES otra palabra real
+distinta (ej. "ano" = año sin eñe, pero también es una palabra real en sí
+misma; lo mismo con "sueno"/sonar, "montana", "papa"/"mama", "jamas",
+"ademas", "ultimo", "publico", "medico") — el paso 1 de arriba las dejaría
+pasar sin más. Para esos casos de alto riesgo/alta frecuencia en este
+negocio (temática familiar/fe) se mantiene un `ENYE_TYPOS_BLOCKLIST` chico y
+curado que fuerza el chequeo igual. Esta lista SÍ sigue siendo manual — no
+hay forma de que un diccionario por sí solo distinga intención en un
+homógrafo real — pero ahora es solo el backstop para la minoría de casos
+ambiguos, no el mecanismo principal.
+
+Registrado como categoría parcheable (`PATCHABLE_FAILURE_PREFIXES`,
+`kind: 'enye_typo'`) para que `lib/song-corrector.js` lo arregle con el
+modelo barato en vez de forzar un regen completo. Tests en
+`test/song-validate.test.js`: el caso real ("ano"/"pequenas"), un caso fuera
+de la blocklist para probar que es genuinamente general ("corazon"/
+"cancion"), y un caso de palabras ambiguas que NO debe dispararse
+("mas"/"solo"/"aun").
+
+## Un diccionario NUNCA resuelve ambigüedad gramatical ("esta" vs "está") — se agregó LanguageTool como Capa 2 (2026-07-11, mismo día que el bug de arriba)
+
+Después de arreglar el bug de "Fogata en la Arena" con `lib/spanish-spellcheck.js`
+(diccionario offline), Hector escaló: "que eso NUNCA FALLE", puso en riesgo su
+posición en la empresa por esto, y pidió explícitamente evaluar software
+especializado. Un diccionario (por más completo que sea) tiene un techo
+estructural: "esta" (demostrativo, "esta canción") y "está" (verbo estar,
+"esta feliz" debería ser "está feliz") son AMBAS palabras válidas — ningún
+diccionario puede saber cuál corresponde sin entender la oración completa.
+Ese es exactamente el tipo de error que un negocio de canciones dedicadas no
+se puede permitir (suena a error de imprenta en un regalo).
+
+**Fix:** `lib/languagetool-check.js` — integra LanguageTool
+(`api.languagetool.org/v2/check`, gratis, sin API key, ~20 req/min de
+sobra para 1 canción a la vez) como Capa 2 de defensa, gate async en
+`run.js` (`runGrammarGate`, corre DESPUÉS de que `hardValidate` ya dio
+`valid:true`). Verificado en vivo con `fetch()` real de Node (¡OJO!: un
+test manual con `curl` en Git Bash mojibakeaba los tildes UTF-8 y daba
+falsos positivos espurios que no eran reales — usar siempre `fetch()` de
+Node para probar esto, nunca curl desde Git Bash en Windows):
+- "ano"→"año" vía una regla DEDICADA (`CONFUSIONS/ANO`) — literalmente el
+  bug real, LanguageTool ya lo conoce como confusión común del español.
+- "corazon"/"pequenas" vía `TYPOS/MORFOLOGIK_RULE_ES`.
+- "esta"→"está" vía `DIACRITICS/ESTA_TILDE` — el caso que un diccionario
+  simple NUNCA puede resolver.
+- 0 falsos positivos sobre letra ya correcta (probado con la letra base del
+  fixture de test).
+- SÍ da falsos positivos sobre nombres respelleados foneticamente
+  ("Maryuri", "Yeovani", "Aandrea" — los toma por errores de ortografía),
+  así que el filtro `isExcludedMatch` contra `extractFirstNames` +
+  `extractLyricNameVariants` + `lib/name-dictionary.json` es obligatorio,
+  no cosmético.
+
+Diseño: solo las categorías `TYPOS`/`GRAMMAR`/`CONFUSIONS`/`DIACRITICS`
+cuentan como error duro (`HARD_FAIL_CATEGORIES`) — cualquier categoría de
+estilo queda informativa, para no pelear con la licencia poética que el
+propio SYSTEM_PROMPT le exige al modelo (mismo criterio que
+`checkLoudness`/`pacingIssues` en `lib/audio-analysis.js`). Nunca falla en
+silencio: si LanguageTool no responde (red caída, rate limit), la canción
+NO se asume limpia — se marca para revisión manual (`grammarResult.
+unavailable`) sin gastar los 3 intentos de regeneración completa en un
+problema de red que regenerar no arregla. `hardValidate` se mantiene 100%
+síncrono/offline a propósito (regla del repo, `test/song-validate.test.js`
+sigue sin red) — este gate vive aparte, en `run.js`, async.
+
+Tests 100% offline en `test/languagetool-check.test.js` (matches FAKE con
+el shape real verificado en vivo, sin ningún `fetch` real): mapeo de
+offset→línea, exclusión de nombres, filtrado por categoría.
+
+Queda documentada en `IDEAS.md` una Capa 3 futura (proofreading LLM
+independiente) — no implementada todavía a propósito, para calibrar estas
+2 capas reales en producción antes de sumar una tercera señal.
+
 ## readRecentCompletion: la alerta de "posible rediseño de UI" disparó 7/7 veces, siempre por el mismo falso positivo benigno (2026-07-10, arreglado tras auditoría de sesión)
 
 Confirmado en vivo en las 7 canciones de la sesión: el timeout de `h3:has-
