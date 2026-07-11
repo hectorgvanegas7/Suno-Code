@@ -615,7 +615,26 @@ async function readRecentCompletion(expectedTitulo, { page: providedPage = null 
         await page.evaluate(() => window.location.reload()).catch(() => {});
         await page.waitForLoadState('domcontentloaded').catch(() => {});
       }
-      await page.waitForSelector('h3:has-text("Recent completions")', { timeout: 15000 });
+      // Mejora pedida por Hector (auditoría 2026-07-10): las 7 canciones de
+      // la sesión dispararon la misma alerta "posible rediseño de UI" — en
+      // las 7, resultó ser el mismo falso positivo benigno (confirmado en
+      // vivo por CDP): "Recent completions" no renderiza mientras hay una
+      // asignación activa en curso, el iframe/pestaña muestra la vista de
+      // "CURRENT ASSIGNMENT" en su lugar. Antes de tirar el timeout genérico,
+      // chequear si ese es el caso — si lo es, lanzar un mensaje que el
+      // caller (loop de espera del Submit) reconoce como espera normal
+      // (mismo patrón que "no coincide con state.json"), no como fallo real.
+      try {
+        await page.waitForSelector('h3:has-text("Recent completions")', { timeout: 15000 });
+      } catch (e) {
+        const showsActiveAssignment = await page.evaluate(
+          () => /current assignment/i.test(document.body.innerText || '')
+        ).catch(() => false);
+        if (showsActiveAssignment) {
+          throw new Error('Panel "Recent completions" no renderiza mientras hay una asignación activa en curso (esperado, no es un rediseño de UI)');
+        }
+        throw e;
+      }
       // Optimización de ejecución AGY: Asegura que React renderizó las cards de completados antes de evaluate
       await page.waitForSelector('.rounded-xl:has(.font-medium.text-slate-900)', { timeout: 10000 });
       await page.waitForTimeout(500);
@@ -1340,6 +1359,30 @@ async function runFlowInner({ resume = false } = {}, hb) {
             versionToUpload = rec.recommended;
             uploadReason = 'recomendada por el análisis de audio';
           }
+
+          // Mejora pedida por Hector (auditoría 2026-07-10, sesión de 7
+          // canciones): si NINGUNA versión cruza el umbral de fidelidad de
+          // letra (Levenshtein 75%), el score ya las penaliza a ambas por
+          // igual (-20 pts c/u en scoreReport) pero eso no distingue "las dos
+          // son mediocres" de "las dos alucinaron la letra" — nada avisaba
+          // fuerte. No se bloquea el upload/Auto-Submit (mantendría la
+          // corrida 100% automática que Hector validó toda la noche), pero sí
+          // se dispara un aviso urgente para que pueda revisar de oído antes
+          // de que QC lo vea, sin depender de que alguien esté mirando la
+          // consola en vivo.
+          const scoreA = report.reportA?.levenshteinScore;
+          const scoreBLev = report.reportB?.levenshteinScore;
+          const aBelowThreshold = scoreA === null || scoreA === undefined || scoreA < 0.75;
+          const bBelowThreshold = scoreBLev === null || scoreBLev === undefined || scoreBLev < 0.75;
+          if (report.reportA && report.reportB && aBelowThreshold && bBelowThreshold) {
+            const pctA = scoreA != null ? Math.round(scoreA * 100) : '?';
+            const pctB = scoreBLev != null ? Math.round(scoreBLev * 100) : '?';
+            console.log(`\n🚨 NINGUNA versión cruza el umbral de fidelidad de letra (A: ${pctA}%, B: ${pctB}% < 75%) — posible alucinación de Suno en ambas. Se sube y submitea igual (--loop), pero revisá de oído.`);
+            await notify(
+              `🚨 "${currentTitulo}": ninguna versión cruza el umbral de fidelidad de letra (A: ${pctA}%, B: ${pctB}% < 75%). Se subió/submiteó igual — revisá de oído antes de que lo vea QC.`,
+              { title: 'Posible alucinación de letra en ambas versiones', priority: 'urgent', tags: 'warning' }
+            ).catch(() => {});
+          }
         } else {
           console.log('\n  ⚠️ verify-report.json es de otra canción — se ignora para elegir versión.');
         }
@@ -1820,7 +1863,7 @@ async function runFlowInner({ resume = false } = {}, hb) {
           console.log('\n⚠️ Chrome se cerró — la auto-detección no puede continuar.');
           break;
         }
-        if (/no coincide con state\.json/.test(e.message || '')) {
+        if (/no coincide con state\.json/.test(e.message || '') || /asignación activa en curso \(esperado/.test(e.message || '')) {
           consecutiveStructuralErrors = 0; // espera normal pre-Submit
         } else {
           consecutiveStructuralErrors++;

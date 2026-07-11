@@ -42,6 +42,16 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 AUDIO_EXTENSIONS = (".mp3", ".wav", ".m4a", ".flac", ".ogg")
 TARGET_SR = 48000  # NISQA v2.0 espera 48kHz (mismo TARGET_SR que clap_score.py)
 
+# torchmetrics NISQA falló con "Maximum number of mel spectrogram windows
+# exceeded" en 7/7 canciones reales (auditoría 2026-07-10) — cualquier canción
+# de duración completa (~3 min) excede el límite interno del modelo, así que
+# esta señal NUNCA estuvo disponible en producción. Fix: cortar el audio en
+# ventanas de MAX_CHUNK_SECONDS, puntuar cada una por separado y promediar —
+# workaround estándar para este límite conocido de NISQA/torchmetrics. 10s es
+# conservador a propósito (sin un valor documentado del límite real); si algún
+# chunk igual falla, se descarta y se promedia con los que sí funcionaron.
+MAX_CHUNK_SECONDS = 10
+
 # Orden fijo de salida de torchmetrics: mos, noisiness, discontinuity,
 # coloration, loudness (ver docs de NonIntrusiveSpeechQualityAssessment).
 DIM_NAMES = ["noisiness", "discontinuity", "coloration", "loudness"]
@@ -95,21 +105,38 @@ def normalize_1_5_to_100(x):
 
 
 def score_one(metric, audio_path, device):
-    """Evalúa un archivo de audio. Devuelve dict con scores o lanza."""
+    """Evalúa un archivo de audio en chunks de MAX_CHUNK_SECONDS y promedia.
+    Devuelve dict con scores o lanza si NINGÚN chunk pudo evaluarse."""
     import torch
+    import numpy as np
     import librosa
 
     audio, sr = librosa.load(audio_path, sr=TARGET_SR, mono=True)
     duration_sec = len(audio) / sr
+    chunk_len = int(MAX_CHUNK_SECONDS * sr)
+    min_chunk_len = sr  # descartar restos < 1s, no aportan señal confiable
 
-    preds = torch.from_numpy(audio).float()
-    if device == "cuda":
-        preds = preds.to("cuda")
+    chunk_values = []
+    chunk_errors = []
+    for start in range(0, len(audio), chunk_len):
+        chunk = audio[start:start + chunk_len]
+        if len(chunk) < min_chunk_len:
+            continue
+        preds = torch.from_numpy(chunk).float()
+        if device == "cuda":
+            preds = preds.to("cuda")
+        try:
+            with torch.no_grad():
+                out = metric(preds)
+            chunk_values.append(out.detach().cpu().numpy().tolist())
+        except Exception as e:
+            chunk_errors.append(str(e))
 
-    with torch.no_grad():
-        out = metric(preds)
+    if not chunk_values:
+        detail = chunk_errors[0] if chunk_errors else "audio demasiado corto para ningún chunk válido"
+        raise RuntimeError(f"NISQA falló en los {len(chunk_errors)} chunk(s) intentados: {detail}")
 
-    values = out.detach().cpu().numpy().tolist()
+    values = np.mean(chunk_values, axis=0).tolist()
     mos = float(values[0])
     dim_values = values[1:5]
     dimensions = {name: normalize_1_5_to_100(v) for name, v in zip(DIM_NAMES, dim_values)}
@@ -119,6 +146,8 @@ def score_one(metric, audio_path, device):
         "mos": round(mos, 2),
         "dimensions": dimensions,
         "duration_seconds": round(duration_sec, 1),
+        "chunks_scored": len(chunk_values),
+        "chunks_failed": len(chunk_errors),
     }
 
 

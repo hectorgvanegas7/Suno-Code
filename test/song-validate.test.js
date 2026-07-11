@@ -487,3 +487,53 @@ test('parseSections respeta el orden y separa líneas correctamente', () => {
   assert.equal(sections['Verse 1'].length, 4);
   assert.equal(sections['Chorus 1'][0].startsWith('Frank'), true);
 });
+
+test('BUG REAL 2026-07-10 ("El Aire Que Respiro"): "Jesús" respelleado a "Yeous" se detecta como fallo duro', () => {
+  // Caso real: el LLM fusionó "Jesús Alejandro" como "Yeousalejandro" al
+  // inicio del Chorus, marcando foneticaAplicada=true — el chequeo B (primera
+  // palabra del Chorus) lo dejó pasar porque el bypass de foneticaAplicada
+  // acepta cualquier variante con la primera letra correcta. Esta regla es
+  // independiente de ese bypass: "Jesús" es español estándar, tiene que
+  // aparecer con su ortografía real en algún lugar de la letra.
+  const response = buildResponse({
+    chorus1: ['Yeousalejandro eres mi vida entera', 'eres el aire que respiro cuando espero', 'aunque yo no fui perfecta como madre', 'tú eres lo más lindo que me dio esta tierra'],
+    chorus2: ['Yeousalejandro estoy tan orgullosa', 'de cada meta que alcanzas sin soltar la cosa', 'persistente hasta el final aunque el camino pese', 'eres mi razón de ser, mi motor, lo que me mueve'],
+    foneticaAplicada: true,
+  });
+  const { valid, failures } = hardValidate(response, "What's their name?: Jesús Alejandro");
+  assert.equal(valid, false);
+  assert.ok(
+    failures.some((f) => f.includes('Jesús') && f.includes('español estándar')),
+    `debería marcar el nombre español estándar respelleado, fallos: ${failures.join(' | ')}`
+  );
+});
+
+test('nombre español estándar SIN respellear (survey sin tilde, letra con tilde correcta) pasa limpio', () => {
+  // extractFirstNames() devuelve el nombre en minúscula y sin tilde tal como
+  // lo tipeó el cliente ("jesus") — el chequeo tiene que buscar la ortografía
+  // CANÓNICA ("Jesús") en la letra, no la forma cruda de la encuesta.
+  const response = buildResponse({
+    chorus1: ['Jesús, hoy te canto con todo mi amor', 'Gracias por darme siempre tu calor', 'Cada momento contigo brilla mejor', 'Eres mi orgullo y mi mayor honor'],
+    chorus2: ['Jesús, admiro tu fuerza y tu bondad', 'Marcaste mi vida con sinceridad', 'Nunca dudé de tu generosidad', 'Eres ejemplo puro de humanidad'],
+  });
+  const { failures } = hardValidate(response, "What's their name?: jesus");
+  assert.ok(
+    !failures.some((f) => f.includes('español estándar')),
+    `no debería marcar nada, encontrado: ${failures.filter((f) => f.includes('español estándar')).join(' | ')}`
+  );
+});
+
+test('nombre NO estándar (anglicanizado) sigue sin chequeo de ortografía exacta — el backstop no le aplica', () => {
+  // "Johelyn" no está en la lista curada de nombres españoles estándar — el
+  // respelling fonético real (ej. "Yoelin") sigue siendo válido y no debe
+  // dispararle este chequeo nuevo.
+  const response = buildResponse({
+    chorus1: ['Yoelin, hoy te canto con todo mi amor', 'Gracias por darme siempre tu calor', 'Cada momento contigo brilla mejor', 'Eres mi orgullo y mi mayor honor'],
+    foneticaAplicada: true,
+  });
+  const { failures } = hardValidate(response, "What's their name?: Johelyn");
+  assert.ok(
+    !failures.some((f) => f.includes('español estándar')),
+    `no debería aplicar el backstop a nombres no estándar, encontrado: ${failures.filter((f) => f.includes('español estándar')).join(' | ')}`
+  );
+});

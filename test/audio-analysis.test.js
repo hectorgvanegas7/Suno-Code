@@ -6,7 +6,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { pickBestVersion, lastMeaningfulLine, checkNamePacing, detectMergedWordPairs, computeMissingNames, detectTruncatedWords, countVowelsEs } = require('../lib/audio-analysis');
+const { pickBestVersion, lastMeaningfulLine, checkNamePacing, detectMergedWordPairs, computeMissingNames, detectTruncatedWords, countVowelsEs, reconcileF0Octave } = require('../lib/audio-analysis');
 const { applyPhoneticReplacements } = require('../lib/song-file');
 
 function buildReport(overrides = {}) {
@@ -49,6 +49,30 @@ test('pickBestVersion: A y B idénticos → empate técnico, gana A por defecto'
   assert.equal(result.recommended, 'A');
   assert.equal(result.scoreA, result.scoreB);
   assert.match(result.reason, /Empate técnico/);
+});
+
+test('pickBestVersion: empate técnico entre versiones LIMPIAS no menciona problemas compartidos', () => {
+  const reportA = buildReport();
+  const reportB = buildReport();
+  const result = pickBestVersion(reportA, reportB);
+  assert.deepEqual(result.sharedIssues, []);
+  assert.doesNotMatch(result.reason, /OJO/);
+});
+
+test('BUG REAL 2026-07-09 ("Mi promesa"): empate técnico con fidelidad de letra baja en AMBAS se marca como problema compartido, no como empate de calidad', () => {
+  const reportA = buildReport({ levenshteinScore: 0.72 });
+  const reportB = buildReport({ levenshteinScore: 0.66 });
+  const result = pickBestVersion(reportA, reportB);
+  assert.equal(result.recommended, 'A');
+  assert.ok(result.sharedIssues.some((s) => s.includes('fidelidad de letra')), `sharedIssues: ${result.sharedIssues.join(' | ')}`);
+  assert.match(result.reason, /OJO/);
+});
+
+test('pickBestVersion: nombres ausentes en ambas versiones se reporta como problema compartido', () => {
+  const reportA = buildReport({ missingNames: ['orlando'] });
+  const reportB = buildReport({ missingNames: ['orlando'] });
+  const result = pickBestVersion(reportA, reportB);
+  assert.ok(result.sharedIssues.some((s) => s.includes('nombres ausentes')));
 });
 
 test('pickBestVersion: B con nombre ausente pierde contra A limpia', () => {
@@ -288,4 +312,59 @@ test('detectTruncatedWords: palabra corta con probability ALTA no se marca (Whis
 
 test('detectTruncatedWords: sin segments devuelve lista vacía', async () => {
   assert.deepEqual(await detectTruncatedWords(FAKE_MP3_PATH, []), []);
+});
+
+test('reconcileF0Octave: voz aislada 2x el mix (bug real 2026-07-10, "Mi promesa") se marca Indeterminado', () => {
+  const vocal = { medianF0Hz: 235.7, voicedRatio: 0.864, detectedGender: 'Femenina', error: null };
+  const mix = { medianF0Hz: 116.5, voicedRatio: 0.669, detectedGender: 'Masculina', error: null };
+  const result = reconcileF0Octave(vocal, mix);
+  assert.equal(result.detectedGender, 'Indeterminado');
+  assert.equal(result.octaveConflict, true);
+  assert.equal(result.mixCheckF0Hz, 116.5);
+});
+
+test('reconcileF0Octave: voz aislada la mitad del mix también cuenta como conflicto de octava', () => {
+  const vocal = { medianF0Hz: 117.2, voicedRatio: 0.7, detectedGender: 'Masculina', error: null };
+  const mix = { medianF0Hz: 263, voicedRatio: 0.88, detectedGender: 'Femenina', error: null };
+  const result = reconcileF0Octave(vocal, mix);
+  assert.equal(result.detectedGender, 'Indeterminado');
+  assert.equal(result.octaveConflict, true);
+});
+
+test('reconcileF0Octave: voz aislada y mix de acuerdo (misma octava) no se toca', () => {
+  const vocal = { medianF0Hz: 130.4, voicedRatio: 0.8, detectedGender: 'Masculina', error: null };
+  const mix = { medianF0Hz: 118.1, voicedRatio: 0.7, detectedGender: 'Masculina', error: null };
+  const result = reconcileF0Octave(vocal, mix);
+  assert.equal(result.detectedGender, 'Masculina');
+  assert.equal(result.octaveConflict, undefined);
+  assert.equal(result.mixCheckF0Hz, 118.1);
+});
+
+test('reconcileF0Octave: desfase que NO es una octava limpia (2.79x, "Sábado Veinte de Septiembre") igual se marca como conflicto', () => {
+  // Caso real: el primer fix (ratio 1.7-2.35x) se lo perdió porque el mix
+  // también viene sesgado hacia abajo por instrumentos. Lo que importa es
+  // que las clasificaciones categóricas discrepan, no el ratio exacto.
+  const vocal = { medianF0Hz: 263, voicedRatio: 0.767, detectedGender: 'Femenina', error: null };
+  const mix = { medianF0Hz: 94.3, voicedRatio: 0.718, detectedGender: 'Masculina', error: null };
+  const result = reconcileF0Octave(vocal, mix);
+  assert.equal(result.detectedGender, 'Indeterminado');
+  assert.equal(result.octaveConflict, true);
+  assert.equal(result.mixCheckF0Hz, 94.3);
+});
+
+test('reconcileF0Octave: si el mix cae en la zona ambigua (Indeterminado) no hay chequeo cruzado posible, se respeta la voz aislada', () => {
+  const vocal = { medianF0Hz: 235.7, voicedRatio: 0.864, detectedGender: 'Femenina', error: null };
+  const mix = { medianF0Hz: 168, voicedRatio: 0.5, detectedGender: 'Indeterminado', error: null };
+  const result = reconcileF0Octave(vocal, mix);
+  assert.equal(result.detectedGender, 'Femenina');
+  assert.equal(result.octaveConflict, undefined);
+  assert.equal(result.mixCheckF0Hz, 168);
+});
+
+test('reconcileF0Octave: si el mix tiene error, se devuelve la voz aislada sin tocar', () => {
+  const vocal = { medianF0Hz: 235.7, voicedRatio: 0.864, detectedGender: 'Femenina', error: null };
+  const mix = { medianF0Hz: null, voicedRatio: null, detectedGender: null, error: 'ffmpeg failed' };
+  const result = reconcileF0Octave(vocal, mix);
+  assert.equal(result.detectedGender, 'Femenina');
+  assert.equal(result.octaveConflict, undefined);
 });

@@ -1,5 +1,160 @@
 # Lessons / gotchas
 
+## readRecentCompletion: la alerta de "posible rediseño de UI" disparó 7/7 veces, siempre por el mismo falso positivo benigno (2026-07-10, arreglado tras auditoría de sesión)
+
+Confirmado en vivo en las 7 canciones de la sesión: el timeout de `h3:has-
+text("Recent completions")` no era nunca un selector roto — el panel
+simplemente no renderiza mientras hay una asignación activa en curso (el
+iframe/pestaña muestra la vista "CURRENT ASSIGNMENT" en su lugar). El código
+ya distinguía un caso benigno parecido ("no coincide con state.json"), pero
+no este.
+
+**Fix:** antes de dejar que el timeout genérico dispare, `readRecentCompletion`
+chequea si la página muestra "CURRENT ASSIGNMENT" — si es así, lanza un
+mensaje reconocible (`"asignación activa en curso (esperado"`) que el loop de
+espera del Submit trata igual que el caso de `state.json`: resetea el
+contador de fallos estructurales sin avisar. Verificado en vivo contra el
+Chrome real (puerto 9333) con una asignación activa cargada — el body
+contiene "CURRENT ASSIGNMENT" y CERO menciones de "Recent completions",
+exactamente el patrón esperado.
+
+## NISQA fallaba 7/7 veces en canciones reales — "Maximum number of mel spectrogram windows exceeded" (2026-07-10, arreglado tras auditoría de sesión)
+
+Las 7 canciones de la sesión del `--loop` de esta noche fallaron NISQA con el
+mismo error, sin excepción — no era un caso aislado, era estructural:
+cualquier canción de duración completa (~3 min) excede el límite interno del
+modelo (`NonIntrusiveSpeechQualityAssessment` de torchmetrics), que espera
+clips bastante más cortos. La señal complementaria a CLAP nunca estuvo
+disponible en producción desde que se agregó.
+
+**Fix:** `lib/nisqa_score.py` — en vez de pasarle el audio completo al modelo
+de una sola vez, se corta en ventanas de `MAX_CHUNK_SECONDS` (10s, valor
+conservador sin un límite documentado exacto), se puntúa cada ventana por
+separado y se promedian los resultados (`mos` + las 4 dimensiones). Si algún
+chunk individual falla, se descarta y se promedia con los que sí funcionaron
+— solo lanza error si NINGÚN chunk pudo evaluarse. Confirmado en vivo contra
+"Veinticinco Veranos.mp3" (3:03, 19 chunks, 0 fallidos) — antes tiraba el
+error de siempre, ahora da `nisqa_score: 18` real.
+
+**Nota de calibración (sin resolver todavía):** el score que dio (18/100,
+MOS 1.74) es bajo — puede ser una señal real (voz con artefactos) o puede
+que ventanas de 10s sean demasiado cortas para que el modelo puntúe bien
+(NISQA fue entrenado típicamente sobre clips de cierta duración, no
+necesariamente 10s). Igual que CLAP y el resto de las señales nuevas del
+proyecto, esto sigue siendo informativo/no calibrado — el arreglo de esta
+sesión fue que la señal EXISTA, no que sus números ya estén validados de
+oído.
+
+## Verificación de subida al Flow: falso negativo por timing + el gate del Auto-Submit no la leía (2026-07-10, en vivo, 2/2 canciones)
+
+`upload-to-flow.js` avisó "No se pudo confirmar que el archivo quedó en la UI"
+en dos canciones seguidas ("El Día Que No Hablamos" y "La Bata Larga de
+Esperanza"). Verificado en vivo por CDP las dos veces: el archivo SÍ se había
+subido correctamente (`<audio src>` con URL de Supabase y timestamp fresco),
+solo que minutos después de que el chequeo ya había fallado.
+
+**Causa raíz:** el chequeo corría UNA sola vez, 2 segundos fijos después de
+`setInputFiles()` — insuficiente para que el servidor del Flow procese la
+subida y actualice el DOM. **Fix:** reemplazado por un poll de hasta 12s
+(1s entre intentos) en vez de un intento único.
+
+**El hallazgo más importante estaba un nivel más arriba:** este chequeo
+(`uploadConfirmed`, variable LOCAL de `upload-to-flow.js`) nunca afectaba el
+`uploadConfirmed` que usa `start-flow.js` para decidir si arma el Auto-Submit
+— ese otro `uploadConfirmed` solo verifica que el proceso hijo no haya
+lanzado una excepción (exit code 0). Dos variables con el mismo nombre,
+significados distintos, y solo la segunda importaba. Si la subida real
+hubiera fallado en silencio, el gate documentado en CLAUDE.md ("el Auto-Submit
+solo dispara si se subió y confirmó un MP3") no lo habría detectado.
+**Fix:** cuando el poll de 12s se agota sin confirmar, ahora se llama
+`pauseForHumanInteraction` (mismo fallback que un error real de subida) en
+vez de solo loguear un warning y seguir — en `--loop` esto abandona la
+canción por timeout humano en vez de auto-submitear una subida sin verificar.
+
+**Takeaway:** un mismo nombre de variable en dos archivos distintos con
+significados distintos es una trampa — "confirmado" en un proceso hijo no
+significa nada para el proceso padre a menos que el resultado viaje
+explícitamente entre ellos (acá, vía exit code + pauseForHumanInteraction).
+
+## "Jesús" respelleado a "Yeous" — la regla de fonética se aplicaba a nombres españoles ya correctos (2026-07-10, "El Aire Que Respiro", en vivo)
+
+Segunda vez que pasa lo mismo (la primera fue "Jeremías" → "Yeremías",
+detectada y corregida antes en la sesión — ver memoria de usuario). Esta vez
+"Jesús Alejandro" salió como "Yeousalejandro" en el Chorus 1 y 2 de una
+canción real, ya subida a Suno. Hector lo vio en la letra generada y pidió
+explícitamente NO parchear el caso puntual sino generalizar la regla para
+que la clase entera de error no vuelva a pasar.
+
+**Causa raíz:** la sección `PHONETIC RE-SPELLING FOR SUNO` del
+SYSTEM_PROMPT (run.js) decía "si un nombre tiene J/Y que suena a inglés,
+respelléalo" sin excluir nombres que YA son español estándar. Los ejemplos
+de la regla (Johelyn, Dayana, Brayan, Geovanny, Jhoselyn, Shirley, Maryuri)
+son todos anglicismos/ortografías inventadas — pero el modelo generalizó de
+"nombres con J que Suno pronuncia mal" a "cualquier nombre con J", incluyendo
+nombres españoles reales donde la J ya suena bien (Jesús, Jeremías, José,
+Juan...).
+
+**Fix:** regla dura agregada al inicio de la sección en run.js: nunca
+respellear un nombre que ya es español estándar/inambiguo (con ejemplos
+explícitos: Jesús, José, Juan, Jorge, Javier, Jeremías, Josué, Julio), y
+aclarado que la sección entera solo aplica a nombres anglicanizados o con
+ortografía inventada que no existe en español estándar. Además,
+`lib/name-dictionary.json` gana `"jesus"/"jesús": "Jesús"` (candado de
+identidad, mismo patrón que `"jeremias"`) como red de seguridad adicional
+vía el mecanismo de REGLA ESTRICTA (gana sobre las reglas generales del
+prompt aunque el modelo vuelva a fallar).
+
+**Takeaway:** cuando el mismo tipo de error aparece dos veces con nombres
+distintos, no es una casualidad de un nombre puntual — es la regla general
+la que está mal calibrada. Un diccionario de candados por nombre (Jeremías,
+Jesús, ...) tapa casos ya vistos, pero solo arreglar la regla del prompt
+previene los que todavía no vimos.
+
+## f0Gender reportaba "Femenina" con confianza para una voz masculina real — error de octava sobre la voz aislada por demucs (2026-07-10, "Mi promesa", en vivo)
+
+Corrida `--loop` sin `--pause`: `verify-report.json` marcó `f0Gender.mismatch: true`
+en A y B ("Femenina" detectada, 235.7/263 Hz, contra "Masculina" pedida en
+song.txt) para "Mi promesa". Como `f0Gender` es puramente informativo (0 puntos
+en `pickBestVersion`), no bloqueó nada y la canción se subió y auto-submiteó
+sin que nadie lo viera. Horas después Hector escuchó el MP3 real: la voz era
+claramente masculina.
+
+**Diagnóstico en vivo:** corriendo `lib/f0_gender_check.py` directamente sobre
+el MP3 completo (mix, sin aislar) en vez de la voz aislada por demucs, dio
+116.5 Hz y 117.2 Hz — "Masculina" en las dos, coincidiendo con lo escuchado.
+Exactamente la mitad del F0 reportado sobre la voz aislada: un error clásico
+de octava (pyin bloqueando el 2do armónico en vez del fundamental real),
+específico de correr sobre el stem separado por demucs — no del mix.
+
+**Fix (v1):** `reconcileF0Octave` (lib/audio-analysis.js) — el chequeo de F0
+ahora corre sobre la voz aislada Y sobre el mix completo (mismo proceso,
+batch). Si ambos difieren por un factor cercano a una octava (0.43–0.59x o
+1.7–2.35x), se reporta `detectedGender: "Indeterminado"` con
+`octaveConflict: true` y ambos valores a la vista.
+
+**Se escapó un caso esa misma noche (2026-07-10, "Sábado Veinte de
+Septiembre", en vivo):** Versión B dio voz aislada 263 Hz vs. mix 94.3 Hz —
+ratio 2.79x, fuera de la ventana 1.7–2.35x porque el mix TAMBIÉN viene
+sesgado (hacia abajo, por el bajo/instrumentos — auditoría 2026-07-09), así
+que el desfase entre dos mediciones cada una con su propio sesgo no cae en
+una octava limpia. Se reportó "Femenina" con confianza otra vez, sin que el
+v1 del fix lo atajara. Confirmado de nuevo corriendo `f0_gender_check.py`
+sobre el mix a mano: 94.3 Hz → Masculina, coincide con la voz real.
+
+**Fix (v2, el que quedó):** en vez de exigir un ratio numérico específico,
+`reconcileF0Octave` ahora solo compara las clasificaciones CATEGÓRICAS
+(Masculina/Femenina) de la voz aislada y el mix — si discrepan, sea cual sea
+el ratio exacto, es `"Indeterminado"`. Regresión fijada en
+test/audio-analysis.test.js (187 tests) — incluye el caso de 2.79x que el v1
+se perdía.
+
+**Takeaway:** una señal "informativa" que se imprime con la misma confianza
+que una medida verificada es indistinguible de un dato real hasta que alguien
+la contrasta de oído — igual al patrón de "más de vos" (ver más abajo) y al
+del selector "More from Suno": un chequeo que puede estar sistemáticamente
+mal necesita su propio chequeo cruzado antes de aparecer como texto plano en
+un reporte, no alcanza con marcarlo "no calibrado" en un comentario.
+
 ## Suno renombró el aria-label del botón "⋯" — Download MP3 fallaba para A y B (2026-07-09, en vivo, madrugada)
 
 Loop nocturno abandonó una canción tras 20 min: "No se pudo clickear Download
@@ -24,6 +179,30 @@ el selector NO cambió (mismo DOM que siempre). Causa más probable: el panel
 completada), no un rediseño de UI. No requiere fix de selector; si se repite
 seguido conviene revisar si el timeout de 10s de esa espera es corto para la
 latencia real del panel.
+
+## El "fix" del aria-label de la madrugada estaba mal — "More options" era correcto todo el tiempo (2026-07-09, tarde, en vivo)
+
+El loop nocturno volvió a trabarse en el mismo fallback ("No se pudo abrir el
+menú ⋯ de la card... tras 3 intentos") horas después del fix de la entrada
+anterior, que había cambiado `MORE_OPTIONS_MENU_ARIA_SELECTOR` de
+`[aria-label="More options"]` a `[aria-label="More from Suno"]`.
+
+Diagnóstico en vivo contra el Chrome pausado del puerto 9333
+(`suno-selector-drift.js` + un probe directo por CDP): `[aria-label="More
+from Suno"]` matcheaba UN SOLO botón en toda la página, no relacionado con
+ninguna card (`0/15` clip-rows). `[aria-label="More options"]` seguía
+matcheando **15/15** cards — el botón real nunca cambió de aria-label. El fix
+de la madrugada se aplicó sin verificar en vivo que el selector nuevo
+matcheara filas reales, solo que "algo" existía con ese texto en el DOM.
+
+**Fix:** revertido `MORE_OPTIONS_MENU_ARIA_SELECTOR` a `[aria-label="More
+options"]` en `lib/suno-selectors.js`.
+
+**Takeaway:** un selector "corregido" que matchea 1 elemento fuera de las
+cards es peor que uno roto — pasa un chequeo superficial ("existe en el DOM")
+sin resolver nada. Cualquier fix de selector de card debe confirmar el conteo
+de matches CONTRA las filas reales (`row.locator(...).count()` por cada
+`clip-row`), no solo `page.locator(...).count()` global.
 
 ## "más de vos" con trato tú llegó al AUDIO generado — hardValidate nunca validó el trato tú (2026-07-09, "Luz Que No Buscaba", en vivo)
 

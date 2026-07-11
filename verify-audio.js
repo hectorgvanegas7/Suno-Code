@@ -30,7 +30,7 @@ const path = require('path');
 const { findSunoMp3s, SUNO_DIR } = require('./lib/audio-match');
 const { extractFirstNames } = require('./lib/text-helpers');
 const { applyPhoneticReplacements, readSunoLyricsCache, parseSongFile } = require('./lib/song-file');
-const { analyzeAudio, prepareVocals, cleanupVocalsTmp, transcribeFiles, runClapScoreWithVocalIsolation, runNisqaScore, runF0GenderCheck, resolveVocalOrMixPaths, stripStructuralTags, printReport, pickBestVersion, parseLyricsFromSongFile, parseTituloFromSongFile, getDurationAsync, formatDuration, formatElapsed, SONG_PATH } = require('./lib/audio-analysis');
+const { analyzeAudio, prepareVocals, cleanupVocalsTmp, transcribeFiles, runClapScoreWithVocalIsolation, runNisqaScore, runF0GenderCheck, reconcileF0Octave, resolveVocalOrMixPaths, stripStructuralTags, printReport, pickBestVersion, parseLyricsFromSongFile, parseTituloFromSongFile, getDurationAsync, formatDuration, formatElapsed, SONG_PATH } = require('./lib/audio-analysis');
 const { notify } = require('./lib/ntfy');
 
 const SUNO_LYRICS_CACHE_PATH = path.join(__dirname, 'suno-lyrics-cache.json');
@@ -170,21 +170,34 @@ function parseArgs(argv) {
       );
       nisqaBatch = runNisqaScore(nisqaPaths, { device: useDemucs ? 'cuda' : null });
 
-      // F0 — género de voz (CPU, informativo). SOLO sobre la voz aislada por
-      // demucs: sin aislar, pyin sobre la mezcla la dominan bajo/instrumentos
-      // y el "género detectado" es ruido con apariencia de dato (auditoría
-      // 2026-07-09). Igual que CLAP/NISQA, corre ANTES del finally
-      // (cleanupVocalsTmp borra el .wav de voz).
+      // F0 — género de voz (CPU, informativo). Primario sobre la voz aislada
+      // por demucs: sin aislar, pyin sobre la mezcla la dominan bajo/
+      // instrumentos y el "género detectado" es ruido con apariencia de dato
+      // (auditoría 2026-07-09). PERO la voz aislada tiene su propio error
+      // conocido (2026-07-10, "Mi promesa", confirmado de oído): pyin a veces
+      // bloquea el 2do armónico y devuelve un F0 ~2x el real, reportando
+      // "Femenina" con confianza para una voz masculina real. El mix, aunque
+      // no confiable solo, SÍ sirve de chequeo cruzado — si difiere de la voz
+      // aislada por ~una octava, se reporta "Indeterminado" en vez de un
+      // género con confianza falsa (ver reconcileF0Octave). Igual que
+      // CLAP/NISQA, corre ANTES del finally (cleanupVocalsTmp borra el .wav
+      // de voz).
       const isolatedPaths = [prepA.demucs.used ? prepA.targetPath : null, prepB.demucs.used ? prepB.targetPath : null];
-      const toRunF0 = isolatedPaths.filter(Boolean);
+      const mixPathsForF0 = [versionA.path, versionB.path];
+      const f0Pairs = isolatedPaths.map((p, i) => (p ? { vocal: p, mix: mixPathsForF0[i] } : null));
+      const toRunF0 = f0Pairs.filter(Boolean).flatMap((pr) => [pr.vocal, pr.mix]);
       const f0NoVocalsError = 'sin voz aislada (demucs) — F0 sobre el mix completo no es confiable, no se corre';
       if (toRunF0.length > 0) {
         const ranF0 = runF0GenderCheck(toRunF0);
-        let ranIdx = 0;
+        let pairIdx = 0;
         f0Batch = {
-          results: isolatedPaths.map((p) => p
-            ? ranF0.results[ranIdx++]
-            : { medianF0Hz: null, voicedRatio: null, detectedGender: null, error: f0NoVocalsError }),
+          results: f0Pairs.map((pr) => {
+            if (!pr) return { medianF0Hz: null, voicedRatio: null, detectedGender: null, error: f0NoVocalsError };
+            const vocalResult = ranF0.results[pairIdx * 2];
+            const mixResult = ranF0.results[pairIdx * 2 + 1];
+            pairIdx++;
+            return reconcileF0Octave(vocalResult, mixResult);
+          }),
           f0Ms: ranF0.f0Ms,
         };
       } else {

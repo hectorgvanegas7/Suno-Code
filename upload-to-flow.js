@@ -252,19 +252,41 @@ function parseArgs(argv) {
   // algún audio[src]?" da true al instante sin importar si la subida nueva
   // funcionó o no. Ahora solo cuenta como confirmación real si el src
   // CAMBIÓ respecto al que había antes (o si antes no había ninguno).
-  const uploadConfirmed = await page.evaluate(({ filename, previousAudioSrc }) => {
+  //
+  // Bug real #2 (2026-07-10, ver LESSONS.md): un solo chequeo tras 2s fijos
+  // de espera daba falso negativo 2/2 veces en vivo — el archivo SÍ terminaba
+  // subiendo (confirmado por CDP minutos después), pero el servidor tarda más
+  // de 2s en procesar la subida y actualizar el DOM. Reemplazado por un poll
+  // de hasta 12s en vez de un solo intento — la subida real no cambia, solo
+  // se le da tiempo real a la UI para reflejarla antes de declarar fallo.
+  const checkUploadInDom = () => page.evaluate(({ filename, previousAudioSrc }) => {
     const text = document.body.innerText || '';
     if (text.includes(filename)) return true;
     const audioEl = document.querySelector('audio[src]');
     return !!audioEl && audioEl.src !== previousAudioSrc;
   }, { filename: path.basename(uploadPath), previousAudioSrc }).catch(() => false);
 
+  let uploadConfirmed = await checkUploadInDom();
+  const uploadCheckDeadline = Date.now() + 12000;
+  while (!uploadConfirmed && Date.now() < uploadCheckDeadline) {
+    await page.waitForTimeout(1000);
+    uploadConfirmed = await checkUploadInDom();
+  }
+
   await page.screenshot({ path: 'flow-upload-verify.png', fullPage: true });
 
   if (uploadConfirmed) {
     console.log('  ✅ Archivo visible en la UI del Flow.');
   } else {
-    console.log('  ⚠️  No se pudo confirmar que el archivo quedó en la UI (revisá flow-upload-verify.png).');
+    // No es solo un warning cosmético: si seguimos de largo acá, el proceso
+    // termina con exit 0 y start-flow.js marca `uploadConfirmed = true` SOLO
+    // porque el script no lanzó excepción — sin que nadie haya verificado que
+    // el archivo realmente llegó al Flow. Mismo fallback que un error real de
+    // subida (pauseForHumanInteraction): pausa, avisa, y en --loop se
+    // abandona la canción por timeout en vez de auto-submitear una subida sin
+    // confirmar (ver LESSONS.md, 2026-07-10).
+    console.log('  ⚠️  No se pudo confirmar que el archivo quedó en la UI tras 12s de poll (revisá flow-upload-verify.png).');
+    await pauseForHumanInteraction('No se pudo confirmar que el MP3 quedó visible en el Flow tras subirlo. Revisá flow-upload-verify.png y confirmá a mano que el archivo correcto está cargado antes de continuar.');
   }
 
   // ══════════════════════════════════════════════════════════════════════════
