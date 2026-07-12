@@ -30,8 +30,9 @@ const path = require('path');
 const { findSunoMp3s, SUNO_DIR } = require('./lib/audio-match');
 const { extractFirstNames } = require('./lib/text-helpers');
 const { applyPhoneticReplacements, readSunoLyricsCache, parseSongFile } = require('./lib/song-file');
-const { analyzeAudio, prepareVocals, cleanupVocalsTmp, transcribeFiles, runClapScoreWithVocalIsolation, runNisqaScore, runF0GenderCheck, reconcileF0Octave, resolveVocalOrMixPaths, stripStructuralTags, printReport, pickBestVersion, parseLyricsFromSongFile, parseTituloFromSongFile, getDurationAsync, formatDuration, formatElapsed, SONG_PATH } = require('./lib/audio-analysis');
+const { analyzeAudio, prepareVocals, cleanupVocalsTmp, transcribeFiles, runClapScoreWithVocalIsolation, runNisqaScore, runMuqEvalScore, runAudioboxScore, runF0GenderCheck, reconcileF0Octave, resolveVocalOrMixPaths, stripStructuralTags, printReport, pickBestVersion, parseLyricsFromSongFile, parseTituloFromSongFile, getDurationAsync, formatDuration, formatElapsed, SONG_PATH } = require('./lib/audio-analysis');
 const { notify } = require('./lib/ntfy');
+const pipelineState = require('./lib/pipeline-state');
 
 const SUNO_LYRICS_CACHE_PATH = path.join(__dirname, 'suno-lyrics-cache.json');
 
@@ -211,6 +212,19 @@ function parseArgs(argv) {
       cleanupVocalsTmp(prepB);
     }
 
+    // MuQ-Eval + Audiobox — calidad musical percibida / de producción sobre
+    // el MIX completo (a diferencia de NISQA, la calidad de la mezcla es una
+    // propiedad de la canción entera, no de la voz aislada) — por eso pueden
+    // correr DESPUÉS del finally: los paths del mix sobreviven al cleanup de
+    // los .wav de voz. SECUENCIALES a propósito (spawnSync ya es bloqueante):
+    // cada proceso Python carga su modelo, puntúa y muere liberando la VRAM
+    // antes de que arranque el siguiente — nunca compiten por los 8GB.
+    // INFORMATIVOS (0 pts en pickBestVersion) hasta calibrar en vivo.
+    console.log('🎼 Evaluando calidad musical percibida con MuQ-Eval...');
+    const muqBatch = runMuqEvalScore([versionA.path, versionB.path], { device: useDemucs ? 'cuda' : null });
+    console.log('🎚️  Evaluando calidad de producción con Audiobox Aesthetics...');
+    const audioboxBatch = runAudioboxScore([versionA.path, versionB.path], { device: useDemucs ? 'cuda' : null });
+
     reportA = await analyzeAudio(versionA.path, {
       label: 'Versión A',
       titulo,
@@ -224,6 +238,8 @@ function parseArgs(argv) {
       nisqaOutcome: nisqaBatch.results[0],
       expectedGender,
       f0Outcome: f0Batch.results[0],
+      muqOutcome: muqBatch.results[0],
+      audioboxOutcome: audioboxBatch.results[0],
     });
     reportB = await analyzeAudio(versionB.path, {
       label: 'Versión B',
@@ -238,6 +254,8 @@ function parseArgs(argv) {
       nisqaOutcome: nisqaBatch.results[1],
       expectedGender,
       f0Outcome: f0Batch.results[1],
+      muqOutcome: muqBatch.results[1],
+      audioboxOutcome: audioboxBatch.results[1],
     });
   } else {
     console.log('⏳ Analizando Versión A... (puede tardar 1-3 minutos si Whisper necesita transcribir)');
@@ -285,6 +303,8 @@ function parseArgs(argv) {
         loudness: reportA.loudness ?? null,
         f0Gender: reportA.f0Gender ?? null,
         truncatedWords: reportA.truncatedWords ?? [],
+        muqEval: reportA.muqEval ?? null,
+        audiobox: reportA.audiobox ?? null,
         summary: reportA.summary,
       },
       reportB: reportB ? {
@@ -306,6 +326,8 @@ function parseArgs(argv) {
         loudness: reportB.loudness ?? null,
         f0Gender: reportB.f0Gender ?? null,
         truncatedWords: reportB.truncatedWords ?? [],
+        muqEval: reportB.muqEval ?? null,
+        audiobox: reportB.audiobox ?? null,
         summary: reportB.summary,
       } : null,
       timestamp: new Date().toISOString(),
@@ -332,6 +354,51 @@ function parseArgs(argv) {
     fs.appendFileSync(PACING_LOG_PATH, logLine + '\n', 'utf-8');
   } catch (e) {
     console.warn(`⚠️ No se pudo escribir logs/pacing-feedback.jsonl: ${e.message}`);
+  }
+
+  // Log de calibración de las señales de calidad musical/producción nuevas
+  // (MuQ-Eval + Audiobox). Mismo criterio que pacing-feedback.jsonl: SOLO
+  // logging para revisar a mano contra el oído de Gabo/REDOs reales, antes
+  // de decidir si algún día pesan en pickBestVersion. Best-effort: nunca
+  // bloquea. (lib/hygiene.js ya rota cualquier *.jsonl de logs/ solo.)
+  try {
+    fs.mkdirSync(path.join(__dirname, 'logs'), { recursive: true });
+    const QUALITY_LOG_PATH = path.join(__dirname, 'logs', 'audio-quality-feedback.jsonl');
+    const logLine = JSON.stringify({
+      timestamp: new Date().toISOString(),
+      titulo,
+      versionA: { muqEval: reportA.muqEval ?? null, audiobox: reportA.audiobox ?? null },
+      versionB: reportB ? { muqEval: reportB.muqEval ?? null, audiobox: reportB.audiobox ?? null } : null,
+    });
+    fs.appendFileSync(QUALITY_LOG_PATH, logLine + '\n', 'utf-8');
+  } catch (e) {
+    console.warn(`⚠️ No se pudo escribir logs/audio-quality-feedback.jsonl: ${e.message}`);
+  }
+
+  // Anotar las señales nuevas también en state.json (merge-patch, mismo
+  // mecanismo que usa run.js) para que start-flow/revisión posterior las vea
+  // sin abrir el verify-report. SOLO si el título del state coincide con el
+  // que se analizó — verify-audio.js puede correr standalone sobre MP3s
+  // viejos y escribir scores de OTRA canción en el state de la actual sería
+  // exactamente la clase de cruce que este repo se cuida de no cometer
+  // (nunca asumir que un archivo en disco es de la canción en curso).
+  try {
+    const state = pipelineState.read();
+    if (!state || !state.titulo || state.titulo !== titulo) {
+      throw new Error(`el título del state.json (${state?.titulo ?? 'sin state'}) no coincide con el analizado (${titulo}) — no se anota`);
+    }
+    pipelineState.write({
+      muqEval: {
+        A: reportA.muqEval ?? null,
+        B: reportB ? reportB.muqEval ?? null : null,
+      },
+      audiobox: {
+        A: reportA.audiobox ?? null,
+        B: reportB ? reportB.audiobox ?? null : null,
+      },
+    });
+  } catch (e) {
+    console.warn(`⚠️ No se pudo anotar muqEval/audiobox en state.json: ${e.message}`);
   }
 
   console.log(`\n📊 RECOMENDACIÓN: Versión ${recommendation.recommended}`);

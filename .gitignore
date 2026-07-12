@@ -40,3 +40,4 @@ experiments/
 
 # Carpeta ajena al pipeline (material de estudio) que vive dentro del repo - nunca commitearla.
 POO-II-2026/
+__pycache__/

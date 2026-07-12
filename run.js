@@ -33,6 +33,7 @@ const { hardValidate, validateContentForWrite, extractField, convertJsonToMarkdo
 const { patchSongLines } = require('./lib/song-corrector');
 const { extractFirstNames, extractLyricNameVariants } = require('./lib/text-helpers');
 const { checkGrammarAndSpelling } = require('./lib/languagetool-check');
+const { validarGuardia } = require('./lib/ollama-guardia');
 
 const args = process.argv.slice(2);
 const isDryRun = args.includes('--dry-run');
@@ -1012,6 +1013,39 @@ process.on('uncaughtException', async (err) => {
         pipelineState.startNew({ songId, titulo: tituloForState, isRedo });
       } catch (e) {
         console.log('(No se pudo escribir state.json, no es crítico:', e.message, ')');
+      }
+    }
+
+    // ── "El Guardia" — Capa 3 de QA de letra (Ollama local, informativo) ────
+    // Segunda opinión INDEPENDIENTE sobre cómo está armada la canción
+    // (coherencia/rima/tono/fidelidad/gancho) — hoy ese juicio subjetivo solo
+    // lo hace el propio modelo generador vía su qaChecklist autoevaluado.
+    // NUNCA bloquea ni gasta reintentos (mismo criterio que CLAP/NISQA:
+    // informativo hasta calibrar en vivo — ver LESSONS.md). Solo corre sobre
+    // letras que YA pasaron QA: mezclar veredictos sobre letras rechazadas
+    // ensuciaría la calibración futura contra el QA humano real.
+    if (passedQA && parsedJson?.letras) {
+      console.log('\n🛡️  Consultando al Guardia (Ollama local, puede tardar unos minutos la primera vez)...');
+      const guardiaResult = await validarGuardia({ letras: parsedJson.letras, titulo: parsedJson.titulo, survey: surveyContent });
+      if (guardiaResult.ok) {
+        console.log(`🛡️  El Guardia (Ollama/${guardiaResult.model}, ${Math.round(guardiaResult.durationMs / 1000)}s): ${guardiaResult.veredicto}`);
+        console.log(`   coherencia=${guardiaResult.coherencia} rima=${guardiaResult.rima} tono=${guardiaResult.tono} fidelidad=${guardiaResult.fidelidad} gancho=${guardiaResult.gancho} aprobada=${guardiaResult.aprobada}`);
+        guardiaResult.problemas.forEach((p) => console.log(`   • ${p}`));
+        if (!isDryRun) {
+          try {
+            pipelineState.write({ guardia: guardiaResult });
+            fs.mkdirSync(path.join(__dirname, 'logs'), { recursive: true });
+            fs.appendFileSync(
+              path.join(__dirname, 'logs', 'guardia-feedback.jsonl'),
+              JSON.stringify({ ts: new Date().toISOString(), songId, ...guardiaResult }) + '\n',
+              'utf-8'
+            );
+          } catch {
+            // best-effort — la señal ya se mostró en consola/run-log
+          }
+        }
+      } else {
+        console.log(`🛡️  El Guardia no disponible (${guardiaResult.error}) — sin señal esta vez, no bloquea.`);
       }
     }
 

@@ -216,8 +216,23 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
   LanguageTool no responde, la canción NO se asume limpia (nunca falla en
   silencio) — se marca para revisión manual sin gastar los 3 intentos de
   regeneración en un problema de red. Ver LESSONS.md para el detalle
-  completo y `IDEAS.md` para la Capa 3 (proofreading LLM) todavía no
-  implementada.
+  completo y la entrada de `lib/ollama-guardia.js` para la Capa 3.
+- `lib/ollama-guardia.js` — `validarGuardia({ letras, titulo, survey })`:
+  Capa 3 de QA de letra, "El Guardia" (2026-07-12): segunda opinión
+  INDEPENDIENTE vía LLM local (Ollama en `localhost:11434`, default
+  `qwen3:14b` con offload parcial en 8GB de VRAM — `GUARDIA_MODEL=qwen3:8b`
+  como escape hatch rápido). Juzga cómo está ARMADA la canción contra la
+  encuesta real: coherencia/rima/tono/fidelidad/gancho (1-10) + problemas
+  concretos por sección — lo que ni el diccionario ni LanguageTool pueden
+  ver, y que antes solo se autoevaluaba el propio modelo generador. Corre en
+  `run.js` DESPUÉS de que la letra pasó QA completo, PURAMENTE INFORMATIVO
+  (nunca bloquea, nunca gasta reintentos, nunca lanza — Ollama caído =
+  "sin señal esta vez"): consola + `state.json` (`guardia`) +
+  `logs/guardia-feedback.jsonl` para calibrar contra el QA humano.
+  `keep_alive: 0` obligatorio (libera la VRAM apenas responde, no compite
+  con Whisper/Demucs/CLAP/NISQA). Requiere Ollama instalado +
+  `ollama pull qwen3:14b` (y `qwen3:8b` de fallback) — sin eso el pipeline
+  sigue exactamente igual, solo sin esta señal.
 - `lib/llm-provider.js` — `generate(provider, surveyText, systemPrompt, isDryRun)`:
   unifica las llamadas a Anthropic (`claude-sonnet-5`) y Gemini (`gemini-3.5-flash`)
   en un solo lugar. En `isDryRun` devuelve siempre el mismo texto mock, sin llamar a
@@ -533,6 +548,35 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
   está instalado. Señal complementaria a CLAP: entrenado específicamente para
   MOS de voz, más preciso que la similitud texto-audio de CLAP para detectar
   voz robótica/con artefactos.
+- `lib/muq_eval_score.py` — script Python que evalúa calidad musical percibida
+  con MuQ-Eval (arXiv 2603.22677: head liviano sobre el encoder MuQ-310M
+  congelado, entrenado contra ratings de expertos en MusicEval; checkpoint A1
+  auto-descarga de HF `zhudi2825/MuQ-Eval-A1`). OJO calibración: el SRCC
+  0.957 del paper es a nivel SISTEMA — por clip individual (como lo usa este
+  pipeline) es 0.838. Recibe 1+ audios (el MIX completo, no la voz aislada —
+  la calidad musical es propiedad de la mezcla entera), trocea en ventanas de
+  10s a 24kHz y devuelve JSON con `score` 1-5 (media) + `score_std` + `n_clips`.
+  Mismo patrón que clap_score.py (batching, CUDA fallback, JSON a stdout,
+  fail-fast). Requiere el repo clonado (NO es pip-instalable):
+  `git clone https://github.com/dgtql/MuQ-Eval` + `pip install -r
+  MuQ-Eval/requirements.txt` + `setx MUQ_EVAL_DIR "<carpeta>"`. Degrada con
+  gracia si falta. Wrapper `runMuqEvalScore` en `lib/audio-analysis.js`;
+  PURAMENTE INFORMATIVO (0 pts en `pickBestVersion`) hasta calibrar en vivo —
+  cada corrida queda en `logs/audio-quality-feedback.jsonl` para eso.
+- `lib/audiobox_score.py` — script Python que evalúa calidad de producción con
+  Meta Audiobox Aesthetics (`pip install audiobox_aesthetics`, checkpoint se
+  auto-descarga). Devuelve JSON con 4 ejes ~1-10: `pq` (Production Quality, el
+  titular), `pc` (Complexity), `ce` (Enjoyment), `cu` (Usefulness) — se
+  reportan los 4 para calibración gratis. Mismo patrón/mismo estado
+  informativo que muq_eval_score.py (wrapper `runAudioboxScore`, sobre el MIX
+  completo, 0 pts en `pickBestVersion`, log en
+  `logs/audio-quality-feedback.jsonl`). Ambos scores corren SECUENCIALES
+  en verify-audio.js (spawnSync ya es bloqueante): cada proceso carga su
+  modelo, puntúa y muere liberando VRAM — nunca compiten por los 8GB con
+  Whisper/demucs/CLAP/NISQA. Además de verify-report.json, las señales se
+  anotan en `state.json` (`muqEval`/`audiobox`) SOLO si el título del state
+  coincide con el analizado (verify-audio standalone sobre MP3s viejos no
+  debe pisar el estado de la canción en curso).
 - `checkLoudness` (en `lib/audio-analysis.js`) — loudness EBU R128 (filtro
   `ebur128` de ffmpeg, cero dependencia nueva): loudness integrado (LUFS),
   rango de loudness (LU) y true peak (dBFS). `report.loudness`, puramente
