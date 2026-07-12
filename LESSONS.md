@@ -1,5 +1,85 @@
 # Lessons / gotchas
 
+## MuQ-Eval + Audiobox Aesthetics entran como señales de calidad musical — child_process, NO microservicio, y ojo con los SRCC de papers (2026-07-12)
+
+Se agregaron 2 capas de análisis de audio a verify-audio.js, ambas
+PURAMENTE INFORMATIVAS (0 pts en pickBestVersion) hasta calibrar en vivo:
+`lib/muq_eval_score.py` (calidad musical percibida, 1-5) y
+`lib/audiobox_score.py` (calidad de producción PQ/PC/CE/CU, ~1-10). Cada
+corrida queda en `logs/audio-quality-feedback.jsonl` para calibrar contra
+oído/REDOs reales.
+
+**Decisión de arquitectura — child_process (spawnSync), NO microservicio
+Python residente.** Se evaluó un microservicio local (analogía con
+LanguageTool) y se descartó: (1) el patrón spawnSync → JSON por stdout →
+graceful degrade ya existe 4 veces (transcribe/clap/nisqa/f0) y funciona;
+(2) cada proceso carga el modelo, puntúa y MUERE — la VRAM se libera
+garantizado por el OS, mientras que un servicio residente retendría sus
+~3GB compitiendo con Whisper large-v3/demucs/CLAP/NISQA por los mismos 8GB;
+(3) la analogía con LanguageTool era falsa: acá LanguageTool es una API
+pública remota, el repo no administra el ciclo de vida de ningún servicio
+local y un microservicio en Windows agrega failure modes (quién lo arranca,
+puerto ocupado, zombie tras crash) que el watchdog no cubre; (4) el costo de
+recargar el modelo por corrida (~segundos) es irrelevante en un paso que ya
+tolera minutos, y se amortiza con UNA invocación batch para A y B.
+
+**Gotcha de papers:** el "SRCC 0.957 con juicio humano" de MuQ-Eval es a
+nivel SISTEMA (promediando muchos clips por sistema generador); por clip
+individual — que es como lo usa este pipeline, una canción a la vez — el
+SRCC real es 0.838. Sigue siendo la mejor señal open-source disponible,
+pero las expectativas de calibración van contra 0.838, no 0.957. Misma
+lección de siempre: verificar el claim exacto contra el paper antes de
+planear alrededor del número de marketing.
+
+**Gotcha de instalación:** MuQ-Eval NO es pip-instalable — es un repo
+clonado (`git clone https://github.com/dgtql/MuQ-Eval` + requirements.txt +
+`setx MUQ_EVAL_DIR`). Audiobox sí: `pip install audiobox_aesthetics`.
+Ambos degradan con gracia si faltan (error por-resultado, pipeline sigue).
+
+**Gotcha de tests (real, de esta misma sesión):** `PYTHON_UTF8_ENV` en
+lib/audio-analysis.js es un snapshot de `process.env` tomado al momento del
+require — un test que modifica `process.env.PATH` DESPUÉS de requerir el
+módulo no afecta a spawnSync. El stub de python de
+test/audio-quality-scores.test.js se instala en PATH ANTES del require por
+eso, y lee su salida de un archivo (que sí puede cambiar por test).
+
+## "El Guardia" (Ollama local) entra como Capa 3 de QA de letra; "El Técnico" se descarta — y ojo con los nombres de modelos que no existen (2026-07-12)
+
+Hector propuso dos validadores LLM locales vía Ollama: "El Técnico" (validar
+que el flujo Playwright/descarga terminó bien) y "El Guardia" (juzgar la
+letra en español). Decisiones y por qué:
+
+**"El Técnico" NO se construyó.** Verificar que el MP3 se descargó, que la
+duración es válida y que no hubo errores es 100% determinístico y ya existe
+en código (`findDownloadedFile`/ffprobe en `lib/audio-analysis.js`, exit
+codes en `lib/suno-create-dl.js`). Un LLM ahí es estrictamente peor: agrega
+latencia, no-determinismo y un failure mode nuevo (Ollama caído/cargando), y
+compite por la misma VRAM de 8GB que necesita el pipeline de audio real. Si
+aparece un caso que el código actual no cubre, se resuelve con una regla
+determinística nueva, no con un modelo.
+
+**"El Guardia" SÍ** (`lib/ollama-guardia.js` + integración en `run.js`):
+coherencia/rima/tono/fidelidad/gancho es genuinamente subjetivo y hasta ahora
+solo lo autoevaluaba el mismo modelo que generó la letra (qaChecklist) — no
+era una segunda opinión. Arranca PURAMENTE INFORMATIVO (nunca bloquea ni
+gasta reintentos), mismo criterio que CLAP/NISQA/loudness: los veredictos se
+acumulan en `logs/guardia-feedback.jsonl` + `state.json` para calibrar contra
+el QA humano antes de considerar darle poder de gate.
+
+**Gotcha de modelos:** el modelo propuesto originalmente (`qwen3.5:9b`) NO
+existe en la librería real de Ollama — verificar SIEMPRE contra
+ollama.com/library antes de planear alrededor de un tag. Elegido:
+`qwen3:14b` default (q4, 9.3GB — no entra entero en los 8GB de VRAM, Ollama
+hace offload parcial a CPU/RAM solo; más lento pero mejor juicio, y Hector
+aceptó explícitamente hasta ~30 min por canción). Escape hatch sin tocar
+código: `setx GUARDIA_MODEL qwen3:8b` (5.2GB, entra entero, responde en
+segundos). `keep_alive: 0` en cada llamada es OBLIGATORIO para que el modelo
+se descargue de VRAM apenas responde y no le pise los 8GB a
+Whisper/Demucs/CLAP/NISQA más adelante en la misma corrida. `think: false`
+porque qwen3 es híbrido con razonamiento y los tokens de "pensamiento"
+inflan latencia/pueden romper el parseo (efecto a confirmar en vivo con la
+versión de Ollama instalada).
+
 ## "Fogata en la Arena" salió con "ano" en vez de "año" y "pequena" en vez de "pequeña" — hardValidate no chequeaba ortografía de palabras comunes (2026-07-11)
 
 El LLM generó la letra con la eñe perdida en dos palabras normales (no
