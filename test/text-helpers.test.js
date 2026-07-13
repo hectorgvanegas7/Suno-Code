@@ -4,7 +4,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { extractFirstNames, extractLyricNameVariants } = require('../lib/text-helpers');
+const { extractFirstNames, extractLyricNameVariants, extractSurveyProperNouns } = require('../lib/text-helpers');
 
 test('extractFirstNames: nombre simple', () => {
   const names = extractFirstNames("What's their name?: Frank");
@@ -74,4 +74,31 @@ test('extractLyricNameVariants: sin letra o sin nombres devuelve objeto vacío',
   assert.deepEqual(extractLyricNameVariants('', ['frank']), {});
   assert.deepEqual(extractLyricNameVariants('[Chorus 1]\nFrank, hola', []), {});
   assert.deepEqual(extractLyricNameVariants(null, null), {});
+});
+
+// Bug real (2026-07-13): "Un Ángel en Jenner" — la encuesta mencionaba el
+// lugar real "Jenner" ("un lugar que se llama Jenner"), LanguageTool lo
+// marcó como typo de "Tener" (no es nombre de destinatario, extractFirstNames
+// no lo cubre) y el corrector automático lo reemplazó en la letra, rompiendo
+// la fidelidad a la encuesta. extractSurveyProperNouns barre TODA la encuesta
+// por palabras capitalizadas para que el gate de LanguageTool las excluya.
+test('extractSurveyProperNouns: agarra un lugar mencionado fuera del campo de nombre (bug real "Jenner")', () => {
+  const survey = "Special moments together: Cuando nos quedábamos en la orilla del mar en un lugar que se llama Jenner";
+  const nouns = extractSurveyProperNouns(survey);
+  assert.ok(nouns.includes('Jenner'));
+});
+
+test('extractSurveyProperNouns: filtra palabras capitalizadas comunes que arrancan oración', () => {
+  const survey = "El nombre de mi hija es Soraya. Cuando ella nació, El Paso fue donde vivíamos.";
+  const nouns = extractSurveyProperNouns(survey);
+  assert.ok(nouns.includes('Soraya'));
+  assert.ok(nouns.includes('Paso'));
+  assert.ok(!nouns.includes('El'));
+  assert.ok(!nouns.includes('Cuando'));
+});
+
+test('extractSurveyProperNouns: encuesta vacía o sin capitalizadas devuelve lista vacía', () => {
+  assert.deepEqual(extractSurveyProperNouns(''), []);
+  assert.deepEqual(extractSurveyProperNouns(null), []);
+  assert.deepEqual(extractSurveyProperNouns('todo en minúscula sin nombres'), []);
 });

@@ -107,7 +107,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const { chromium } = require('playwright');
-const { isLoggedIn, clickByText, isPortUp, confirmToContinue } = require('./lib/playwright-helpers');
+const { isLoggedIn, clickByText, isPortUp, confirmToContinue, pauseForHumanInteraction } = require('./lib/playwright-helpers');
 const { enterFlowAndEnsureAssignment, FLOW_URL } = require('./lib/flow-helpers');
 const { runPreflight, checkDiskSpace } = require('./lib/preflight');
 const { notify } = require('./lib/ntfy');
@@ -163,7 +163,7 @@ if (process.argv.includes('--loop') && !process.argv.includes('--no-watchdog')) 
     writeHeartbeat({ mode: 'loop-start' });
     const { isWatchdogRunning } = require('./watchdog');
     if (!isWatchdogRunning()) {
-      const watchdogChild = spawn('node', ['watchdog.js'], { cwd: __dirname, detached: true, stdio: 'ignore' });
+      const watchdogChild = spawn('node', ['watchdog.js'], { cwd: __dirname, detached: true, stdio: 'ignore', windowsHide: true });
       watchdogChild.unref();
       console.log(`🐕 Watchdog lanzado automáticamente (pid ${watchdogChild.pid}) — corré con --no-watchdog para desactivarlo.`);
     } else {
@@ -1377,11 +1377,37 @@ async function runFlowInner({ resume = false } = {}, hb) {
           if (report.reportA && report.reportB && aBelowThreshold && bBelowThreshold) {
             const pctA = scoreA != null ? Math.round(scoreA * 100) : '?';
             const pctB = scoreBLev != null ? Math.round(scoreBLev * 100) : '?';
-            console.log(`\n🚨 NINGUNA versión cruza el umbral de fidelidad de letra (A: ${pctA}%, B: ${pctB}% < 75%) — posible alucinación de Suno en ambas. Se sube y submitea igual (--loop), pero revisá de oído.`);
-            await notify(
-              `🚨 "${currentTitulo}": ninguna versión cruza el umbral de fidelidad de letra (A: ${pctA}%, B: ${pctB}% < 75%). Se subió/submiteó igual — revisá de oído antes de que lo vea QC.`,
-              { title: 'Posible alucinación de letra en ambas versiones', priority: 'urgent', tags: 'warning' }
-            ).catch(() => {});
+            // El Guardia de audio (lib/ollama-guardia.js, evaluarAudioGuardia)
+            // ya corrió dentro de verify-audio.js cuando esta misma alarma
+            // numérica se disparó — acá se usa su veredicto para decidir QUÉ
+            // hacer con la alarma, en vez de avisar+seguir siempre a ciegas.
+            // Caso real que motivó esto (2026-07-13, "Un Ángel en Jenner"):
+            // Levenshtein/NISQA marcaron alucinación grave en ambas versiones
+            // pero el audio real estaba perfecto — falso positivo confirmado
+            // al escucharlo. Pedido explícito de Hector: ya que Ollama es
+            // gratis/local, usarlo como gate real acá, no solo informativo.
+            const gA = report.reportA.guardiaAudio;
+            const gB = report.reportB.guardiaAudio;
+            const guardiaApprovesAny = [gA, gB].some((g) => g && g.ok && g.aprobada && g.coincideConLetra);
+            const guardiaAvailable = [gA, gB].some((g) => g && g.ok);
+            if (guardiaApprovesAny) {
+              console.log(`\nℹ️  Ambas versiones por debajo del umbral de fidelidad (A: ${pctA}%, B: ${pctB}%), pero El Guardia revisó la transcripción y SÍ aprueba al menos una — probable falso positivo de Levenshtein/NISQA sobre voz cantada (ver LESSONS.md). Sigue normal, sin pausa.`);
+            } else if (guardiaAvailable) {
+              console.log(`\n🚨 NINGUNA versión cruza el umbral de fidelidad Y El Guardia TAMPOCO aprueba ninguna — pausa para revisión humana antes de subir/submitear.`);
+              await notify(
+                `🚨 "${currentTitulo}": ninguna versión de audio pasó el umbral de fidelidad (A: ${pctA}%, B: ${pctB}%) Y El Guardia tampoco las aprobó. Pausado para revisión manual.`,
+                { title: 'Posible alucinación de audio confirmada por El Guardia', priority: 'urgent', tags: 'rotating_light' }
+              ).catch(() => {});
+              await pauseForHumanInteraction(
+                `"${currentTitulo}": ninguna versión de audio pasó el umbral de fidelidad de letra (A: ${pctA}%, B: ${pctB}%) y El Guardia (Ollama) tampoco aprobó ninguna al revisar la transcripción. Escuchá los MP3 en Downloads/suno antes de continuar — puede ser una alucinación real de Suno.`
+              );
+            } else {
+              console.log(`\n🚨 NINGUNA versión cruza el umbral de fidelidad de letra (A: ${pctA}%, B: ${pctB}% < 75%) — El Guardia no estaba disponible para confirmar. Se sube y submitea igual (--loop), pero revisá de oído.`);
+              await notify(
+                `🚨 "${currentTitulo}": ninguna versión cruza el umbral de fidelidad de letra (A: ${pctA}%, B: ${pctB}% < 75%). El Guardia no disponible para confirmar. Se subió/submiteó igual — revisá de oído antes de que lo vea QC.`,
+                { title: 'Posible alucinación de letra en ambas versiones', priority: 'urgent', tags: 'warning' }
+              ).catch(() => {});
+            }
           }
         } else {
           console.log('\n  ⚠️ verify-report.json es de otra canción — se ignora para elegir versión.');
@@ -1917,81 +1943,64 @@ async function runFlowInner({ resume = false } = {}, hb) {
 // cosas que hay que poder probar sin una canción real: los checkpoints de
 // verificación humana (ENTER) y las notificaciones ntfy (marcadas [DRY-RUN]).
 // song.txt se respalda antes y se restaura SIEMPRE al final — el mock jamás
-// debe pisar la letra de una canción real en curso (mismo criterio que run.js
-// aplica a state.json y a la caché en --dry-run).
+// debe pisar la letra de una canción real en curso. Esta protección vive
+// DENTRO de run.js (isDryRun) desde 2026-07-13, no acá — así corrida directa
+// (`node run.js --dry-run`, sin pasar por start-flow.js) queda igual de
+// protegida (bug real: no lo estaba, pisó song.txt de una canción real en
+// curso a mitad de un --loop, ver LESSONS.md). Este wrapper ya NO duplica el
+// backup/restore — hacerlo dos veces sobre el mismo archivo
+// `song.txt.dry-run-backup` corría el riesgo de que run.js limpiara el
+// backup antes de que este wrapper intentara restaurar el suyo.
 async function runDryRun() {
   console.log('🧪 MODO DRY-RUN — ensayo completo: mock local, cero API, cero Chrome/Suno/Flow.');
   console.log(`📝 Log de esta corrida: ${RUN_LOG_PATH}\n`);
 
-  const SONG_TXT = path.join(__dirname, 'song.txt');
-  const BACKUP = SONG_TXT + '.dry-run-backup';
-  const hadRealSong = fs.existsSync(SONG_TXT);
-  if (hadRealSong) {
-    fs.copyFileSync(SONG_TXT, BACKUP);
-    console.log('🛟 song.txt actual respaldado (se restaura al final del ensayo).\n');
-  }
-
+  console.log('=== Paso 0/4: preflight (informativo — en dry-run no aborta) ===');
   try {
-    console.log('=== Paso 0/4: preflight (informativo — en dry-run no aborta) ===');
-    try {
-      runPreflight();
-    } catch (e) {
-      console.log(`  (preflight lanzó "${e.message}" — se ignora en dry-run)`);
-    }
-
-    console.log('\n=== Paso 1/4: generando letra MOCK (run.js --dry-run, cero API) ===\n');
-    await runScript('run.js --dry-run');
-
-    // Verificación real: el mock tiene que ser parseable por los mismos
-    // regex que usan suno-fill.js y flow-submit.js — si esto falla, el
-    // pipeline real también fallaría después de gastar la llamada al LLM.
-    const mock = fs.readFileSync(SONG_TXT, 'utf-8');
-    const mockOk = /\*\*Título:\*\*\s*.+/i.test(mock) && /\[Verse 1\]/i.test(mock) && /\*\*Estilo Suno:\*\*\s*.+/i.test(mock);
-    if (!mockOk) throw new Error('El song.txt mock no pasa los parsers de suno-fill/flow-submit.');
-    console.log('  ✅ song.txt mock parseable por suno-fill.js y flow-submit.js.');
-    await notify('[DRY-RUN] ✅ Letra mock generada y parseada OK. Siguiente: checkpoint de Suno.', {
-      title: '[DRY-RUN] Paso 1 completo', priority: 'default', tags: 'test_tube',
-    });
-
-    console.log('\n=== Paso 2/4: SIMULADO — sesión de Suno (no se toca Chrome) ===');
-    console.log('=== Paso 3/4: SIMULADO — llenado del formulario de Suno ===');
-    await checkpoint(
-      '[DRY-RUN] Simulación: el formulario de Suno estaría lleno y los screenshots en disco.\n' +
-      'En una corrida real acá verificás suno-verify-overview.png y suno-verify-lyrics-top.png.',
-      '[DRY-RUN] simular el click en Create (no gasta créditos)'
-    );
-
-    console.log('=== Paso 3b/4: SIMULADO — Create + generación + descarga de MP3s ===');
-    console.log('=== Paso 3c/4: SIMULADO — verify-audio.js (Whisper/CLAP) ===');
-    console.log('=== Paso 4/4: SIMULADO — flow-submit.js (título/letra/notas en el Flow) ===');
-    await checkpoint(
-      '[DRY-RUN] Simulación: listo para subir la Versión B al Flow (recomendación simulada).',
-      '[DRY-RUN] simular la subida del MP3 (no toca el Flow)'
-    );
-
-    await notify('[DRY-RUN] 🧪 Ensayo completo OK: letra mock, 2 checkpoints ENTER y notificaciones funcionando.', {
-      title: '[DRY-RUN] Pipeline OK', priority: 'default', tags: 'test_tube',
-    });
-    console.log('\n══════════════════════════════════════════════════════');
-    console.log('🧪 DRY-RUN COMPLETO — todo el circuito respondió:');
-    console.log('   • run.js generó y validó la letra mock (cero API).');
-    console.log(PAUSE_MODE
-      ? '   • Los 2 checkpoints de ENTER pausaron y reanudaron (--pause).'
-      : '   • Checkpoints desactivados (default) — el flujo corre de un tirón hasta tu Submit. Probálos con --pause.');
-    console.log('   • Las notificaciones ntfy se dispararon (revisá el celular).');
-    console.log('   • Regla Dura #1 deprecada: en modo normal haría Submit to QA automáticamente.');
-    console.log('══════════════════════════════════════════════════════');
-  } finally {
-    if (hadRealSong) {
-      fs.copyFileSync(BACKUP, SONG_TXT);
-      fs.unlinkSync(BACKUP);
-      console.log('\n🛟 song.txt real restaurado (el mock del ensayo no queda en disco).');
-    } else if (fs.existsSync(SONG_TXT)) {
-      // No había song.txt antes del ensayo — no dejar un mock con pinta de real.
-      fs.unlinkSync(SONG_TXT);
-      console.log('\n🧹 song.txt mock eliminado (no había canción en curso antes del ensayo).');
-    }
+    runPreflight();
+  } catch (e) {
+    console.log(`  (preflight lanzó "${e.message}" — se ignora en dry-run)`);
   }
+
+  console.log('\n=== Paso 1/4: generando letra MOCK (run.js --dry-run, cero API) ===\n');
+  // run.js ya valida (parseSongFile) y restaura song.txt internamente en
+  // --dry-run — para cuando este await resuelve, el mock ya no está en
+  // disco (song.txt real restaurado). Si run.js detectó un mock
+  // imparseable, salió con código de error y runScript rechaza la promesa.
+  await runScript('run.js --dry-run');
+  console.log('  ✅ song.txt mock parseable (verificado dentro de run.js).');
+  await notify('[DRY-RUN] ✅ Letra mock generada y parseada OK. Siguiente: checkpoint de Suno.', {
+    title: '[DRY-RUN] Paso 1 completo', priority: 'default', tags: 'test_tube',
+  });
+
+  console.log('\n=== Paso 2/4: SIMULADO — sesión de Suno (no se toca Chrome) ===');
+  console.log('=== Paso 3/4: SIMULADO — llenado del formulario de Suno ===');
+  await checkpoint(
+    '[DRY-RUN] Simulación: el formulario de Suno estaría lleno y los screenshots en disco.\n' +
+    'En una corrida real acá verificás suno-verify-overview.png y suno-verify-lyrics-top.png.',
+    '[DRY-RUN] simular el click en Create (no gasta créditos)'
+  );
+
+  console.log('=== Paso 3b/4: SIMULADO — Create + generación + descarga de MP3s ===');
+  console.log('=== Paso 3c/4: SIMULADO — verify-audio.js (Whisper/CLAP) ===');
+  console.log('=== Paso 4/4: SIMULADO — flow-submit.js (título/letra/notas en el Flow) ===');
+  await checkpoint(
+    '[DRY-RUN] Simulación: listo para subir la Versión B al Flow (recomendación simulada).',
+    '[DRY-RUN] simular la subida del MP3 (no toca el Flow)'
+  );
+
+  await notify('[DRY-RUN] 🧪 Ensayo completo OK: letra mock, 2 checkpoints ENTER y notificaciones funcionando.', {
+    title: '[DRY-RUN] Pipeline OK', priority: 'default', tags: 'test_tube',
+  });
+  console.log('\n══════════════════════════════════════════════════════');
+  console.log('🧪 DRY-RUN COMPLETO — todo el circuito respondió:');
+  console.log('   • run.js generó y validó la letra mock (cero API).');
+  console.log(PAUSE_MODE
+    ? '   • Los 2 checkpoints de ENTER pausaron y reanudaron (--pause).'
+    : '   • Checkpoints desactivados (default) — el flujo corre de un tirón hasta tu Submit. Probálos con --pause.');
+  console.log('   • Las notificaciones ntfy se dispararon (revisá el celular).');
+  console.log('   • Regla Dura #1 deprecada: en modo normal haría Submit to QA automáticamente.');
+  console.log('══════════════════════════════════════════════════════');
 }
 
 async function runPoll(rawArgs) {

@@ -1,5 +1,223 @@
 # Lessons / gotchas
 
+## Create DUPLICADO en Suno — el pipeline regeneró y re-envió a Suno una canción que YA estaba lista y subida al Flow, gastando créditos dos veces (2026-07-13, incidente real, plata perdida)
+
+**Qué pasó, en orden:** "Un Ángel en Jenner" llegó hasta subir el MP3 al
+Flow y quedó esperando el Auto-Submit (timer de 26-31 min, `--loop`). El
+proceso de `start-flow.js --loop --resume` (PID 29272) MURIÓ solo mientras
+esperaba (última etapa conocida: "esperando-submit", causa del crash no
+confirmada — mismo patrón `3221225786`/`0xC000013A` visto antes con
+Ollama). El watchdog lo detectó ~5 min después y relanzó con `--resume`
+(`node start-flow.js --loop --resume`, PID 13916). Ese intento de
+`--resume` encontró `song.txt` con contenido de OTRA canción (un mock de
+`--dry-run` que no se había restaurado a tiempo — corrida manualmente en
+paralelo para probar el fix de Guardia, ver la entrada de abajo) y abortó
+el resume con un error claro ("song.txt es de otra canción"). Hasta acá,
+el diseño funcionó bien — no reprocesó con contenido equivocado.
+
+**El problema real:** `--loop --resume` solo respeta `--resume` en el
+PRIMER ciclo (documentado, comportamiento a propósito). Al fallar ese
+primer intento, el ciclo 2 arrancó DE CERO, como si fuera una canción
+nueva. Pero la asignación de "Un Ángel en Jenner" seguía ACTIVA en el
+Flow (nadie había hecho Submit todavía — el timer nunca llegó a
+dispararse antes del crash). `enterFlowAndEnsureAssignment` la encontró
+("Ya hay una asignación activa en curso, continuando con ella") y
+`run.js` procedió a regenerar la letra (usó la caché local, al menos no
+gastó una llamada al LLM) y siguió de largo hacia `suno-fill.js` →
+Create — **generando 2 versiones NUEVAS en Suno de una canción que ya
+tenía sus 2 versiones generadas, subidas y a punto de mandarse a QA**.
+Confirmado en vivo: 4 clips de "Un Ángel en Jenner" en Suno (2 originales
+de 3:02/3:04, 2 duplicados de 3:12/3:13). Créditos reales gastados sin
+necesidad — irrecuperables.
+
+**Por suerte, el Auto-Submit original SÍ había alcanzado a dispararse**
+antes de que el proceso muriera (confirmado en "Recent completions" del
+Flow: "Un Ángel en Jenner — Completed 07/12/2026, 19:21 PST — 36 min
+session"), así que la canción entregada a QA fue la correcta. Lo único
+que faltó fue el registro en la hoja (se cortó antes de esa etapa) —
+recuperado a mano con `node start-flow.js --done` sin tocar Suno/Chrome
+para nada.
+
+**Fix real:** `run.js`, justo después de leer el Song ID de la
+asignación activa, ahora chequea `pipelineState.read()` — si el
+`songId` coincide con el de `state.json` Y la etapa guardada ya está
+más allá de `generated` (`suno-filled`, `flow-filled` o `completed`),
+significa que ESTA MISMA canción ya pasó por Suno en esta sesión.
+`run.js` aborta fuerte (lanza, nunca sigue de largo) y avisa urgente por
+ntfy, en vez de regenerar en silencio. `state.json` es la única fuente
+confiable de "hasta dónde llegamos ya" — más confiable que "¿hay una
+asignación activa en el Flow?", que no distingue "canción nueva" de
+"canción vieja que todavía no se submiteó". `--dry-run` nunca dispara
+esto (nunca toca Suno de verdad). Sin test unitario dedicado (la
+salvaguarda vive inline en el IIFE principal de `run.js`, no extraída a
+una función pura testeable — mismo criterio que el resto de la lógica de
+`runFlow`, no unit-testeada directamente); se validó con `npm test`
+completo (sin regresiones) y lectura de código.
+
+**Nota para una futura sesión:** esto cierra PARCIALMENTE el gap que
+había quedado documentado en la entrada de "`node run.js --dry-run`
+corrido directo" de abajo — ahora aunque `--resume` falle y el ciclo
+arranque de cero, ya no puede volver a tocar Suno para una canción que ya
+lo pasó. Sigue sin resolver: la causa raíz del crash del proceso en sí
+(`0xC000013A` recurrente, causa no confirmada) y por qué el mock de
+`--dry-run` no se había restaurado a tiempo cuando el watchdog intentó el
+resume — probablemente una carrera entre mi corrida manual de prueba y el
+timing del watchdog, no reproducida a propósito. Vale la pena, en session
+futura: (1) diagnosticar el crash `0xC000013A` de raíz, (2) considerar
+si `--dry-run` corrido manualmente debería directamente rechazar correr
+si detecta un `--loop` real activo (`logs/watchdog.pid` vivo) en vez de
+confiar solo en el backup/restore.
+
+## El Guardia entra también como Capa 4 de QA de AUDIO — segunda opinión semántica contra falsos positivos de Levenshtein/NISQA sobre voz cantada (2026-07-13)
+
+Mismo día que el bug de "Jenner": mientras se esperaba el Auto-Submit de esa
+misma canción real, `verify-audio.js` marcó "ALUCINACIÓN GRAVE" en AMBAS
+versiones (Levenshtein 59%/67% < 75%) y NISQA muy bajo (23-24/100 en
+ambas) — señales que en el diseño actual son "puramente informativas,
+nunca deciden solo". Hector escuchó el MP3 real ya subido al Flow: sin
+ningún problema. Falso positivo confirmado en vivo, no hipotético.
+
+**Por qué las métricas fallaron:** Levenshtein compara carácter-por-carácter
+la transcripción de Whisper contra la letra — no tolera adlibs, alargues de
+vocales, repeticiones de estilo libre de canto, todo NORMAL en una canción
+cantada real. NISQA (`lib/nisqa_score.py`) nunca se calibró contra voz
+CANTADA — está entrenado para voz hablada, así que penaliza duro cualquier
+canto con vibrato/sostenido/efectos vocales, que es exactamente lo que
+suena bien en una balada real.
+
+**Fix — El Guardia (Ollama) como Capa 4, ahora también para audio:**
+`lib/ollama-guardia.js` gana `evaluarAudioGuardia()` (mismo contrato
+robusto que `validarGuardia`: nunca lanza, `keep_alive: 0`, `fetchImpl`
+inyectable para tests). No puede "escuchar" el MP3, pero SÍ lee la
+transcripción de Whisper (que `verify-audio.js` ya generó, cero costo
+extra) y la compara SEMÁNTICAMENTE contra la letra pedida, con el prompt
+explícitamente advertido de que Levenshtein/NISQA dan falsos positivos
+sobre canto y que tolere imperfecciones normales de reconocimiento de voz
+cantada. Se llama SOLO cuando ya hay alarma numérica
+(`levenshteinScore < 0.75` o `nisqa.score < 50`) — no gasta Ollama en
+canciones sanas. Resultado va a `report.guardiaAudio` (y a
+`verify-report.json`), impreso en consola con un aviso explícito de
+"posible falso positivo" cuando el Guardia aprueba pese a la alarma
+numérica.
+
+**Política decidida explícitamente con Hector: PURAMENTE INFORMATIVO, NO
+bloquea el Auto-Submit.** Se evaluó la alternativa de que el Guardia
+pudiera frenar el pipeline (como el timeout humano en `--loop`) cuando
+tanto las métricas como el propio Guardia coincidieran en rechazar, pero
+se descartó por ahora — mismo criterio "nunca decide solo" que ya rige
+CLAP/NISQA/loudness/pacing en todo el pipeline, hasta calibrar el Guardia
+de audio contra casos reales (igual que el Guardia de letra, que tampoco
+bloquea). Si en el futuro se calibra bien, es candidato a convertirse en
+gate real — documentado acá para no perder el contexto de la decisión.
+
+Tests en `test/ollama-guardia.test.js` (8 nuevos): prompt incluye
+letra/transcripción/señales, degrade sin datos, parseo válido/inválido,
+`similitud` acotada 1-10, y los mismos casos de robustez de red que
+`validarGuardia` (Ollama caído, sin letra pedida).
+
+## `node run.js --dry-run` corrido directo (sin start-flow.js) pisaba song.txt de una canción real en curso — el respaldo/restauración solo vivía en el wrapper (2026-07-13)
+
+Mismo día que el bug de "Jenner" de abajo: para reproducir el bug y probar
+el fix con Ollama corriendo, se corrió `node run.js --dry-run` DIRECTO
+mientras `start-flow.js --loop` seguía procesando una canción real en
+paralelo (misma sesión de Chrome/puerto 9333, distinto proceso Node). El
+mock pisó `song.txt` sin ningún respaldo — la protección
+("song.txt se respalda antes y se restaura SIEMPRE al final") documentada
+en CLAUDE.md solo existía en `start-flow.js`'s `runDryRun()`, nunca en
+`run.js` mismo. Se detectó por el `system-reminder` de "song.txt fue
+modificado" al leer el archivo después — de no revisarlo, la canción real
+en curso hubiera quedado con la letra del mock la próxima vez que algún
+paso downstream (`upload-to-flow.js`) leyera `song.txt` de disco.
+
+**Recuperación:** el `song.txt` real completo (con el fix de "Jenner" ya
+aplicado) se reconstruyó desde `.cache/<hash>.json` — `run.js` cachea la
+respuesta CRUDA del LLM que pasó QA (`lib/cache-helpers.js`) antes de
+tocar el archivo, así que el JSON completo seguía disponible aunque el
+archivo en disco ya no lo tuviera. Se usó `convertJsonToMarkdown`
+(`lib/song-validate.js`, la misma función real que usa `run.js`) para
+generar el markdown byte-idéntico al original, en vez de reconstruirlo a
+mano — el hash SHA256 coincidió exactamente con el que ya tenía
+`state.json` de la corrección manual anterior, confirmando la
+reconstrucción exacta.
+
+**Fix real:** se movió el respaldo/restauración de `song.txt` DENTRO de
+`run.js` (bloque `try/finally` alrededor de todo el IIFE principal,
+gateado por `isDryRun`), para que proteja el archivo sin importar cómo se
+invoque el script — ya no depende de que el caller (`start-flow.js`)
+recuerde envolver la llamada. `start-flow.js`'s `runDryRun()` YA NO
+duplica el backup/restore (hacerlo dos veces sobre el mismo
+`song.txt.dry-run-backup` podía romperse: `run.js` limpiaba el backup
+antes de que el wrapper externo intentara restaurar el suyo). El chequeo
+de "el mock es parseable" también se movió adentro de `run.js` (usa
+`parseSongFile` de `lib/song-file.js`, el parser canónico, en vez del
+regex ad-hoc que tenía `start-flow.js`) porque para cuando `runScript`
+resuelve en el wrapper, `run.js` ya restauró el archivo real — el wrapper
+externo ya no puede inspeccionar el mock desde disco.
+
+**Lección general:** cuando una protección de seguridad (backup/restore,
+gate de validación) vive solo en el wrapper de orquestación y no en el
+script que hace el trabajo real, cualquier invocación directa del script
+(debugging, pruebas manuales, otro caller futuro) queda desprotegida.
+Ponerla en el nivel más bajo posible (acá, adentro de `run.js`) la hace
+imposible de saltear por accidente.
+
+## "Un Ángel en Jenner" — LanguageTool corrigió un lugar real de la encuesta ("Jenner") pensando que era typo, el auto-corrector lo reemplazó por "tener" en la letra (2026-07-13)
+
+La Capa 2 (`lib/languagetool-check.js`) excluía nombres de destinatario
+(`extractFirstNames`/`extractLyricNameVariants`/`name-dictionary.json`) pero
+NUNCA otros datos factuales reales de la encuesta — lugares, mascotas,
+apodos que aparecen en campos como "Special moments together". La encuesta
+decía literalmente "un lugar que se llama Jenner" (Jenner, CA, real), el
+LLM lo usó bien en la letra, LanguageTool lo marcó como error ortográfico
+("Sugerencia: Tener") porque no es una palabra de diccionario, y
+`patchSongLines` (el corrector barato) aceptó la sugerencia sin chequear
+contra la encuesta — dejando "la orilla del **tener**" y "la arena del
+**tener**" en la letra final, que SÍ pasó `hardValidate` de nuevo (es
+gramaticalmente válida, solo no tiene sentido factual). Se detectó en vivo,
+a mitad de una corrida real de `--loop`, revisando el log en detalle — no
+por ningún gate automático.
+
+**Por qué fue peor que el bug de la eñe:** el de la eñe (`ano`→`año`) era
+detectable porque "ano" no es la palabra correcta en NINGÚN contexto de esa
+letra. Acá el defecto es de fidelidad, no de ortografía — "tener" es una
+palabra 100% válida, así que ni el diccionario (Capa 1) ni la categoría
+TYPOS de LanguageTool (que ya había "arreglado" el problema, no lo iba a
+re-flaggear) lo iban a volver a atrapar. Tampoco es un patrón que
+`hardValidate`'s `KNOWN_INCOHERENT` cubra (lista fija de frases, no de
+inconsistencias encuesta-vs-letra).
+
+**Fix (mismo criterio de generalización que el bug de la eñe — no una
+lista a mano):** `lib/text-helpers.js` → `extractSurveyProperNouns(surveyText)`
+extrae TODAS las palabras capitalizadas de la encuesta completa (no solo el
+campo de nombre) con un stoplist chico de palabras capitalizadas comunes que
+arrancan oración (`El`, `Cuando`, `Nunca`, etc., para no blindar un typo real
+que coincida por casualidad con el inicio de una oración de la encuesta).
+`run.js` (`runGrammarGate`) las suma a `excludeWords` junto con los nombres
+de destinatario ya excluidos. Cualquier palabra capitalizada que la encuesta
+mencione literalmente (lugar, mascota, apodo, nombre de una calle, lo que
+sea) queda protegida de la "corrección" automática de LanguageTool.
+Tests en `test/text-helpers.test.js` con el caso real (["Jenner"]) y un caso
+de falso positivo evitado ("El", "Cuando" no se cuelan).
+
+**Recuperación manual de la canción afectada:** el LLM real solo generó UNA
+vez ("Jenner" en Verse 1 línea 1 y Outro línea 3, ambos "del Jenner" antes
+de la corrupción); se restauró a mano en `song.txt` reemplazando
+exactamente el token corrupto ("tener"→"Jenner") preservando el resto de la
+línea intacto (el corrector de LanguageTool solo tocó ese span, nunca la
+frase completa), y se recalculó `songTxtHash` en `state.json` para que
+`checkSongTxtContent` no marque un mismatch espurio.
+
+**Gap que sigue abierto:** el pipeline mató el proceso `start-flow.js`
+ENTERO con código `3221225786` (0xC000013A, `STATUS_CONTROL_C_EXIT`) justo
+después de guardar la letra corrupta — causa no confirmada todavía (no hay
+stack trace, stderr vacío). Si el watchdog llega a relanzar con `--resume`
+ANTES de que alguien revise `state.json`/`song.txt`, el `stage: "generated"`
+le dice al `--resume` que se salga la regeneración y use la letra tal cual
+está en disco — con este bug, eso mandaría la letra rota directo a Suno sin
+que nadie la vea. Vale la pena, en una próxima sesión, hacer que
+`--resume` re-valide `song.txt` contra `hardValidate` + el gate de
+LanguageTool antes de confiar en `stage: "generated"`, no solo el hash.
+
 ## MuQ-Eval + Audiobox Aesthetics entran como señales de calidad musical — child_process, NO microservicio, y ojo con los SRCC de papers (2026-07-12)
 
 Se agregaron 2 capas de análisis de audio a verify-audio.js, ambas
@@ -2106,3 +2324,64 @@ copiado a ambos archivos, reemplazando todos los `process.exit()`.
 **Verificación:** `npm test` (80 casos, 5 nuevos de `audio-match.test.js`) y
 `node start-flow.js --dry-run` (circuito completo sin API real) corridos
 después de los 5 cambios — todo limpio.
+
+## "Maria" sin tilde sobrevivió 3 intentos de regeneración — el corrector barato nunca se activó (2026-07-13)
+
+**Caso real:** "El Lago Donde Aprendí a Quedarme". El nombre del
+destinatario es "Maria"/"María". `hardValidate` detectó correctamente
+"maria" (sin tilde) en Chorus 1/2/Outro los 3 intentos seguidos — el
+chequeo H2 (`Eñe/tilde perdida`, patcheable) nunca falló en detectarlo. El
+problema es que el chequeo M (nombres españoles estándar, backstop del bug
+"Jesús"→"Yeous" del 2026-07-10) TAMBIÉN reportaba un fallo aparte
+("posible re-escritura indebida") por el mismo typo, porque "María" con
+tilde no aparecía literalmente en la letra. Ese fallo de M no está en
+`PATCHABLE_FAILURE_PREFIXES` a propósito (cubre respellings genuinos, no
+simples typos) — así que `isSafeToPatch` veía un fallo no-patcheable en la
+mezcla y se saltaba el corrector barato (Haiku) por completo, yendo directo
+a un regen completo con el modelo caro. Ese regen completo (con
+instrucciones correctivas explícitas) falló 3/3 veces en corregir el mismo
+typo — la 2ª pasada arregló la tilde pero rompió el conteo de líneas del
+Chorus, y la 3ª volvió a escribir "Maria" sin tilde. Tras los 3 intentos el
+pipeline siguió de largo con el banner `⚠️ ADVERTENCIA` (diseño correcto:
+nunca se traba), y la letra con el typo llegó hasta el campo de Letra del
+Flow antes de que Hector lo notara.
+
+Segundo hallazgo en la misma sesión: "El Guardia" (Ollama, Capa 3) está
+gateado con `if (passedQA && ...)` — nunca corrió sobre esta canción
+porque `passedQA` fue `false` los 3 intentos. Justo la canción que más
+necesitaba una segunda opinión se quedó sin ella. Pedido explícito de
+Hector: "OLLAMA SIEMPRE CORRA no a veces SIEMPRE" — Ollama es local y
+gratis, no hay costo real en correrlo también sobre letras con warning.
+
+**Fix (3 cambios, `lib/song-validate.js` + `run.js`):**
+1. El chequeo M ahora se salta si la forma SIN acentuar del nombre canónico
+   ya aparece en la letra (`stripAccents(canonical)` con `nameRegex`) — en
+   ese caso es el MISMO typo que H2 ya va a reportar (y ya es patcheable),
+   no un respelling distinto que amerite un fallo separado no-patcheable.
+   M sigue disparando normalmente para el caso real que lo originó
+   ("Yeous", que no comparte ninguna forma con "Jesús" sin acentuar).
+2. El Guardia (`run.js` línea ~1105) ahora corre con solo `if (parsedJson?.letras)`
+   — sin el `&& passedQA` — así que también opina sobre letras que se
+   guardaron con `⚠️ ADVERTENCIA`. Sigue sin bloquear nunca por sí solo más
+   allá del gate real que ya existía (pausa si el Guardia rechaza).
+3. **Pedido explícito de Hector, en la misma sesión** ("se ve el error pero
+   no lo arregla", "quiero que la validación SIEMPRE PASE"): no basta con
+   destrabar el corrector barato de Haiku — sigue siendo un LLM, sigue
+   pudiendo fallar. Se agregó `applyDeterministicAccentFixes` en
+   `lib/song-validate.js`: para los typos donde `findAccentTypos()` YA
+   encontró una sola sustitución válida en el diccionario (sin ambigüedad),
+   hace un reemplazo de texto DIRECTO (regex + `nameRegex`, preserva
+   mayúscula inicial) — cero LLM, cero costo, cero posibilidad de que el
+   modelo "se olvide" de la corrección. Corre en `run.js` inmediatamente
+   después de cada `hardValidate()` fallido, ANTES del corrector de Haiku:
+   si el reemplazo mecánico solo ya deja la letra limpia, ni siquiera hace
+   falta gastar Haiku. Si quedan issues no cubiertos por este corrector
+   (dígitos, puntuación, etc.), el flujo sigue exactamente igual que antes
+   (Haiku → regen completo).
+
+**Verificación:** `npm test` (232 casos, 3 nuevos — "Maria" sin tilde ya no
+duplica el fallo M, `applyDeterministicAccentFixes` corrige preservando
+mayúscula y deja pasar `hardValidate`, y no toca nada si no hay typos). No
+se corrió en vivo contra Suno/Claude todavía — el próximo REDO o canción
+nueva con un typo de tilde real confirma el corrector determinístico en
+producción.

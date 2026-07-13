@@ -132,7 +132,7 @@ function isPidAlive(pid) {
 function looksLikeNodeProcess(pid) {
   try {
     if (process.platform === 'win32') {
-      const out = spawnSync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], { encoding: 'utf-8', timeout: 10000 }).stdout || '';
+      const out = spawnSync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], { encoding: 'utf-8', timeout: 10000, windowsHide: true }).stdout || '';
       return /"node(\.exe)?"/i.test(out);
     }
     const out = spawnSync('ps', ['-p', String(pid), '-o', 'comm='], { encoding: 'utf-8', timeout: 10000 }).stdout || '';
@@ -144,7 +144,7 @@ function looksLikeNodeProcess(pid) {
 
 function killPidTree(pid) {
   if (process.platform === 'win32') {
-    spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' });
+    spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
   } else {
     try { process.kill(pid, 'SIGKILL'); } catch {}
   }
@@ -155,6 +155,7 @@ function relaunchPipeline() {
     cwd: __dirname,
     detached: true,
     stdio: 'ignore',
+    windowsHide: true,
   });
   child.unref();
   return child.pid;

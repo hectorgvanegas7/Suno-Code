@@ -23,15 +23,15 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
-const { clickByText, isPortUp } = require('./lib/playwright-helpers');
+const { clickByText, isPortUp, pauseForHumanInteraction } = require('./lib/playwright-helpers');
 const { enterFlowAndEnsureAssignment } = require('./lib/flow-helpers');
 const { generate, MOCK_SURVEY } = require('./lib/llm-provider');
 const { notify } = require('./lib/ntfy');
 const pipelineState = require('./lib/pipeline-state');
 const { getSurveyHash, readCache, writeCache } = require('./lib/cache-helpers');
-const { hardValidate, validateContentForWrite, extractField, convertJsonToMarkdown, isSafeToPatch } = require('./lib/song-validate');
+const { hardValidate, validateContentForWrite, extractField, convertJsonToMarkdown, isSafeToPatch, applyDeterministicAccentFixes } = require('./lib/song-validate');
 const { patchSongLines } = require('./lib/song-corrector');
-const { extractFirstNames, extractLyricNameVariants } = require('./lib/text-helpers');
+const { extractFirstNames, extractLyricNameVariants, extractSurveyProperNouns } = require('./lib/text-helpers');
 const { checkGrammarAndSpelling } = require('./lib/languagetool-check');
 const { validarGuardia } = require('./lib/ollama-guardia');
 
@@ -531,7 +531,8 @@ async function runGrammarGate(parsedJson, surveyContent) {
     // Best-effort — si no se puede leer, el filtro de exclusión queda más
     // corto pero el gate igual corre (no bloquea la entrega por esto).
   }
-  const excludeWords = [...firstNames, ...phoneticVariants, ...dictVariants];
+  const surveyProperNouns = extractSurveyProperNouns(surveyContent);
+  const excludeWords = [...firstNames, ...phoneticVariants, ...dictVariants, ...surveyProperNouns];
 
   let currentJson = parsedJson;
   for (let round = 0; round <= MAX_GRAMMAR_PATCH_ROUNDS; round++) {
@@ -590,8 +591,31 @@ async function generateSongWithSelfCorrection(surveyContent, baseUserMessageOver
     const { text, stopReason } = await generateSongWithProvider(userMessage, provider, maxTokens);
     lastResponse = text;
 
-    const { valid, failures, parsedJson, patchableIssues } = hardValidate(lastResponse, surveyContent);
+    let { valid, failures, parsedJson, patchableIssues } = hardValidate(lastResponse, surveyContent);
     lastFailures = failures;
+
+    // Corrector DETERMINÍSTICO de tildes/eñes (gratis, sin LLM, cero
+    // ambigüedad) — antes de gastar Haiku o un regen completo con el modelo
+    // caro, probamos un reemplazo de texto directo para los typos que YA
+    // tienen una sola sustitución válida (ver applyDeterministicAccentFixes
+    // en lib/song-validate.js). Bug real 2026-07-13 ("El Lago Donde Aprendí
+    // a Quedarme"): "maria"->"María" sobrevivió 3 regeneraciones completas
+    // porque el modelo no se autocorregía de forma confiable pese a
+    // instrucciones explícitas — este reemplazo mecánico no depende de que
+    // ningún modelo "se acuerde" de la corrección, así que la validación
+    // para esta clase de error SIEMPRE termina pasando en vez de solo
+    // detectarse y quedar con advertencia.
+    if (!valid && parsedJson?.letras) {
+      const { letras: fixedLetras, appliedCount } = applyDeterministicAccentFixes(parsedJson.letras);
+      if (appliedCount > 0) {
+        const patchedText = JSON.stringify({ ...parsedJson, letras: fixedLetras });
+        const revalidated = hardValidate(patchedText, surveyContent);
+        console.log(`🔧 Corrector determinístico de tildes/eñes: ${appliedCount} palabra(s) corregida(s) sin LLM.`);
+        ({ valid, failures, parsedJson, patchableIssues } = revalidated);
+        lastResponse = patchedText;
+        lastFailures = failures;
+      }
+    }
 
     if (valid) {
       console.log('✅ Validación estructural + QA: todos los ítems pasaron.');
@@ -743,6 +767,40 @@ process.on('uncaughtException', async (err) => {
   let redoFeedback = null;
   let songId = 'OFFLINE_MOCK_ID';
 
+  // Segunda capa de la misma protección (2026-07-13, ver LESSONS.md — bug
+  // real de Create duplicado): si hay un --loop real corriendo (watchdog
+  // vivo), un --dry-run manual en paralelo corre una carrera real contra
+  // el backup/restore de song.txt — si el watchdog relanza el --loop justo
+  // en la ventana en que song.txt tiene el mock puesto, el resume falla y
+  // el ciclo siguiente puede terminar regenerando/reprocesando una canción
+  // real (visto en vivo). Más vale rechazar el dry-run de entrada que
+  // arriesgar esa carrera — correr el dry-run real DESPUÉS de que el
+  // --loop cierre, o pausarlo con Ctrl+C primero.
+  if (isDryRun) {
+    const { isWatchdogRunning } = require('./watchdog');
+    if (isWatchdogRunning()) {
+      console.error('\n❌ Hay un --loop real corriendo (watchdog activo) — --dry-run rechazado para no arriesgar una carrera con song.txt de una canción real en curso.');
+      console.error('   Esperá a que termine el --loop, o pausalo con Ctrl+C, antes de correr un --dry-run.\n');
+      exitAfterDelay(1);
+      return;
+    }
+  }
+
+  // song.txt se respalda antes y se restaura SIEMPRE al final en --dry-run —
+  // el mock jamás debe pisar la letra de una canción real en curso (mismo
+  // criterio que state.json/caché en --dry-run, ver más abajo). Vive ACÁ,
+  // no solo en el wrapper de start-flow.js --dry-run, porque `node run.js
+  // --dry-run` corrido directo (sin pasar por start-flow.js) no tenía NINGUNA
+  // protección — bug real: pisó song.txt de una canción real en curso a
+  // mitad de una corrida de --loop (2026-07-13, ver LESSONS.md).
+  const DRY_RUN_BACKUP_PATH = SONG_PATH + '.dry-run-backup';
+  let dryRunBackedUp = false;
+  if (isDryRun && fs.existsSync(SONG_PATH)) {
+    fs.copyFileSync(SONG_PATH, DRY_RUN_BACKUP_PATH);
+    dryRunBackedUp = true;
+    console.log('🛟 song.txt actual respaldado (se restaura al final del ensayo).\n');
+  }
+
   try {
     if (!isDryRun) {
       if (!(await isPortUp(9333))) {
@@ -825,6 +883,33 @@ process.on('uncaughtException', async (err) => {
         throw new Error('No se encontró el Song ID en la página.');
       }
       console.log(`Song ID: ${songId}`);
+
+      // Salvaguarda anti-duplicado (bug real 2026-07-13, "Un Ángel en
+      // Jenner"): si el proceso de --loop murió DESPUÉS de llenar Suno (o
+      // más adelante) y se relanzó, `--resume` solo se respeta en el
+      // PRIMER ciclo — si ese primer intento de --resume falla por
+      // cualquier motivo (song.txt no coincide, lo que sea), los ciclos
+      // siguientes arrancan de cero. Como la asignación en el Flow sigue
+      // activa (nadie hizo Submit todavía), `enterFlowAndEnsureAssignment`
+      // la encuentra de nuevo y este punto del código estaba a punto de
+      // regenerar la letra y mandar todo el pipeline OTRA VEZ a Suno —
+      // Create duplicado, créditos gastados dos veces, visto en vivo. Acá
+      // es la única fuente confiable de "hasta dónde llegamos ya" —si dice
+      // que este Song ID ya pasó de "generated" (Suno ya se llenó), NO hay
+      // que tocar Suno de nuevo bajo ninguna circunstancia: abortar fuerte
+      // y avisar urgente en vez de reprocesar en silencio. `--dry-run`
+      // nunca dispara esto (nunca toca Suno de verdad).
+      const existingState = pipelineState.read();
+      const ALREADY_PAST_GENERATION = new Set([
+        pipelineState.STAGES.SUNO_FILLED,
+        pipelineState.STAGES.FLOW_FILLED,
+        pipelineState.STAGES.COMPLETED,
+      ]);
+      if (!isDryRun && existingState?.songId === songId && ALREADY_PAST_GENERATION.has(existingState.stage)) {
+        const msg = `"${existingState.titulo}" (Song ID ${songId}) ya pasó por Suno en esta sesión (etapa "${existingState.stage}") — NO se regenera para evitar un Create duplicado. Revisá manualmente en Suno/Flow si esta canción ya está lista (probablemente sí). Si de verdad hace falta rehacerla desde cero, borrá state.json a mano primero.`;
+        await notify(`🚨 ${msg}`, { title: '🛑 Duplicado evitado', priority: 'urgent', tags: 'rotating_light' }).catch(() => {});
+        throw new Error(msg);
+      }
     } else {
       console.log('--- MOCK GENERATION DRY RUN ---');
     }
@@ -1002,6 +1087,22 @@ process.on('uncaughtException', async (err) => {
     fs.writeFileSync(SONG_PATH, songContent, 'utf-8');
     console.log(`\nCanción guardada en ${SONG_PATH}`);
 
+    // En --dry-run, song.txt se restaura a la letra real en el finally de
+    // esta misma función apenas termina — start-flow.js ya no puede leer el
+    // mock del disco después de este punto. El chequeo de que el mock es
+    // parseable por los mismos scripts que leen song.txt en un pipeline real
+    // (parseSongFile, único parser canónico — ver lib/song-file.js) tiene que
+    // vivir ACÁ, con el mock todavía en memoria/disco.
+    if (isDryRun) {
+      const { parseSongFile } = require('./lib/song-file');
+      const parsed = parseSongFile(songContent);
+      const mockOk = !!(parsed.titulo && parsed.lyrics && parsed.estilo);
+      if (!mockOk) {
+        throw new Error('El song.txt mock no pasa parseSongFile (título/letra/estilo Suno).');
+      }
+      console.log('✅ song.txt mock parseable por parseSongFile (suno-fill.js/flow-submit.js).');
+    }
+
     // Registrar el estado del pipeline para que los scripts siguientes
     // (suno-fill, flow-submit, --done) sepan sobre qué canción están trabajando
     // y puedan detectar si se cruzó con otra (ver lib/pipeline-state.js).
@@ -1021,28 +1122,80 @@ process.on('uncaughtException', async (err) => {
     // (coherencia/rima/tono/fidelidad/gancho) — hoy ese juicio subjetivo solo
     // lo hace el propio modelo generador vía su qaChecklist autoevaluado.
     // NUNCA bloquea ni gasta reintentos (mismo criterio que CLAP/NISQA:
-    // informativo hasta calibrar en vivo — ver LESSONS.md). Solo corre sobre
-    // letras que YA pasaron QA: mezclar veredictos sobre letras rechazadas
-    // ensuciaría la calibración futura contra el QA humano real.
-    if (passedQA && parsedJson?.letras) {
+    // informativo hasta calibrar en vivo — ver LESSONS.md). Corre SIEMPRE
+    // que haya letra, pase o no pase hardValidate (pedido explícito de
+    // Hector 2026-07-13: "OLLAMA SIEMPRE CORRA no a veces SIEMPRE" — antes
+    // se saltaba entero si passedQA era false, así que una letra con
+    // ⚠️ ADVERTENCIA tras agotar los 3 intentos se quedaba SIN la segunda
+    // opinión justo cuando más falta hacía. Ollama es local y gratis, así
+    // que no hay costo real en correrlo también sobre letras con warning.
+    if (parsedJson?.letras) {
       console.log('\n🛡️  Consultando al Guardia (Ollama local, puede tardar unos minutos la primera vez)...');
       const guardiaResult = await validarGuardia({ letras: parsedJson.letras, titulo: parsedJson.titulo, survey: surveyContent });
+      let guardiaSegunda = null;
+
       if (guardiaResult.ok) {
         console.log(`🛡️  El Guardia (Ollama/${guardiaResult.model}, ${Math.round(guardiaResult.durationMs / 1000)}s): ${guardiaResult.veredicto}`);
         console.log(`   coherencia=${guardiaResult.coherencia} rima=${guardiaResult.rima} tono=${guardiaResult.tono} fidelidad=${guardiaResult.fidelidad} gancho=${guardiaResult.gancho} aprobada=${guardiaResult.aprobada}`);
         guardiaResult.problemas.forEach((p) => console.log(`   • ${p}`));
+
+        // Doble verificación INDEPENDIENTE (pedido explícito de Hector
+        // 2026-07-13: "ollama siempre es gratis", "quiero que ollama sea mi
+        // guardia de seguridad" — ya que la latencia no es restricción y
+        // corre local sin costo, una segunda pasada reduce el riesgo de que
+        // un solo veredicto ruidoso deje pasar algo por casualidad. Solo en
+        // canciones reales — --dry-run se queda con una sola pasada para no
+        // duplicar la latencia de cada ensayo (nunca gasta plata igual, así
+        // que no hay urgencia de doble-chequear el mock).
+        if (!isDryRun) {
+          console.log('\n🛡️  Segunda pasada del Guardia (doble verificación independiente)...');
+          guardiaSegunda = await validarGuardia({ letras: parsedJson.letras, titulo: parsedJson.titulo, survey: surveyContent });
+          if (guardiaSegunda.ok) {
+            console.log(`🛡️  Guardia (2da pasada, ${Math.round(guardiaSegunda.durationMs / 1000)}s): ${guardiaSegunda.veredicto}`);
+            console.log(`   coherencia=${guardiaSegunda.coherencia} rima=${guardiaSegunda.rima} tono=${guardiaSegunda.tono} fidelidad=${guardiaSegunda.fidelidad} gancho=${guardiaSegunda.gancho} aprobada=${guardiaSegunda.aprobada}`);
+            guardiaSegunda.problemas.forEach((p) => console.log(`   • ${p}`));
+          } else {
+            console.log(`🛡️  Segunda pasada no disponible (${guardiaSegunda.error}) — se sigue solo con la primera.`);
+          }
+        }
+
         if (!isDryRun) {
           try {
-            pipelineState.write({ guardia: guardiaResult });
+            pipelineState.write({ guardia: guardiaResult, guardiaSegunda });
             fs.mkdirSync(path.join(__dirname, 'logs'), { recursive: true });
             fs.appendFileSync(
               path.join(__dirname, 'logs', 'guardia-feedback.jsonl'),
-              JSON.stringify({ ts: new Date().toISOString(), songId, ...guardiaResult }) + '\n',
+              JSON.stringify({ ts: new Date().toISOString(), songId, guardiaResult, guardiaSegunda }) + '\n',
               'utf-8'
             );
           } catch {
             // best-effort — la señal ya se mostró en consola/run-log
           }
+        }
+
+        // Gate real (ya no solo informativo): si CUALQUIER pasada disponible
+        // rechaza la letra, pausar para revisión humana ANTES de mandarla a
+        // Suno, en vez de solo loguear y seguir de largo. Ollama caído en
+        // una o ambas pasadas nunca bloquea (mismo criterio de siempre) —
+        // esto solo actúa cuando el Guardia efectivamente juzgó y dijo que
+        // no. `pauseForHumanInteraction` respeta el timeout humano de
+        // --loop (20 min default): si nadie responde, esta canción se
+        // abandona y el loop sigue con la próxima, nunca se cuelga la noche
+        // entera por esto.
+        const veredictos = [guardiaResult, guardiaSegunda].filter((g) => g && g.ok);
+        const algunaRechaza = veredictos.some((g) => g.aprobada === false);
+        if (!isDryRun && algunaRechaza) {
+          const detalle = veredictos
+            .filter((g) => g.aprobada === false)
+            .map((g) => `"${g.veredicto}"${g.problemas.length ? ' — ' + g.problemas.join('; ') : ''}`)
+            .join(' | ');
+          await notify(
+            `🚨 "${parsedJson.titulo}": El Guardia NO aprobó la letra (${veredictos.length} pasada(s) evaluadas). ${detalle}`,
+            { title: 'El Guardia rechazó la letra', priority: 'urgent', tags: 'rotating_light' }
+          ).catch(() => {});
+          await pauseForHumanInteraction(
+            `El Guardia (Ollama) no aprobó "${parsedJson.titulo}" — al menos una pasada dijo que no mandarías esta letra a producción sin tocarla. Detalle: ${detalle}. Revisá song.txt antes de continuar con Suno.`
+          );
         }
       } else {
         console.log(`🛡️  El Guardia no disponible (${guardiaResult.error}) — sin señal esta vez, no bloquea.`);
@@ -1073,6 +1226,21 @@ process.on('uncaughtException', async (err) => {
         : '⚠️ Listo, pero con advertencia. Revisá song.txt cuidadosamente antes de continuar.'
     );
   } finally {
+    if (isDryRun) {
+      try {
+        if (dryRunBackedUp) {
+          fs.copyFileSync(DRY_RUN_BACKUP_PATH, SONG_PATH);
+          fs.unlinkSync(DRY_RUN_BACKUP_PATH);
+          console.log('\n🛟 song.txt real restaurado (el mock del ensayo no queda en disco).');
+        } else if (fs.existsSync(SONG_PATH)) {
+          // No había song.txt real antes del ensayo (primera corrida en esta
+          // carpeta) — no dejar el mock tirado como si fuera contenido real.
+          fs.unlinkSync(SONG_PATH);
+        }
+      } catch (e) {
+        console.log(`⚠️ No se pudo restaurar song.txt tras el dry-run (${e.message}) — revisar a mano.`);
+      }
+    }
     await disconnectCdp();
     // Higiene de disco: limpiar caché solo si el perfil creció demasiado Y
     // Chrome NO está corriendo (con Chrome vivo los archivos están en uso —

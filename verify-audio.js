@@ -31,6 +31,7 @@ const { findSunoMp3s, SUNO_DIR } = require('./lib/audio-match');
 const { extractFirstNames } = require('./lib/text-helpers');
 const { applyPhoneticReplacements, readSunoLyricsCache, parseSongFile } = require('./lib/song-file');
 const { analyzeAudio, prepareVocals, cleanupVocalsTmp, transcribeFiles, runClapScoreWithVocalIsolation, runNisqaScore, runMuqEvalScore, runAudioboxScore, runF0GenderCheck, reconcileF0Octave, resolveVocalOrMixPaths, stripStructuralTags, printReport, pickBestVersion, parseLyricsFromSongFile, parseTituloFromSongFile, getDurationAsync, formatDuration, formatElapsed, SONG_PATH } = require('./lib/audio-analysis');
+const { evaluarAudioGuardia } = require('./lib/ollama-guardia');
 const { notify } = require('./lib/ntfy');
 const pipelineState = require('./lib/pipeline-state');
 
@@ -273,6 +274,43 @@ function parseArgs(argv) {
   // Imprimir reporte completo
   printReport(titulo, reportA, reportB);
 
+  // El Guardia de audio: segunda opinión SEMÁNTICA vía Ollama cuando
+  // Levenshtein o NISQA disparan alarma — ambas métricas dan falsos
+  // positivos conocidos sobre voz cantada (Levenshtein no tolera adlibs,
+  // NISQA nunca se calibró contra canto). Caso real que motivó esto
+  // (2026-07-13, "Un Ángel en Jenner"): ambas versiones marcaron
+  // "ALUCINACIÓN GRAVE" y NISQA ~23/100, pero el audio real estaba bien al
+  // escucharlo. Solo se llama si hay alarma — no gasta Ollama en canciones
+  // sanas. PURAMENTE INFORMATIVO, no bloquea el auto-upload/auto-submit.
+  const GUARDIA_AUDIO_TRIGGER = (r) =>
+    r && ((r.levenshteinScore !== null && r.levenshteinScore < 0.75) || (r.nisqa?.score !== null && r.nisqa.score < 50));
+  for (const [label, report] of [['A', reportA], ['B', reportB]]) {
+    if (!report || !GUARDIA_AUDIO_TRIGGER(report)) continue;
+    console.log(`\n🛡️  Señal de alarma en Versión ${label} — consultando al Guardia (segunda opinión sobre posible falso positivo)...`);
+    const señales = [
+      report.levenshteinScore !== null ? `Levenshtein: ${Math.round(report.levenshteinScore * 100)}%` : null,
+      report.nisqa?.score !== null ? `NISQA: ${report.nisqa.score}/100` : null,
+      report.clap?.score !== null ? `CLAP: ${report.clap.score}/100` : null,
+      report.missingNames.length ? `nombres posiblemente ausentes: ${report.missingNames.join(', ')}` : null,
+    ].filter(Boolean).join(' | ');
+    const guardiaAudio = await evaluarAudioGuardia({
+      titulo,
+      letraPedida: lyricsText,
+      transcripcion: report.transcription?.text || '',
+      señales,
+    });
+    report.guardiaAudio = guardiaAudio;
+    if (guardiaAudio.ok) {
+      console.log(`🛡️  Guardia (audio, ${guardiaAudio.model}, ${Math.round(guardiaAudio.durationMs / 1000)}s): ${guardiaAudio.veredicto}`);
+      console.log(`   coincideConLetra=${guardiaAudio.coincideConLetra} similitud=${guardiaAudio.similitud}/10 aprobada=${guardiaAudio.aprobada}${guardiaAudio.problemas.length ? ' | problemas: ' + guardiaAudio.problemas.join('; ') : ''}`);
+      if (guardiaAudio.aprobada && guardiaAudio.coincideConLetra) {
+        console.log('   ℹ️  Posible falso positivo de Levenshtein/NISQA — el Guardia dice que el contenido cantado coincide con la letra pedida.');
+      }
+    } else {
+      console.log(`🛡️  Guardia de audio no disponible (${guardiaAudio.error}) — sin señal esta vez, no bloquea.`);
+    }
+  }
+
   // Generar recomendación y guardar reporte a JSON
   const recommendation = pickBestVersion(reportA, reportB);
   const REPORT_PATH = path.join(__dirname, 'verify-report.json');
@@ -305,6 +343,7 @@ function parseArgs(argv) {
         truncatedWords: reportA.truncatedWords ?? [],
         muqEval: reportA.muqEval ?? null,
         audiobox: reportA.audiobox ?? null,
+        guardiaAudio: reportA.guardiaAudio ?? null,
         summary: reportA.summary,
       },
       reportB: reportB ? {
@@ -328,6 +367,7 @@ function parseArgs(argv) {
         truncatedWords: reportB.truncatedWords ?? [],
         muqEval: reportB.muqEval ?? null,
         audiobox: reportB.audiobox ?? null,
+        guardiaAudio: reportB.guardiaAudio ?? null,
         summary: reportB.summary,
       } : null,
       timestamp: new Date().toISOString(),

@@ -13,6 +13,9 @@ const {
   parseGuardiaResponse,
   validarGuardia,
   LYRICS_SECTION_KEYS,
+  buildAudioGuardiaPrompt,
+  parseAudioGuardiaResponse,
+  evaluarAudioGuardia,
 } = require('../lib/ollama-guardia');
 
 const LETRAS_FAKE = {
@@ -141,6 +144,84 @@ test('validarGuardia: sin letras devuelve ok:false sin siquiera llamar a fetch',
   let called = false;
   const fetchImpl = async () => { called = true; };
   const r = await validarGuardia({ letras: null }, { fetchImpl });
+  assert.equal(r.ok, false);
+  assert.equal(called, false);
+});
+
+// ── Guardia de audio (falsos positivos de Levenshtein/NISQA sobre voz cantada) ──
+
+const RESPUESTA_AUDIO_VALIDA = {
+  coincideConLetra: true,
+  similitud: 9,
+  problemas: [],
+  veredicto: 'El contenido cantado coincide con la letra pedida, solo hay estilo libre de canto.',
+  aprobada: true,
+};
+
+test('buildAudioGuardiaPrompt: incluye título, letra pedida, transcripción y señales', () => {
+  const prompt = buildAudioGuardiaPrompt({
+    titulo: 'Un Ángel en Jenner',
+    letraPedida: 'La arena estaba fría en la orilla del Jenner',
+    transcripcion: 'la arena estaba fría en la oriya del yener',
+    señales: 'Levenshtein: 59% | NISQA: 23/100',
+  });
+  assert.match(prompt, /Un Ángel en Jenner/);
+  assert.match(prompt, /orilla del Jenner/);
+  assert.match(prompt, /oriya del yener/);
+  assert.match(prompt, /Levenshtein: 59%/);
+  assert.match(prompt, /falsos positivos/i);
+});
+
+test('buildAudioGuardiaPrompt: sin datos no lanza y lo dice explícitamente', () => {
+  const prompt = buildAudioGuardiaPrompt({});
+  assert.match(prompt, /sin letra disponible/);
+  assert.match(prompt, /sin transcripción disponible/);
+  assert.match(prompt, /sin señales/);
+});
+
+test('parseAudioGuardiaResponse: JSON válido devuelve todos los campos normalizados', () => {
+  const r = parseAudioGuardiaResponse(JSON.stringify(RESPUESTA_AUDIO_VALIDA));
+  assert.equal(r.ok, true);
+  assert.equal(r.coincideConLetra, true);
+  assert.equal(r.similitud, 9);
+  assert.equal(r.aprobada, true);
+});
+
+test('parseAudioGuardiaResponse: similitud fuera de rango se acota a 1-10', () => {
+  const r = parseAudioGuardiaResponse(JSON.stringify({ ...RESPUESTA_AUDIO_VALIDA, similitud: 99 }));
+  assert.equal(r.ok, true);
+  assert.equal(r.similitud, 10);
+});
+
+test('parseAudioGuardiaResponse: JSON malformado o sin similitud no lanza — ok:false', () => {
+  assert.equal(parseAudioGuardiaResponse('no es json {').ok, false);
+  const sinSimilitud = parseAudioGuardiaResponse(JSON.stringify({ ...RESPUESTA_AUDIO_VALIDA, similitud: 'alta' }));
+  assert.equal(sinSimilitud.ok, false);
+  assert.match(sinSimilitud.error, /similitud/);
+});
+
+test('evaluarAudioGuardia: respuesta 200 con JSON válido devuelve ok:true', async () => {
+  const fetchImpl = fakeOllamaFetch({ message: { content: JSON.stringify(RESPUESTA_AUDIO_VALIDA) } });
+  const r = await evaluarAudioGuardia(
+    { titulo: 'T', letraPedida: 'letra', transcripcion: 'transcripcion', señales: 'Levenshtein: 60%' },
+    { fetchImpl, model: 'qwen3:14b' }
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.model, 'qwen3:14b');
+  assert.equal(r.aprobada, true);
+});
+
+test('evaluarAudioGuardia: Ollama caído NO lanza — ok:false con el error', async () => {
+  const fetchImpl = async () => { throw new Error('fetch failed: ECONNREFUSED'); };
+  const r = await evaluarAudioGuardia({ letraPedida: 'letra' }, { fetchImpl });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /ECONNREFUSED/);
+});
+
+test('evaluarAudioGuardia: sin letra pedida devuelve ok:false sin llamar a fetch', async () => {
+  let called = false;
+  const fetchImpl = async () => { called = true; };
+  const r = await evaluarAudioGuardia({ letraPedida: null }, { fetchImpl });
   assert.equal(r.ok, false);
   assert.equal(called, false);
 });

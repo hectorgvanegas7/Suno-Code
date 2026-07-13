@@ -6,7 +6,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { hardValidate, validateContentForWrite, parseSections, isSafeToPatch } = require('../lib/song-validate');
+const { hardValidate, validateContentForWrite, parseSections, isSafeToPatch, applyDeterministicAccentFixes } = require('../lib/song-validate');
 
 function buildResponse({
   trato = 'tú',
@@ -567,6 +567,91 @@ test('nombre español estándar SIN respellear (survey sin tilde, letra con tild
     !failures.some((f) => f.includes('español estándar')),
     `no debería marcar nada, encontrado: ${failures.filter((f) => f.includes('español estándar')).join(' | ')}`
   );
+});
+
+test('BUG REAL 2026-07-13 ("El Lago Donde Aprendí a Quedarme"): "Maria" sin tilde reporta UN solo fallo patcheable, no dos', () => {
+  // Caso real: el LLM escribió "Maria" (sin tilde) en vez de "María" tres
+  // veces seguidas pese a las instrucciones correctivas. El chequeo H2 (Eñe/
+  // tilde perdida, patcheable) ya lo detecta — pero antes el chequeo M
+  // (nombre español estándar) TAMBIÉN lo marcaba como fallo separado y NO
+  // patcheable ("posible re-escritura indebida"), lo cual hacía isSafeToPatch
+  // devolver false y forzaba un regen completo caro que no arreglaba nada
+  // (3/3 intentos fallidos con el mismo typo). Ahora M se salta cuando la
+  // forma sin acentuar ya está cubierta por H2, para que el corrector barato
+  // pueda arreglar este typo sin gastar un regen completo.
+  const response = buildResponse({
+    chorus1: ['Maria, contigo hasta el enojo sabe a casa', 'Tu silencio también lo aprendí a querer', 'Paciente cuando yo ni fui capaz de serlo', 'Sabia cuando el mundo no supo qué hacer'],
+    chorus2: ['Maria, la que se enoja y regresa igual de fuerte', 'La que trabaja doble y no deja de amar', 'Sabia en lo simple, terca cuando hace falta', 'Sigues siendo el lugar donde quiero regresar'],
+  });
+  const { valid, failures } = hardValidate(response, "What's their name?: Maria");
+  assert.equal(valid, false);
+  assert.equal(
+    failures.filter((f) => /maria/i.test(f)).length,
+    2,
+    `debería reportar solo el fallo H2 (uno por chorus), no el fallo M duplicado: ${failures.join(' | ')}`
+  );
+  assert.ok(
+    !failures.some((f) => f.includes('español estándar')),
+    `no debería duplicar como fallo M no-patcheable: ${failures.filter((f) => f.includes('español estándar')).join(' | ')}`
+  );
+  assert.ok(
+    failures.every((f) => f.startsWith('Eñe/tilde perdida')),
+    `todos los fallos deberían ser del tipo patcheable H2: ${failures.join(' | ')}`
+  );
+  assert.equal(isSafeToPatch(failures), true, 'el corrector barato debería poder intentarlo, sin ir directo a un regen completo');
+});
+
+test('applyDeterministicAccentFixes: corrige "Maria"->"María" preservando mayúscula, sin tocar el resto de la línea', () => {
+  // Mismo caso real de arriba, probando el reemplazo mecánico directo (cero
+  // LLM) que ahora corre ANTES del corrector de Haiku en run.js.
+  const letras = {
+    'Chorus 1': ['Maria, contigo hasta el enojo sabe a casa', 'Tu silencio también lo aprendí a querer'],
+    'Chorus 2': ['Maria, la que se enoja y regresa igual de fuerte'],
+  };
+  const { letras: fixed, appliedCount } = applyDeterministicAccentFixes(letras);
+  assert.equal(appliedCount, 2, 'debería corregir las 2 apariciones de "Maria"');
+  assert.equal(fixed['Chorus 1'][0], 'María, contigo hasta el enojo sabe a casa');
+  assert.equal(fixed['Chorus 1'][1], 'Tu silencio también lo aprendí a querer', 'línea sin typo no debe tocarse');
+  assert.equal(fixed['Chorus 2'][0], 'María, la que se enoja y regresa igual de fuerte');
+
+  // El resultado debería pasar hardValidate limpio (sin el fallo de tilde).
+  const response = JSON.stringify({
+    titulo: 'Test', voz: 'Femenina', trato: 'tú',
+    estiloSuno: 'Balada, Latin American Spanish, neutral accent, seseo',
+    letras: {
+      'Verse 1': ['Una tarde tranquila el cielo se abrió', 'Recuerdo esa risa que jamás cambió', 'El tiempo pasaba lento y sereno', 'Algo en mi pecho supo que eras bueno'],
+      'Chorus 1': [fixed['Chorus 1'][0], fixed['Chorus 1'][1], 'Paciente cuando yo ni fui capaz de serlo', 'Sabia cuando el mundo no supo qué hacer'],
+      'Verse 2': ['Después de un turno largo volvías feliz', 'Sacabas fuerzas para hacernos reír', 'Cada tropiezo lo hiciste sentir', 'Como un paso más hacia el porvenir'],
+      'Chorus 2': [fixed['Chorus 2'][0], 'La que trabaja doble y no deja de amar', 'Sabia en lo simple, terca cuando hace falta', 'Sigues siendo el lugar donde quiero regresar'],
+      'Bridge': ['Aquella noche me tomaste la mano', 'Y prometiste cuidar cada verano', 'Ese instante quedó grabado cercano', 'Fue la prueba de un amor soberano'],
+      'Outro': ['Hoy te prometo un cariño sincero', 'Serás mi guía por todo el sendero', 'Con esta canción te digo primero', 'Te voy a amar por siempre entero'],
+    },
+    qaChecklist: {
+      "6_secciones_en_orden": true, "4_lineas_por_seccion": true, "nombre_primera_palabra_chorus": true,
+      "nombre_solo_una_vez_por_chorus": true, "nombre_ausente_en_verse_1": true, "chorus_1_distinto_chorus_2": true,
+      "verse_2_con_escena_concreta": true, "bridge_con_detalle_vulnerable": true, "nada_inventado": true,
+      "trato_consistente": true, "numeros_meses_completos": true, "titulo_no_cantable": true,
+      "sin_puntuacion_prohibida": true, "sin_lineas_consecutivas_misma_palabra": true, "todas_lineas_con_sentido": true,
+      "estilo_suno_incluye_seseo": true, "sin_dialogos_textuales": true, "destinatarios_multiples_balanceados": true,
+      "pov_consistente": true, "sin_acrostico": true, "metrica_corta_y_consistente": true, "rima_fuerte_evidente": true,
+      "adaptacion_poetica_sin_copypaste": true, "coros_con_gancho": true, "vocales_abiertas_en_coro": true,
+      "un_solo_motivo_central": true, "cierre_circular_con_verse_1": true, "contraste_especifico_vs_universal": true,
+      "sin_inversion_poetica_forzada": true, "bridge_con_giro_real": true, "linea_de_gancho_quotable": true,
+      "una_metafora_por_linea": true, "arco_de_tiempo_verbal_por_seccion": true, "ancla_sensorial_en_cada_verso": true,
+      "paralelismo_chorus_1_y_2": true, "espacio_negativo_sin_maxima_intensidad_constante": true,
+      "sin_conectores_explicativos": true, "rima_rica_no_pobre": true, "gancho_en_misma_posicion_metrica": true,
+    },
+    foneticaAplicada: false, advertencias: 'Ninguna',
+  });
+  const { valid, failures } = hardValidate(response, "What's their name?: Maria");
+  assert.equal(valid, true, `debería quedar limpio tras el reemplazo determinístico: ${failures.join(' | ')}`);
+});
+
+test('applyDeterministicAccentFixes: no toca nada si no hay typos de tilde', () => {
+  const letras = { 'Verse 1': ['Una tarde tranquila el cielo se abrió'] };
+  const { letras: fixed, appliedCount } = applyDeterministicAccentFixes(letras);
+  assert.equal(appliedCount, 0);
+  assert.deepEqual(fixed, letras);
 });
 
 test('nombre NO estándar (anglicanizado) sigue sin chequeo de ortografía exacta — el backstop no le aplica', () => {

@@ -184,6 +184,19 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
   fonético, hash de song.txt, rotación de logs, parseo de sesión).
   ⚠️ Cada regla nueva del `SYSTEM_PROMPT` de `run.js` debe chequearse contra este
   validador Y agregarse un caso al test.
+  También exporta `applyDeterministicAccentFixes(letras)` (2026-07-13):
+  corrector de tildes/eñes SIN LLM — reemplazo de texto directo para los
+  typos donde `findAccentTypos()` ya encontró una única sustitución válida
+  (sin ambigüedad). `run.js` lo corre inmediatamente después de cada
+  `hardValidate()` fallido, ANTES del corrector barato de Haiku
+  (`lib/song-corrector.js`) y antes de gastar un regen completo — bug real
+  que lo motivó: "maria"->"María" sobrevivió 3 regeneraciones completas
+  seguidas porque el modelo no se autocorregía de forma confiable pese a
+  instrucciones explícitas (ver LESSONS.md, "El Lago Donde Aprendí a
+  Quedarme"). El chequeo M (nombres españoles estándar) también se ajustó
+  para no duplicar como fallo NO-patcheable un typo que H2 (Eñe/tilde
+  perdida) ya cubre — antes eso bloqueaba `isSafeToPatch` por completo y
+  forzaba el regen caro innecesariamente.
 - `lib/spanish-spellcheck.js` — `findAccentTypos(text)`: chequeo GENERAL de
   tildes/eñes faltantes en cualquier palabra de la letra (no solo nombres
   propios), contra un diccionario real de español (`nspell` + `dictionary-es`,
@@ -225,14 +238,32 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
   encuesta real: coherencia/rima/tono/fidelidad/gancho (1-10) + problemas
   concretos por sección — lo que ni el diccionario ni LanguageTool pueden
   ver, y que antes solo se autoevaluaba el propio modelo generador. Corre en
-  `run.js` DESPUÉS de que la letra pasó QA completo, PURAMENTE INFORMATIVO
-  (nunca bloquea, nunca gasta reintentos, nunca lanza — Ollama caído =
-  "sin señal esta vez"): consola + `state.json` (`guardia`) +
+  `run.js` SIEMPRE que haya letra (2026-07-13: antes se saltaba entero si
+  `passedQA` era `false` tras agotar los 3 intentos de generación —
+  justo la letra que más necesitaba una segunda opinión se quedaba sin
+  ella; pedido explícito de Hector: "OLLAMA SIEMPRE CORRA no a veces
+  SIEMPRE", es local y gratis, no hay costo real en correrlo también sobre
+  letras con warning). Nunca gasta reintentos, nunca lanza — Ollama caído =
+  "sin señal esta vez": consola + `state.json` (`guardia`) +
   `logs/guardia-feedback.jsonl` para calibrar contra el QA humano.
   `keep_alive: 0` obligatorio (libera la VRAM apenas responde, no compite
   con Whisper/Demucs/CLAP/NISQA). Requiere Ollama instalado +
   `ollama pull qwen3:14b` (y `qwen3:8b` de fallback) — sin eso el pipeline
   sigue exactamente igual, solo sin esta señal.
+  `evaluarAudioGuardia({ titulo, letraPedida, transcripcion, señales })`
+  (2026-07-13): mismo Guardia, ahora también como Capa 4 sobre AUDIO — lo
+  llama `verify-audio.js` SOLO cuando Levenshtein (<75%) o NISQA (<50) ya
+  dispararon alarma (caso real que lo motivó: ambas versiones de una
+  canción marcaron "ALUCINACIÓN GRAVE"/NISQA ~23, pero el audio real
+  estaba bien — Levenshtein no tolera adlibs de canto y NISQA nunca se
+  calibró contra voz cantada). No puede escuchar el MP3, pero lee la
+  transcripción de Whisper (ya generada, cero costo extra) y juzga
+  SEMÁNTICAMENTE si coincide con la letra pedida, tolerando imperfecciones
+  normales de reconocimiento de voz cantada. Resultado en
+  `report.guardiaAudio` / `verify-report.json`. PURAMENTE INFORMATIVO —
+  decisión explícita con Hector de NO bloquear el Auto-Submit todavía
+  (mismo criterio "nunca decide solo" que CLAP/NISQA), candidato a gate
+  real una vez calibrado en vivo. Ver LESSONS.md.
 - `lib/llm-provider.js` — `generate(provider, surveyText, systemPrompt, isDryRun)`:
   unifica las llamadas a Anthropic (`claude-sonnet-5`) y Gemini (`gemini-3.5-flash`)
   en un solo lugar. En `isDryRun` devuelve siempre el mismo texto mock, sin llamar a
