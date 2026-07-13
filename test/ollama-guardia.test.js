@@ -12,6 +12,7 @@ const {
   buildGuardiaPrompt,
   parseGuardiaResponse,
   validarGuardia,
+  formatGuardiaProblem,
   LYRICS_SECTION_KEYS,
   buildAudioGuardiaPrompt,
   parseAudioGuardiaResponse,
@@ -33,7 +34,9 @@ const RESPUESTA_VALIDA = {
   tono: 9,
   fidelidad: 8,
   gancho: 6,
-  problemas: ['[Verse 2] línea 1: rima pobre con la línea 3'],
+  confianza: 7,
+  estiloCoincide: true,
+  problemas: [{ seccion: 'Verse 2', linea: 1, tipo: 'rima', gravedad: 'baja', detalle: 'rima pobre con la línea 3' }],
   veredicto: 'Letra sólida, con una rima floja en Verse 2.',
   aprobada: true,
 };
@@ -115,13 +118,72 @@ test('buildGuardiaPrompt sin qaContext (pasada ciega): NO menciona el QA previo 
   assert.ok(!prompt.includes('QA AUTOMÁTICO PREVIO'), 'la pasada ciega no debe ver los fallos del validador');
 });
 
+test('buildGuardiaPrompt: incluye el estiloSuno pedido y pide juzgar si coincide con la encuesta', () => {
+  const prompt = buildGuardiaPrompt({ letras: LETRAS_FAKE, titulo: 'T', survey: 'S', estiloSuno: 'Balada, piano suave, Latin American Spanish, neutral accent, seseo' });
+  assert.match(prompt, /ESTILO PEDIDO A SUNO/);
+  assert.match(prompt, /Balada, piano suave/);
+  assert.match(prompt, /estiloCoincide/);
+});
+
+test('buildGuardiaPrompt: sin estiloSuno no lanza y lo dice explícitamente', () => {
+  const prompt = buildGuardiaPrompt({ letras: LETRAS_FAKE, titulo: 'T', survey: 'S' });
+  assert.match(prompt, /sin estilo especificado/);
+});
+
 test('parseGuardiaResponse: confianza se normaliza (clamp 1-10) y es opcional (null si falta, sin invalidar el veredicto)', () => {
   const con = parseGuardiaResponse(JSON.stringify({ ...RESPUESTA_VALIDA, confianza: 99 }));
   assert.equal(con.ok, true);
   assert.equal(con.confianza, 10);
-  const sin = parseGuardiaResponse(JSON.stringify(RESPUESTA_VALIDA));
+  const { confianza, ...sinConfianza } = RESPUESTA_VALIDA;
+  const sin = parseGuardiaResponse(JSON.stringify(sinConfianza));
   assert.equal(sin.ok, true);
   assert.equal(sin.confianza, null);
+});
+
+test('parseGuardiaResponse: estiloCoincide es boolean o null (respuestas viejas sin el campo no se invalidan)', () => {
+  const con = parseGuardiaResponse(JSON.stringify({ ...RESPUESTA_VALIDA, estiloCoincide: false }));
+  assert.equal(con.ok, true);
+  assert.equal(con.estiloCoincide, false);
+  const { estiloCoincide, ...sinEstilo } = RESPUESTA_VALIDA;
+  const sin = parseGuardiaResponse(JSON.stringify(sinEstilo));
+  assert.equal(sin.ok, true);
+  assert.equal(sin.estiloCoincide, null);
+});
+
+test('parseGuardiaResponse: problemas estructurado — normaliza tipo/gravedad inválidos a defaults y descarta ítems sin detalle', () => {
+  const r = parseGuardiaResponse(JSON.stringify({
+    ...RESPUESTA_VALIDA,
+    problemas: [
+      { seccion: 'Bridge', linea: 2, tipo: 'algo-raro', gravedad: 'catastrofica', detalle: 'tipo/gravedad inválidos se normalizan' },
+      { detalle: 'sin sección ni línea — es válido, aplica a toda la canción' },
+      { seccion: 'Outro' }, // sin detalle: se descarta
+      'problema en formato legado (string libre)',
+      42, // basura: se descarta
+    ],
+  }));
+  assert.equal(r.ok, true);
+  assert.equal(r.problemas.length, 3, `esperaba 3 problemas válidos, hubo ${r.problemas.length}: ${JSON.stringify(r.problemas)}`);
+  assert.equal(r.problemas[0].tipo, 'otro', 'tipo fuera del enum se normaliza a "otro"');
+  assert.equal(r.problemas[0].gravedad, 'media', 'gravedad fuera del enum se normaliza a "media"');
+  assert.equal(r.problemas[1].seccion, '');
+  assert.equal(r.problemas[1].linea, 0);
+  assert.equal(r.problemas[2].tipo, 'otro');
+  assert.equal(r.problemas[2].detalle, 'problema en formato legado (string libre)', 'un string suelto se envuelve como problema válido');
+});
+
+test('formatGuardiaProblem: arma un string legible con sección/línea solo si aplican', () => {
+  assert.equal(
+    formatGuardiaProblem({ seccion: 'Verse 2', linea: 3, tipo: 'rima', gravedad: 'alta', detalle: 'no rima con nada' }),
+    '[Verse 2 línea 3] (rima/alta) no rima con nada'
+  );
+  assert.equal(
+    formatGuardiaProblem({ seccion: '', linea: 0, tipo: 'tono', gravedad: 'media', detalle: 'tono general disparejo' }),
+    '(tono/media) tono general disparejo'
+  );
+  assert.equal(
+    formatGuardiaProblem({ seccion: 'Bridge', linea: 0, tipo: 'otro', gravedad: 'baja', detalle: 'sin línea puntual' }),
+    '[Bridge] (otro/baja) sin línea puntual'
+  );
 });
 
 test('validarGuardia: keepAlive viaja al body de Ollama (entre pasadas consecutivas no se recarga el modelo desde frío)', async () => {
@@ -203,9 +265,11 @@ test('validarGuardia: sin letras devuelve ok:false sin siquiera llamar a fetch',
 const RESPUESTA_AUDIO_VALIDA = {
   coincideConLetra: true,
   similitud: 9,
+  nombreCorrecto: true,
   problemas: [],
   veredicto: 'El contenido cantado coincide con la letra pedida, solo hay estilo libre de canto.',
   aprobada: true,
+  prioridadRevision: '',
 };
 
 test('buildAudioGuardiaPrompt: incluye título, letra pedida, transcripción y señales', () => {
@@ -260,11 +324,33 @@ test('buildAudioGuardiaPrompt con nombres: pide el chequeo específico de nombre
   assert.match(prompt, /error más caro del negocio/i);
 });
 
+test('buildAudioGuardiaPrompt: pide prioridadRevision y menciona señales de fusión más allá de Levenshtein/NISQA', () => {
+  const prompt = buildAudioGuardiaPrompt({
+    titulo: 'T', letraPedida: 'letra', transcripcion: 't',
+    señales: 'Levenshtein: 90% | loudness: -14 LUFS integrado | género de voz detectado: Masculina (esperado: Femenina, NO COINCIDE)',
+  });
+  assert.match(prompt, /prioridadRevision/);
+  assert.match(prompt, /loudness/i);
+  assert.match(prompt, /género de voz/i);
+  assert.match(prompt, /NO COINCIDE/);
+});
+
+test('parseAudioGuardiaResponse: prioridadRevision es string (vacía por default si el modelo no la manda)', () => {
+  const conCampo = parseAudioGuardiaResponse(JSON.stringify({ ...RESPUESTA_AUDIO_VALIDA, prioridadRevision: 'revisar el segundo 45' }));
+  assert.equal(conCampo.ok, true);
+  assert.equal(conCampo.prioridadRevision, 'revisar el segundo 45');
+  const { prioridadRevision, ...sinCampo } = RESPUESTA_AUDIO_VALIDA;
+  const sin = parseAudioGuardiaResponse(JSON.stringify(sinCampo));
+  assert.equal(sin.ok, true);
+  assert.equal(sin.prioridadRevision, '');
+});
+
 test('parseAudioGuardiaResponse: nombreCorrecto es boolean o null (respuestas viejas sin el campo no se invalidan)', () => {
   const conCampo = parseAudioGuardiaResponse(JSON.stringify({ ...RESPUESTA_AUDIO_VALIDA, nombreCorrecto: false }));
   assert.equal(conCampo.ok, true);
   assert.equal(conCampo.nombreCorrecto, false);
-  const sinCampo = parseAudioGuardiaResponse(JSON.stringify(RESPUESTA_AUDIO_VALIDA));
+  const { nombreCorrecto, ...sinCampoObj } = RESPUESTA_AUDIO_VALIDA;
+  const sinCampo = parseAudioGuardiaResponse(JSON.stringify(sinCampoObj));
   assert.equal(sinCampo.ok, true);
   assert.equal(sinCampo.nombreCorrecto, null);
 });

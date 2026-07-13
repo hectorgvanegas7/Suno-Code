@@ -302,11 +302,27 @@ function parseArgs(argv) {
         ? `\n🛡️  Señal de alarma en Versión ${label} — consultando al Guardia (segunda opinión sobre posible falso positivo)...`
         : `\n🛡️  Consultando al Guardia de audio sobre Versión ${label} (chequeo semántico de rutina: contenido + nombre del destinatario)...`
     );
+    // Triage de fusión de señales (2026-07-13): antes el Guardia solo veía
+    // Levenshtein/NISQA/CLAP/missingNames (las señales que ya disparaban su
+    // propio gate condicional). Ahora que corre siempre, se le pasan TODAS
+    // las señales informativas del pipeline — cada una vive aislada en su
+    // propio rincón del reporte hoy (loudness, F0, pacing, dígitos cortados,
+    // calidad musical/producción) y nadie las cruza entre sí ni contra el
+    // juicio semántico. `prioridadRevision` en la respuesta es justamente
+    // ese cruce: qué mirar primero y por qué.
     const señales = [
       report.levenshteinScore !== null ? `Levenshtein: ${Math.round(report.levenshteinScore * 100)}%` : null,
       report.nisqa?.score !== null ? `NISQA: ${report.nisqa.score}/100` : null,
       report.clap?.score !== null ? `CLAP: ${report.clap.score}/100` : null,
       report.missingNames.length ? `nombres posiblemente ausentes: ${report.missingNames.join(', ')}` : null,
+      report.loudness ? `loudness: ${report.loudness.integratedLUFS} LUFS integrado${report.loudness.truePeakDBFS !== null ? `, true peak ${report.loudness.truePeakDBFS} dBFS` : ''}` : null,
+      report.f0Gender?.detectedGender ? `género de voz detectado: ${report.f0Gender.detectedGender}${report.f0Gender.expectedGender ? ` (esperado: ${report.f0Gender.expectedGender}${report.f0Gender.mismatch ? ', NO COINCIDE' : ''})` : ''}` : null,
+      report.pacingIssues?.length ? `${report.pacingIssues.length} palabra(s) posiblemente pegada(s) sin pausa` : null,
+      report.truncatedWords?.length ? `${report.truncatedWords.length} palabra(s) posiblemente cortada(s) antes de terminar` : null,
+      report.clippingFlag ? 'clipping detectado' : null,
+      report.abruptCutoff ? 'corte abrupto al final' : null,
+      report.muqEval?.score !== null && report.muqEval?.score !== undefined ? `calidad musical percibida (MuQ-Eval): ${report.muqEval.score}/5` : null,
+      report.audiobox?.pq !== null && report.audiobox?.pq !== undefined ? `calidad de producción (Audiobox): ${report.audiobox.pq}/10` : null,
     ].filter(Boolean).join(' | ');
     const guardiaAudio = await evaluarAudioGuardia({
       titulo,
@@ -329,6 +345,9 @@ function parseArgs(argv) {
       }
       if (guardiaAudio.nombreCorrecto === false) {
         console.log('   🚨 El Guardia dice que el NOMBRE del destinatario no se reconoce en lo cantado — confirmar de oído antes de subir esta versión.');
+      }
+      if (guardiaAudio.prioridadRevision) {
+        console.log(`   🎯 Prioridad de revisión: ${guardiaAudio.prioridadRevision}`);
       }
     } else {
       console.log(`🛡️  Guardia de audio no disponible (${guardiaAudio.error}) — sin señal esta vez, no bloquea.`);

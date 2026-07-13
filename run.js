@@ -33,7 +33,7 @@ const { hardValidate, validateContentForWrite, extractField, convertJsonToMarkdo
 const { patchSongLines } = require('./lib/song-corrector');
 const { extractFirstNames, extractLyricNameVariants, extractSurveyProperNouns } = require('./lib/text-helpers');
 const { checkGrammarAndSpelling } = require('./lib/languagetool-check');
-const { validarGuardia, DEFAULT_MODEL: GUARDIA_DEFAULT_MODEL } = require('./lib/ollama-guardia');
+const { validarGuardia, formatGuardiaProblem, DEFAULT_MODEL: GUARDIA_DEFAULT_MODEL } = require('./lib/ollama-guardia');
 
 const args = process.argv.slice(2);
 const isDryRun = args.includes('--dry-run');
@@ -1197,7 +1197,7 @@ process.on('uncaughtException', async (err) => {
       const guardiaPrimario = process.env.GUARDIA_MODEL || GUARDIA_DEFAULT_MODEL;
       const guardiaFallback = guardiaPrimario === 'qwen3:8b' ? null : 'qwen3:8b';
       const consultarGuardia = async (etiqueta, { qaContext = null, keepAlive = 0 } = {}) => {
-        const payload = { letras: parsedJson.letras, titulo: parsedJson.titulo, survey: surveyContent, qaContext };
+        const payload = { letras: parsedJson.letras, titulo: parsedJson.titulo, survey: surveyContent, qaContext, estiloSuno: parsedJson.estiloSuno };
         let r = await validarGuardia(payload, { keepAlive });
         if (!r.ok && guardiaFallback) {
           console.log(`🛡️  ${etiqueta} falló (${r.error}) — reintentando con ${guardiaFallback}...`);
@@ -1208,8 +1208,8 @@ process.on('uncaughtException', async (err) => {
       const logPass = (etiqueta, g) => {
         if (g.ok) {
           console.log(`🛡️  ${etiqueta} (Ollama/${g.model}, ${Math.round(g.durationMs / 1000)}s): ${g.veredicto}`);
-          console.log(`   coherencia=${g.coherencia} rima=${g.rima} tono=${g.tono} fidelidad=${g.fidelidad} gancho=${g.gancho} confianza=${g.confianza ?? '-'} aprobada=${g.aprobada}`);
-          g.problemas.forEach((p) => console.log(`   • ${p}`));
+          console.log(`   coherencia=${g.coherencia} rima=${g.rima} tono=${g.tono} fidelidad=${g.fidelidad} gancho=${g.gancho} confianza=${g.confianza ?? '-'} estiloCoincide=${g.estiloCoincide ?? '-'} aprobada=${g.aprobada}`);
+          g.problemas.forEach((p) => console.log(`   • ${formatGuardiaProblem(p)}`));
         } else {
           console.log(`🛡️  ${etiqueta} no disponible (${g.error}) — sin señal de esta pasada.`);
         }
@@ -1292,6 +1292,15 @@ process.on('uncaughtException', async (err) => {
           { title: 'El Guardia no disponible', priority: 'default', tags: 'warning' }
         ).catch(() => {});
       }
+      // estiloSuno vs encuesta (2026-07-13): hoy hardValidate solo chequea
+      // que incluya "seseo" (J) — nada juzga si el estilo EN SÍ (género,
+      // instrumentación, energía) tiene sentido para la ocasión. Advisory
+      // únicamente (ya entra al veredicto general de `aprobada` del Guardia
+      // vía las instrucciones del prompt) — se destaca acá para que no quede
+      // enterrado entre el resto de `problemas`.
+      if (veredictos.some((g) => g.estiloCoincide === false)) {
+        console.log(`   🎨 El Guardia dice que el estiloSuno pedido ("${parsedJson.estiloSuno}") no coincide bien con la ocasión/tono de la encuesta.`);
+      }
 
       const pauseReasons = [];
       // Solo fallos de CONTENIDO pausan — "LanguageTool no disponible" es un
@@ -1306,7 +1315,7 @@ process.on('uncaughtException', async (err) => {
       if (guardiaRechaza) {
         const detalle = veredictos
           .filter((g) => g.aprobada === false)
-          .map((g) => `"${g.veredicto}"${g.problemas.length ? ' — ' + g.problemas.join('; ') : ''}`)
+          .map((g) => `"${g.veredicto}"${g.problemas.length ? ' — ' + g.problemas.map(formatGuardiaProblem).join('; ') : ''}`)
           .join(' | ');
         pauseReasons.push(`el Guardia la rechazó (${rechazos}/${veredictos.length} pasada[s]): ${detalle}`);
       }

@@ -2461,3 +2461,59 @@ determinístico -> revalidación limpia, incluyendo dígitos y em dash en la
 misma letra). La lección de fondo: **cada vez que un fix diga "el chequeo X
 ya lo cubre", correr el caso contra el chequeo X de verdad** — acá la
 suposición era falsa para el 72% de la lista.
+
+## Tres mejoras del Guardia que quedaron pendientes de la revisión del 2026-07-13: problemas estructurados, fusión de señales de audio, estiloSuno vs encuesta
+
+Seguimiento de las dos entradas anteriores del mismo día. En esa revisión se
+identificaron 3 mejoras de menor prioridad que se dejaron sin implementar a
+propósito para no engordar el cambio — esta entrada las cierra.
+
+**1. `problemas` estructurado (antes strings libres).** El Guardia de letra
+devolvía `problemas: string[]` (ej. `"[Verse 2] línea 3: rima pobre"`) — para
+cruzar automáticamente sus hallazgos contra los fallos de `hardValidate` o
+contra el QA humano más adelante, había que re-parsear texto libre. Ahora
+`problemas` es `{ seccion, linea, tipo, gravedad, detalle }[]` (`linea` usa 0
+como centinela de "no aplica a una línea puntual" — no `null`, para no
+introducir el primer tipo nullable en los schemas de `format` de Ollama de
+este archivo). `parseGuardiaResponse` normaliza defensivamente: tipo/gravedad
+fuera del enum caen a `'otro'`/`'media'`, ítems sin `detalle` se descartan, y
+un string suelto (formato viejo, por si un modelo se desvía del schema) se
+envuelve automáticamente. `formatGuardiaProblem(p)` en `lib/ollama-guardia.js`
+es el único lugar que arma el string legible para consola/notify — `run.js`
+ya no construye ese string a mano en dos sitios distintos.
+
+**2. Fusión de señales de audio.** El Guardia de audio (`evaluarAudioGuardia`)
+solo recibía Levenshtein/NISQA/CLAP/missingNames en su parámetro `señales` —
+las demás señales informativas del pipeline (loudness EBU R128, género de voz
+F0, palabras pegadas/cortadas, clipping, corte abrupto, MuQ-Eval, Audiobox)
+vivían cada una aislada en su propio rincón de `verify-report.json`/consola,
+sin que nada las cruzara entre sí ni contra el juicio semántico. Ahora
+`verify-audio.js` le pasa TODAS al armar `señales`, y un campo nuevo en el
+schema, `prioridadRevision` (string, obligatorio pero puede ser vacío), le
+pide al Guardia una sola frase de triage: qué conviene revisar de oído
+primero y por qué, cruzando lo numérico con lo semántico (ej. "el género de
+voz detectado no coincide con lo esperado en el segundo 45" o "las alarmas
+numéricas son probable falso positivo, el contenido real está bien"). Se
+loguea en consola y viaja en `report.guardiaAudio.prioridadRevision` /
+`verify-report.json` — mismo patrón que el resto de las señales informativas.
+
+**3. `estiloSuno` vs encuesta.** Antes solo `hardValidate` (chequeo J) validaba
+que `estiloSuno` incluyera "seseo" — nadie juzgaba si el estilo EN SÍ (género,
+instrumentación, energía) tenía sentido para la ocasión de la encuesta (un
+"reggaetón, upbeat" para un funeral, por ejemplo). `buildGuardiaPrompt` ahora
+recibe `estiloSuno` y lo muestra en su propia sección; el schema tiene un
+campo nuevo `estiloCoincide: boolean`, y si hay desajuste el Guardia lo
+reporta también dentro de `problemas` con `tipo: 'estilo'`. Es puramente
+advisory — no gatea por separado, entra al veredicto general de `aprobada`
+del Guardia como el resto de sus criterios (ya existente).
+
+**Verificación:** `npm test` (258 casos, 7 nuevos) + smoke offline en proceso
+(sin llamar a Ollama real, había un `--loop` corriendo en modo poll al hacer
+este cambio) de los 3 caminos: prompt de letra con estilo+problemas
+estructurados, prompt de audio con señales de fusión, parseo de ambas
+respuestas. No se validó en vivo contra Ollama todavía — el próximo REDO o
+canción real confirma que qwen3 respeta el schema ampliado (más campos
+obligatorios en `format` = más superficie para que el modelo se desvíe;
+`parseGuardiaResponse`/`parseAudioGuardiaResponse` ya degradan con gracia si
+así fuera, pero conviene revisar el primer `guardia-feedback.jsonl` real tras
+este cambio).

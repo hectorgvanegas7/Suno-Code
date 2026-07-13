@@ -177,7 +177,7 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
 - `lib/song-validate.js` — `hardValidate`, `validateContentForWrite`, `parseSections`,
   `extractField`: la validación estructural dura de la letra (movida desde `run.js` para
   poder testearla sin ejecutar el pipeline entero). Cubierta por
-  `test/song-validate.test.js`, parte de la suite completa (`npm test`, 251 casos entre
+  `test/song-validate.test.js`, parte de la suite completa (`npm test`, 258 casos entre
   todos los `test/*.test.js`, 100% local sin API — incluye las regresiones reales de
   LESSONS.md: límites de palabra con tildes, N/A condicional, preámbulo antes de
   Título, símbolos no-✓ en el checklist, nombres multi-destinatario, respelling
@@ -246,9 +246,18 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
   INDEPENDIENTE vía LLM local (Ollama en `localhost:11434`, default
   `qwen3:14b` con offload parcial en 8GB de VRAM — `GUARDIA_MODEL=qwen3:8b`
   como escape hatch rápido). Juzga cómo está ARMADA la canción contra la
-  encuesta real: coherencia/rima/tono/fidelidad/gancho (1-10) + problemas
-  concretos por sección — lo que ni el diccionario ni LanguageTool pueden
-  ver, y que antes solo se autoevaluaba el propio modelo generador. Corre en
+  encuesta real: coherencia/rima/tono/fidelidad/gancho (1-10) +
+  `estiloCoincide` (¿el estiloSuno pedido —género/instrumentación/energía—
+  tiene sentido para la ocasión de la encuesta? hardValidate solo chequea
+  que incluya "seseo", nadie juzgaba el estilo en sí) + `problemas`
+  ESTRUCTURADO (2026-07-13: antes strings libres, ahora `{ seccion, linea,
+  tipo, gravedad, detalle }` — permite filtrar/cruzar por sección/tipo/
+  gravedad contra hardValidate y el QA humano sin re-parsear texto;
+  `formatGuardiaProblem(p)` arma el string legible para consola/notify;
+  `parseGuardiaResponse` tolera el formato viejo de string suelto por si un
+  modelo se desvía del schema) — lo que ni el diccionario ni LanguageTool
+  pueden ver, y que antes solo se autoevaluaba el propio modelo generador.
+  Corre en
   `run.js` SIEMPRE que haya letra (2026-07-13: antes se saltaba entero si
   `passedQA` era `false` tras agotar los 3 intentos de generación —
   justo la letra que más necesitaba una segunda opinión se quedaba sin
@@ -283,7 +292,14 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
   pero lee la transcripción de Whisper (ya generada, cero costo extra) y
   juzga SEMÁNTICAMENTE si coincide con la letra pedida — incluido
   `nombreCorrecto` (¿el nombre del destinatario se reconoce en lo
-  cantado?, el error más caro del negocio). Resultado en
+  cantado?, el error más caro del negocio) y `prioridadRevision` (2026-07-13:
+  triage de fusión de señales — `verify-audio.js` le pasa TODAS las señales
+  informativas del pipeline, no solo Levenshtein/NISQA/CLAP/missingNames
+  como antes: loudness EBU R128, género de voz F0, palabras pegadas/
+  cortadas, clipping, corte abrupto, MuQ-Eval, Audiobox. El Guardia cruza
+  esas señales numéricas —que hoy viven aisladas cada una en su rincón del
+  reporte— contra su propio juicio semántico y devuelve en una frase QUÉ
+  conviene revisar de oído primero y por qué). Resultado en
   `report.guardiaAudio` / `verify-report.json`. PURAMENTE INFORMATIVO en
   general, pero start-flow.js SÍ lo usa como gate cuando ambas versiones
   fallan el umbral de fidelidad (pausa si el Guardia tampoco aprueba).
