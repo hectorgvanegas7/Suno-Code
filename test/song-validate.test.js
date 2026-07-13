@@ -6,7 +6,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { hardValidate, validateContentForWrite, parseSections, isSafeToPatch, applyDeterministicAccentFixes } = require('../lib/song-validate');
+const { hardValidate, validateContentForWrite, parseSections, isSafeToPatch, applyDeterministicAccentFixes, applyDeterministicLineFixes, numberToSpanishWords } = require('../lib/song-validate');
 
 function buildResponse({
   trato = 'tú',
@@ -652,6 +652,107 @@ test('applyDeterministicAccentFixes: no toca nada si no hay typos de tilde', () 
   const { letras: fixed, appliedCount } = applyDeterministicAccentFixes(letras);
   assert.equal(appliedCount, 0);
   assert.deepEqual(fixed, letras);
+});
+
+test('BUG REAL 2026-07-13 (agujero del Fix A): "Jesus" sin tilde debe reportarse como fallo PATCHEABLE, nunca pasar en silencio', () => {
+  // La primera versión del fix de duplicación M/H2 SUPRIMÍA el fallo de M
+  // cuando la forma sin acentuar estaba en la letra, asumiendo que H2 ya lo
+  // reportaba. Falso para 42/58 nombres acentuados de la lista estándar:
+  // dictionary-es no acepta "jesús"/"josé" en minúscula, así que H2 no los
+  // ve — "Jesus" y "Jose" sin tilde pasaban la validación ENTERA (verificado
+  // en vivo 2026-07-13). Ahora M reclasifica ese caso como "Eñe/tilde
+  // perdida" (patcheable, con sección+línea) en vez de suprimirlo.
+  const response = buildResponse({
+    chorus1: ['Jesus, hoy te canto con todo mi amor', 'Gracias por darme siempre tu calor', 'Cada momento contigo brilla mejor', 'Eres mi orgullo y mi mayor honor'],
+    chorus2: ['Jesus, admiro tu fuerza y tu bondad', 'Marcaste mi vida con sinceridad', 'Nunca dudé de tu generosidad', 'Eres ejemplo puro de humanidad'],
+  });
+  const { valid, failures, patchableIssues } = hardValidate(response, "What's their name?: jesus");
+  assert.equal(valid, false, 'el typo "Jesus" sin tilde JAMÁS debe pasar la validación en silencio');
+  const jesusFailures = failures.filter((f) => f.includes('"jesus"') && f.includes('"Jesús"'));
+  assert.equal(jesusFailures.length, 2, `debería reportar el typo en ambos chorus: ${failures.join(' | ')}`);
+  assert.ok(
+    jesusFailures.every((f) => f.startsWith('Eñe/tilde perdida')),
+    `debe ser el prefijo patcheable, no el de respelling: ${jesusFailures.join(' | ')}`
+  );
+  assert.equal(isSafeToPatch(failures), true, 'el corrector barato debe poder intentarlo');
+  assert.equal(
+    patchableIssues.filter((i) => i.kind === 'enye_typo' && i.detail.includes('Jesús')).length,
+    2,
+    'el corrector necesita sección+línea exactas para parchear'
+  );
+});
+
+test('applyDeterministicAccentFixes con firstNames: corrige "Jesus"->"Jesús" vía la lista de nombres estándar (el diccionario no lo cubre)', () => {
+  const letras = {
+    'Chorus 1': ['Jesus, hoy te canto con todo mi amor', 'Gracias por darme siempre tu calor'],
+    'Chorus 2': ['Jesus, admiro tu fuerza y tu bondad'],
+  };
+  const { letras: fixed, appliedCount } = applyDeterministicAccentFixes(letras, { firstNames: ['jesus'] });
+  assert.equal(appliedCount, 2);
+  assert.equal(fixed['Chorus 1'][0], 'Jesús, hoy te canto con todo mi amor');
+  assert.equal(fixed['Chorus 2'][0], 'Jesús, admiro tu fuerza y tu bondad');
+  assert.equal(fixed['Chorus 1'][1], 'Gracias por darme siempre tu calor', 'línea sin typo no debe tocarse');
+});
+
+test('applyDeterministicAccentFixes con firstNames: un token en MINÚSCULA idéntico al nombre puede ser palabra común — no tocar', () => {
+  // Destinataria "Tomás" + "cuando tomas mi mano" (verbo tomar): el verbo
+  // jamás debe volverse el nombre. Solo las ocurrencias CAPITALIZADAS se
+  // corrigen determinísticamente; las minúsculas quedan para Haiku/regen.
+  const letras = { 'Verse 2': ['Cuando tomas mi mano todo se calma', 'Tomas, tu fe sostiene mi alma'] };
+  const { letras: fixed, appliedCount } = applyDeterministicAccentFixes(letras, { firstNames: ['tomas'] });
+  assert.equal(fixed['Verse 2'][0], 'Cuando tomas mi mano todo se calma', 'el verbo en minúscula no se toca');
+  assert.equal(fixed['Verse 2'][1], 'Tomás, tu fe sostiene mi alma', 'el nombre capitalizado sí se corrige');
+  assert.equal(appliedCount, 1);
+});
+
+test('applyDeterministicAccentFixes: homógrafos plausibles del blocklist ("papa", "sueno") se marcan pero NUNCA se auto-reemplazan', () => {
+  // Verificado en vivo 2026-07-13: la primera versión convertía "El Papa nos
+  // bendijo" en "El Papá nos bendijo" y "yo sueno como campana" en "yo sueño
+  // como campana" — reemplazo ciego sin contexto. Esos casos van al corrector
+  // de Haiku (que ve la línea completa), no al determinístico.
+  const letras = { 'Bridge': ['El Papa nos bendijo aquel verano', 'Yo sueno como campana en la manana'] };
+  const { letras: fixed } = applyDeterministicAccentFixes(letras);
+  assert.equal(fixed['Bridge'][0], 'El Papa nos bendijo aquel verano', '"Papa" no debe volverse "Papá" sin contexto');
+  assert.ok(fixed['Bridge'][1].includes('sueno'), '"sueno" no debe volverse "sueño" sin contexto');
+  assert.ok(fixed['Bridge'][1].includes('mañana'), '"manana" (sin ambigüedad de diccionario) sí se corrige en la misma línea');
+
+  // Pero hardValidate SÍ debe seguir marcándolos como fallo patcheable, para
+  // que Haiku los arregle — dos niveles de blocklist, no un agujero nuevo.
+  const response = buildResponse({ bridge: ['El Papa nos bendijo aquel verano', 'Yo sueno como campana esta vez', 'Ese instante quedó grabado cercano', 'Fue la prueba de un amor soberano'] });
+  const { failures } = hardValidate(response, SURVEY_SINGLE);
+  assert.ok(failures.some((f) => f.startsWith('Eñe/tilde perdida') && f.includes('"papa"')), `"papa" debe seguir marcándose: ${failures.join(' | ')}`);
+  assert.ok(failures.some((f) => f.startsWith('Eñe/tilde perdida') && f.includes('"sueno"')), `"sueno" debe seguir marcándose: ${failures.join(' | ')}`);
+});
+
+test('applyDeterministicAccentFixes: preserva TODO MAYÚSCULAS ("MARIA"->"MARÍA", no "María")', () => {
+  const letras = { 'Outro': ['MARIA por siempre en mi corazon'] };
+  const { letras: fixed } = applyDeterministicAccentFixes(letras);
+  assert.ok(fixed['Outro'][0].startsWith('MARÍA'), `esperado "MARÍA...", quedó: ${fixed['Outro'][0]}`);
+});
+
+test('numberToSpanishWords: convierte solo los números SIN problemas de género/apócope', () => {
+  assert.equal(numberToSpanishWords(15), 'quince');
+  assert.equal(numberToSpanishWords(50), 'cincuenta');
+  assert.equal(numberToSpanishWords(87), 'ochenta y siete');
+  assert.equal(numberToSpanishWords(100), 'cien');
+  assert.equal(numberToSpanishWords(11), 'once');
+  assert.equal(numberToSpanishWords(1998), 'mil novecientos noventa y ocho');
+  assert.equal(numberToSpanishWords(2026), 'dos mil veintiséis');
+  assert.equal(numberToSpanishWords(21), null, '21 necesita apócope según el sustantivo (veintiún años) — Haiku con contexto');
+  assert.equal(numberToSpanishWords(1), null, 'un/uno/una depende del sustantivo');
+  assert.equal(numberToSpanishWords(250), null, 'doscientos/doscientas concuerda en género');
+});
+
+test('applyDeterministicLineFixes: puntuación prohibida y dígitos se arreglan sin LLM; lo ambiguo queda para Haiku', () => {
+  const letras = {
+    'Verse 1': ['Te dije: nunca me voy — quedate cerca; siempre', 'Cumples 15 años de puro amor', 'Hace 21 años que te espero'],
+  };
+  const { letras: fixed, appliedCount, fixes } = applyDeterministicLineFixes(letras);
+  assert.ok(appliedCount >= 2, `esperaba al menos 2 correcciones, hubo ${appliedCount} (${fixes.join(', ')})`);
+  assert.ok(!/[—;:]/.test(fixed['Verse 1'][0]), `no debe quedar puntuación prohibida: "${fixed['Verse 1'][0]}"`);
+  assert.ok(fixed['Verse 1'][0].includes('Te dije, nunca me voy'), `el reemplazo debe ser por coma: "${fixed['Verse 1'][0]}"`);
+  assert.equal(fixed['Verse 1'][1], 'Cumples quince años de puro amor');
+  assert.equal(fixed['Verse 1'][2], 'Hace 21 años que te espero', '21 (apócope) se deja intacto para el corrector con contexto');
 });
 
 test('nombre NO estándar (anglicanizado) sigue sin chequeo de ortografía exacta — el backstop no le aplica', () => {

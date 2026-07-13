@@ -274,19 +274,34 @@ function parseArgs(argv) {
   // Imprimir reporte completo
   printReport(titulo, reportA, reportB);
 
-  // El Guardia de audio: segunda opinión SEMÁNTICA vía Ollama cuando
-  // Levenshtein o NISQA disparan alarma — ambas métricas dan falsos
-  // positivos conocidos sobre voz cantada (Levenshtein no tolera adlibs,
-  // NISQA nunca se calibró contra canto). Caso real que motivó esto
-  // (2026-07-13, "Un Ángel en Jenner"): ambas versiones marcaron
-  // "ALUCINACIÓN GRAVE" y NISQA ~23/100, pero el audio real estaba bien al
-  // escucharlo. Solo se llama si hay alarma — no gasta Ollama en canciones
-  // sanas. PURAMENTE INFORMATIVO, no bloquea el auto-upload/auto-submit.
-  const GUARDIA_AUDIO_TRIGGER = (r) =>
+  // El Guardia de audio: segunda opinión SEMÁNTICA vía Ollama sobre la
+  // transcripción de cada versión. Nació para los falsos positivos de
+  // Levenshtein/NISQA (ambas métricas fallan sobre voz cantada — caso real
+  // 2026-07-13, "Un Ángel en Jenner": ambas versiones marcaron "ALUCINACIÓN
+  // GRAVE" y NISQA ~23/100, pero el audio real estaba bien al escucharlo).
+  // Desde 2026-07-13 corre SIEMPRE, no solo con alarma, por dos razones:
+  //   1. Miss asimétrico: Levenshtein >=75% y NISQA >=50 son perfectamente
+  //      compatibles con el PEOR error del negocio — el nombre del
+  //      destinatario cantado mal, o un verso inventado en una canción que
+  //      globalmente sí matchea. El chequeo semántico (con nombreCorrecto
+  //      específico) es el único que lo ve, y antes no corría nunca sobre
+  //      canciones "sanas".
+  //   2. Calibración: gateado por alarma jamás junta verdaderos negativos —
+  //      sin eso no se puede medir su tasa de acierto contra el QA humano,
+  //      que es el requisito para promover señales a gate real.
+  // La transcripción ya existe (cero costo extra); el costo es solo latencia
+  // local de Ollama. PURAMENTE INFORMATIVO, no bloquea auto-upload/submit.
+  const GUARDIA_AUDIO_ALARM = (r) =>
     r && ((r.levenshteinScore !== null && r.levenshteinScore < 0.75) || (r.nisqa?.score !== null && r.nisqa.score < 50));
-  for (const [label, report] of [['A', reportA], ['B', reportB]]) {
-    if (!report || !GUARDIA_AUDIO_TRIGGER(report)) continue;
-    console.log(`\n🛡️  Señal de alarma en Versión ${label} — consultando al Guardia (segunda opinión sobre posible falso positivo)...`);
+  const guardiaReports = [['A', reportA], ['B', reportB]].filter(([, r]) => r);
+  for (let i = 0; i < guardiaReports.length; i++) {
+    const [label, report] = guardiaReports[i];
+    const hayAlarma = GUARDIA_AUDIO_ALARM(report);
+    console.log(
+      hayAlarma
+        ? `\n🛡️  Señal de alarma en Versión ${label} — consultando al Guardia (segunda opinión sobre posible falso positivo)...`
+        : `\n🛡️  Consultando al Guardia de audio sobre Versión ${label} (chequeo semántico de rutina: contenido + nombre del destinatario)...`
+    );
     const señales = [
       report.levenshteinScore !== null ? `Levenshtein: ${Math.round(report.levenshteinScore * 100)}%` : null,
       report.nisqa?.score !== null ? `NISQA: ${report.nisqa.score}/100` : null,
@@ -298,13 +313,22 @@ function parseArgs(argv) {
       letraPedida: lyricsText,
       transcripcion: report.transcription?.text || '',
       señales,
+      nombres: firstNames,
+    }, {
+      // Entre versiones consecutivas no tiene sentido recargar el modelo
+      // desde frío; la última llamada de la tanda sí libera la VRAM para el
+      // resto del pipeline de audio (mismo patrón que run.js).
+      keepAlive: i < guardiaReports.length - 1 ? '5m' : 0,
     });
     report.guardiaAudio = guardiaAudio;
     if (guardiaAudio.ok) {
       console.log(`🛡️  Guardia (audio, ${guardiaAudio.model}, ${Math.round(guardiaAudio.durationMs / 1000)}s): ${guardiaAudio.veredicto}`);
-      console.log(`   coincideConLetra=${guardiaAudio.coincideConLetra} similitud=${guardiaAudio.similitud}/10 aprobada=${guardiaAudio.aprobada}${guardiaAudio.problemas.length ? ' | problemas: ' + guardiaAudio.problemas.join('; ') : ''}`);
-      if (guardiaAudio.aprobada && guardiaAudio.coincideConLetra) {
+      console.log(`   coincideConLetra=${guardiaAudio.coincideConLetra} similitud=${guardiaAudio.similitud}/10 nombreCorrecto=${guardiaAudio.nombreCorrecto ?? '-'} aprobada=${guardiaAudio.aprobada}${guardiaAudio.problemas.length ? ' | problemas: ' + guardiaAudio.problemas.join('; ') : ''}`);
+      if (hayAlarma && guardiaAudio.aprobada && guardiaAudio.coincideConLetra) {
         console.log('   ℹ️  Posible falso positivo de Levenshtein/NISQA — el Guardia dice que el contenido cantado coincide con la letra pedida.');
+      }
+      if (guardiaAudio.nombreCorrecto === false) {
+        console.log('   🚨 El Guardia dice que el NOMBRE del destinatario no se reconoce en lo cantado — confirmar de oído antes de subir esta versión.');
       }
     } else {
       console.log(`🛡️  Guardia de audio no disponible (${guardiaAudio.error}) — sin señal esta vez, no bloquea.`);

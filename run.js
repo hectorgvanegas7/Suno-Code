@@ -29,11 +29,11 @@ const { generate, MOCK_SURVEY } = require('./lib/llm-provider');
 const { notify } = require('./lib/ntfy');
 const pipelineState = require('./lib/pipeline-state');
 const { getSurveyHash, readCache, writeCache } = require('./lib/cache-helpers');
-const { hardValidate, validateContentForWrite, extractField, convertJsonToMarkdown, isSafeToPatch, applyDeterministicAccentFixes } = require('./lib/song-validate');
+const { hardValidate, validateContentForWrite, extractField, convertJsonToMarkdown, isSafeToPatch, applyDeterministicLineFixes } = require('./lib/song-validate');
 const { patchSongLines } = require('./lib/song-corrector');
 const { extractFirstNames, extractLyricNameVariants, extractSurveyProperNouns } = require('./lib/text-helpers');
 const { checkGrammarAndSpelling } = require('./lib/languagetool-check');
-const { validarGuardia } = require('./lib/ollama-guardia');
+const { validarGuardia, DEFAULT_MODEL: GUARDIA_DEFAULT_MODEL } = require('./lib/ollama-guardia');
 
 const args = process.argv.slice(2);
 const isDryRun = args.includes('--dry-run');
@@ -585,6 +585,22 @@ async function generateSongWithSelfCorrection(surveyContent, baseUserMessageOver
   let lastResponse = null;
   let lastFailures = [];
   let maxTokens = DEFAULT_MAX_TOKENS;
+  const surveyFirstNames = extractFirstNames(surveyContent);
+
+  // Mejor candidato entre TODOS los intentos (2026-07-13): cada regen es una
+  // tirada nueva que puede arreglar una cosa y romper otra — bug real ("El
+  // Lago Donde Aprendí a Quedarme"): el intento 2 corrigió la tilde pero
+  // rompió el conteo de líneas, el 3 re-rompió la tilde... y el pipeline
+  // guardaba el ÚLTIMO intento, o sea el peor de los tres. Ahora, si se
+  // agotan los intentos, se guarda el candidato con MENOS fallos (desempate:
+  // el que tenga solo fallos patcheables), no el más reciente.
+  let best = null; // { response, failures }
+  const candidateScore = (failures) => failures.length + (isSafeToPatch(failures) ? 0 : 0.5);
+  const considerCandidate = (response, failures) => {
+    if (!best || candidateScore(failures) < candidateScore(best.failures)) {
+      best = { response, failures };
+    }
+  };
 
   for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt++) {
     console.log(`\nGenerando letra con ${provider} (intento ${attempt}/${MAX_GENERATION_ATTEMPTS}, max_tokens=${maxTokens})...`);
@@ -594,28 +610,33 @@ async function generateSongWithSelfCorrection(surveyContent, baseUserMessageOver
     let { valid, failures, parsedJson, patchableIssues } = hardValidate(lastResponse, surveyContent);
     lastFailures = failures;
 
-    // Corrector DETERMINÍSTICO de tildes/eñes (gratis, sin LLM, cero
-    // ambigüedad) — antes de gastar Haiku o un regen completo con el modelo
-    // caro, probamos un reemplazo de texto directo para los typos que YA
-    // tienen una sola sustitución válida (ver applyDeterministicAccentFixes
-    // en lib/song-validate.js). Bug real 2026-07-13 ("El Lago Donde Aprendí
-    // a Quedarme"): "maria"->"María" sobrevivió 3 regeneraciones completas
-    // porque el modelo no se autocorregía de forma confiable pese a
-    // instrucciones explícitas — este reemplazo mecánico no depende de que
-    // ningún modelo "se acuerde" de la corrección, así que la validación
-    // para esta clase de error SIEMPRE termina pasando en vez de solo
-    // detectarse y quedar con advertencia.
+    // Corrector DETERMINÍSTICO (gratis, sin LLM, cero ambigüedad) — antes de
+    // gastar Haiku o un regen completo con el modelo caro, probamos
+    // reemplazos de texto directos: tildes/eñes con única sustitución
+    // válida, nombres españoles estándar sin tilde ("Jesus"->"Jesús", vía
+    // la ortografía canónica de la lista curada — el diccionario no cubre
+    // la mayoría en minúscula), puntuación prohibida (—;: -> coma) y
+    // dígitos->palabras sin problemas de género (ver
+    // applyDeterministicLineFixes en lib/song-validate.js). Bug real
+    // 2026-07-13 ("El Lago Donde Aprendí a Quedarme"): "maria"->"María"
+    // sobrevivió 3 regeneraciones completas porque el modelo no se
+    // autocorregía de forma confiable pese a instrucciones explícitas —
+    // este reemplazo mecánico no depende de que ningún modelo "se acuerde"
+    // de la corrección, así que la validación para esta clase de error
+    // SIEMPRE termina pasando en vez de solo detectarse y quedar con
+    // advertencia.
     if (!valid && parsedJson?.letras) {
-      const { letras: fixedLetras, appliedCount } = applyDeterministicAccentFixes(parsedJson.letras);
+      const { letras: fixedLetras, appliedCount, fixes } = applyDeterministicLineFixes(parsedJson.letras, { firstNames: surveyFirstNames });
       if (appliedCount > 0) {
         const patchedText = JSON.stringify({ ...parsedJson, letras: fixedLetras });
         const revalidated = hardValidate(patchedText, surveyContent);
-        console.log(`🔧 Corrector determinístico de tildes/eñes: ${appliedCount} palabra(s) corregida(s) sin LLM.`);
+        console.log(`🔧 Corrector determinístico (sin LLM): ${fixes.join(', ')}.`);
         ({ valid, failures, parsedJson, patchableIssues } = revalidated);
         lastResponse = patchedText;
         lastFailures = failures;
       }
     }
+    if (!valid) considerCandidate(lastResponse, lastFailures);
 
     if (valid) {
       console.log('✅ Validación estructural + QA: todos los ítems pasaron.');
@@ -638,6 +659,8 @@ async function generateSongWithSelfCorrection(surveyContent, baseUserMessageOver
       // cualquier otro fallo de hardValidate.
       lastFailures = grammarResult.failures;
       lastResponse = JSON.stringify(grammarResult.parsedJson);
+      parsedJson = grammarResult.parsedJson;
+      considerCandidate(lastResponse, lastFailures);
     }
 
     console.log(`❌ Fallos en intento ${attempt}:`);
@@ -654,13 +677,39 @@ async function generateSongWithSelfCorrection(surveyContent, baseUserMessageOver
       console.log(`\n💊 Fallos 100% parcheables (${patchableIssues.length} línea[s]) — probando corrección barata antes de regenerar todo...`);
       try {
         const patchedJson = await patchSongLines(parsedJson, patchableIssues);
-        const patchedText = JSON.stringify(patchedJson);
-        const revalidated = hardValidate(patchedText, surveyContent);
+        let patchedText = JSON.stringify(patchedJson);
+        let revalidated = hardValidate(patchedText, surveyContent);
+        // Haiku puede introducir un typo de tilde nuevo en la línea que
+        // reescribió — una pasada determinística sobre SU resultado es
+        // gratis y evita descartar un parche que quedó a una tilde de estar
+        // limpio.
+        if (!revalidated.valid && revalidated.parsedJson?.letras) {
+          const { letras: fixedLetras, appliedCount } = applyDeterministicLineFixes(revalidated.parsedJson.letras, { firstNames: surveyFirstNames });
+          if (appliedCount > 0) {
+            patchedText = JSON.stringify({ ...revalidated.parsedJson, letras: fixedLetras });
+            revalidated = hardValidate(patchedText, surveyContent);
+          }
+        }
         if (revalidated.valid) {
           console.log('✅ Parche barato resolvió todos los fallos — se evitó un regen completo con el modelo caro.');
-          return { fullResponse: patchedText, parsedJson: revalidated.parsedJson, passedQA: true };
+          // Mismo gate gramatical que el camino valid normal — antes el
+          // parche exitoso se salteaba LanguageTool por completo, una vara
+          // distinta para la misma letra (auditoría 2026-07-13).
+          const patchedGrammar = await runGrammarGate(revalidated.parsedJson, surveyContent);
+          if (patchedGrammar.clean) {
+            return { fullResponse: patchedGrammar.fullResponse, parsedJson: patchedGrammar.parsedJson, passedQA: true };
+          }
+          if (patchedGrammar.unavailable) {
+            const fullResponse = JSON.stringify(patchedGrammar.parsedJson);
+            return { fullResponse, parsedJson: patchedGrammar.parsedJson, passedQA: false, lastFailures: patchedGrammar.failures };
+          }
+          lastFailures = patchedGrammar.failures;
+          lastResponse = JSON.stringify(patchedGrammar.parsedJson);
+          considerCandidate(lastResponse, lastFailures);
+        } else {
+          console.log(`⚠️ El parche no dejó todo limpio (${revalidated.failures.length} fallo[s] restante[s]) — sigue el flujo normal.`);
+          considerCandidate(patchedText, revalidated.failures);
         }
-        console.log(`⚠️ El parche no dejó todo limpio (${revalidated.failures.length} fallo[s] restante[s]) — sigue el flujo normal.`);
       } catch (e) {
         console.log(`⚠️ Corrector barato falló (${e.message}) — sigue el flujo normal.`);
       }
@@ -686,6 +735,14 @@ async function generateSongWithSelfCorrection(surveyContent, baseUserMessageOver
   }
 
   console.log(`\n⚠️ No se logró pasar la validación después de ${MAX_GENERATION_ATTEMPTS} intentos. Se guardará con advertencia.`);
+  // Se guarda el MEJOR candidato de los 3 intentos, no el último — el regen
+  // puede arreglar una cosa y romper otra, y el intento final no tiene por
+  // qué ser el menos malo (bug real 2026-07-13, ver `best` arriba).
+  if (best && best.response !== lastResponse) {
+    console.log(`   (guardando el mejor intento visto: ${best.failures.length} fallo[s], vs ${lastFailures.length} del último)`);
+    lastResponse = best.response;
+    lastFailures = best.failures;
+  }
   // Parseo de best-effort si falló, para que validateContentForWrite no rompa del todo
   const { parsedJson } = hardValidate(lastResponse, surveyContent);
   return { fullResponse: lastResponse, parsedJson, passedQA: false, lastFailures };
@@ -975,6 +1032,7 @@ process.on('uncaughtException', async (err) => {
     const cachedResponse = !isDryRun ? readCache(surveyHash) : null;
 
     let fullResponse, parsedJson, passedQA;
+    let qaFailures = []; // fallos del QA duro que quedaron sin resolver — contexto para la pasada informada del Guardia
 
     // La caché guarda letras que pasaron el QA de SU momento — si el
     // validador se endureció después (ej. la regla inquebrantable de trato,
@@ -1004,6 +1062,7 @@ process.on('uncaughtException', async (err) => {
       fullResponse = result.fullResponse;
       parsedJson = result.parsedJson;
       passedQA = result.passedQA;
+      qaFailures = result.lastFailures || [];
       if (passedQA && !isDryRun) {
         writeCache(surveyHash, result);
       }
@@ -1130,75 +1189,136 @@ process.on('uncaughtException', async (err) => {
     // opinión justo cuando más falta hacía. Ollama es local y gratis, así
     // que no hay costo real en correrlo también sobre letras con warning.
     if (parsedJson?.letras) {
+      // Una consulta al Guardia con UN reintento ante fallo (Ollama es local
+      // y gratis — "sin límite de reintentos" tiene que ser verdad en la
+      // práctica, no solo en el diseño). Si el modelo primario es el 14b, el
+      // reintento baja al 8b (entra entero en VRAM, responde en segundos):
+      // el fallo típico es timeout de carga fría del 14b con offload parcial.
+      const guardiaPrimario = process.env.GUARDIA_MODEL || GUARDIA_DEFAULT_MODEL;
+      const guardiaFallback = guardiaPrimario === 'qwen3:8b' ? null : 'qwen3:8b';
+      const consultarGuardia = async (etiqueta, { qaContext = null, keepAlive = 0 } = {}) => {
+        const payload = { letras: parsedJson.letras, titulo: parsedJson.titulo, survey: surveyContent, qaContext };
+        let r = await validarGuardia(payload, { keepAlive });
+        if (!r.ok && guardiaFallback) {
+          console.log(`🛡️  ${etiqueta} falló (${r.error}) — reintentando con ${guardiaFallback}...`);
+          r = await validarGuardia(payload, { keepAlive, model: guardiaFallback });
+        }
+        return r;
+      };
+      const logPass = (etiqueta, g) => {
+        if (g.ok) {
+          console.log(`🛡️  ${etiqueta} (Ollama/${g.model}, ${Math.round(g.durationMs / 1000)}s): ${g.veredicto}`);
+          console.log(`   coherencia=${g.coherencia} rima=${g.rima} tono=${g.tono} fidelidad=${g.fidelidad} gancho=${g.gancho} confianza=${g.confianza ?? '-'} aprobada=${g.aprobada}`);
+          g.problemas.forEach((p) => console.log(`   • ${p}`));
+        } else {
+          console.log(`🛡️  ${etiqueta} no disponible (${g.error}) — sin señal de esta pasada.`);
+        }
+      };
+
+      // Pasada 1: CIEGA (sin el resultado del QA duro) — juicio independiente.
+      // keepAlive '5m' salvo que sea la única pasada (--dry-run): las pasadas
+      // siguientes son inmediatas y recargar el 14b desde frío en cada una
+      // duplicaba la latencia total al pedo; los 5 min expiran solos mucho
+      // antes de que el pipeline de audio necesite la VRAM.
       console.log('\n🛡️  Consultando al Guardia (Ollama local, puede tardar unos minutos la primera vez)...');
-      const guardiaResult = await validarGuardia({ letras: parsedJson.letras, titulo: parsedJson.titulo, survey: surveyContent });
+      const guardiaResult = await consultarGuardia('Pasada 1', { keepAlive: isDryRun ? 0 : '5m' });
+      logPass('El Guardia — pasada 1 (ciega)', guardiaResult);
       let guardiaSegunda = null;
+      let guardiaDesempate = null;
 
-      if (guardiaResult.ok) {
-        console.log(`🛡️  El Guardia (Ollama/${guardiaResult.model}, ${Math.round(guardiaResult.durationMs / 1000)}s): ${guardiaResult.veredicto}`);
-        console.log(`   coherencia=${guardiaResult.coherencia} rima=${guardiaResult.rima} tono=${guardiaResult.tono} fidelidad=${guardiaResult.fidelidad} gancho=${guardiaResult.gancho} aprobada=${guardiaResult.aprobada}`);
-        guardiaResult.problemas.forEach((p) => console.log(`   • ${p}`));
+      if (guardiaResult.ok && !isDryRun) {
+        // Pasada 2: INFORMADA — recibe los fallos que el QA duro dejó sin
+        // resolver y debe confirmarlos o descartarlos. Antes las 2 pasadas
+        // eran idénticas (mismo prompt, mismo modelo): solo medían ruido de
+        // sampleo. Ciega + informada extrae más señal con el mismo costo, y
+        // genera el dato de calibración "¿el Guardia ve lo mismo que el
+        // validador?" (2026-07-13). --dry-run se queda con una sola pasada.
+        console.log('\n🛡️  Segunda pasada del Guardia (informada con el resultado del QA duro)...');
+        guardiaSegunda = await consultarGuardia('Pasada 2', {
+          qaContext: { passedQA, failures: qaFailures },
+          keepAlive: '5m',
+        });
+        logPass('El Guardia — pasada 2 (informada)', guardiaSegunda);
 
-        // Doble verificación INDEPENDIENTE (pedido explícito de Hector
-        // 2026-07-13: "ollama siempre es gratis", "quiero que ollama sea mi
-        // guardia de seguridad" — ya que la latencia no es restricción y
-        // corre local sin costo, una segunda pasada reduce el riesgo de que
-        // un solo veredicto ruidoso deje pasar algo por casualidad. Solo en
-        // canciones reales — --dry-run se queda con una sola pasada para no
-        // duplicar la latencia de cada ensayo (nunca gasta plata igual, así
-        // que no hay urgencia de doble-chequear el mock).
-        if (!isDryRun) {
-          console.log('\n🛡️  Segunda pasada del Guardia (doble verificación independiente)...');
-          guardiaSegunda = await validarGuardia({ letras: parsedJson.letras, titulo: parsedJson.titulo, survey: surveyContent });
-          if (guardiaSegunda.ok) {
-            console.log(`🛡️  Guardia (2da pasada, ${Math.round(guardiaSegunda.durationMs / 1000)}s): ${guardiaSegunda.veredicto}`);
-            console.log(`   coherencia=${guardiaSegunda.coherencia} rima=${guardiaSegunda.rima} tono=${guardiaSegunda.tono} fidelidad=${guardiaSegunda.fidelidad} gancho=${guardiaSegunda.gancho} aprobada=${guardiaSegunda.aprobada}`);
-            guardiaSegunda.problemas.forEach((p) => console.log(`   • ${p}`));
-          } else {
-            console.log(`🛡️  Segunda pasada no disponible (${guardiaSegunda.error}) — se sigue solo con la primera.`);
-          }
+        // Desempate: si las 2 pasadas disponibles DISCREPAN en aprobada, una
+        // 3ra pasada ciega decide por mayoría — un solo veredicto ruidoso a
+        // las 3 AM ya no manda una canción buena a la pausa con timeout (que
+        // en --loop la ABANDONA tras 20 min) ni deja pasar una mala.
+        if (guardiaSegunda.ok && guardiaResult.aprobada !== guardiaSegunda.aprobada) {
+          console.log('\n🛡️  Las 2 pasadas discrepan — tercera pasada de desempate...');
+          guardiaDesempate = await consultarGuardia('Desempate', { keepAlive: 0 });
+          logPass('El Guardia — desempate (ciega)', guardiaDesempate);
         }
+      }
 
-        if (!isDryRun) {
-          try {
-            pipelineState.write({ guardia: guardiaResult, guardiaSegunda });
-            fs.mkdirSync(path.join(__dirname, 'logs'), { recursive: true });
-            fs.appendFileSync(
-              path.join(__dirname, 'logs', 'guardia-feedback.jsonl'),
-              JSON.stringify({ ts: new Date().toISOString(), songId, guardiaResult, guardiaSegunda }) + '\n',
-              'utf-8'
-            );
-          } catch {
-            // best-effort — la señal ya se mostró en consola/run-log
-          }
-        }
-
-        // Gate real (ya no solo informativo): si CUALQUIER pasada disponible
-        // rechaza la letra, pausar para revisión humana ANTES de mandarla a
-        // Suno, en vez de solo loguear y seguir de largo. Ollama caído en
-        // una o ambas pasadas nunca bloquea (mismo criterio de siempre) —
-        // esto solo actúa cuando el Guardia efectivamente juzgó y dijo que
-        // no. `pauseForHumanInteraction` respeta el timeout humano de
-        // --loop (20 min default): si nadie responde, esta canción se
-        // abandona y el loop sigue con la próxima, nunca se cuelga la noche
-        // entera por esto.
-        const veredictos = [guardiaResult, guardiaSegunda].filter((g) => g && g.ok);
-        const algunaRechaza = veredictos.some((g) => g.aprobada === false);
-        if (!isDryRun && algunaRechaza) {
-          const detalle = veredictos
-            .filter((g) => g.aprobada === false)
-            .map((g) => `"${g.veredicto}"${g.problemas.length ? ' — ' + g.problemas.join('; ') : ''}`)
-            .join(' | ');
-          await notify(
-            `🚨 "${parsedJson.titulo}": El Guardia NO aprobó la letra (${veredictos.length} pasada(s) evaluadas). ${detalle}`,
-            { title: 'El Guardia rechazó la letra', priority: 'urgent', tags: 'rotating_light' }
-          ).catch(() => {});
-          await pauseForHumanInteraction(
-            `El Guardia (Ollama) no aprobó "${parsedJson.titulo}" — al menos una pasada dijo que no mandarías esta letra a producción sin tocarla. Detalle: ${detalle}. Revisá song.txt antes de continuar con Suno.`
+      // Registro SIEMPRE (incluso con el Guardia caído — sin esto, una
+      // Ollama muerta tras un reinicio de Windows desaparecía del jsonl en
+      // silencio durante semanas y la "red de seguridad" no existía sin que
+      // nadie lo supiera). passedQA + qaFailures viajan en cada entrada para
+      // poder cruzar el veredicto del Guardia contra el QA duro y el humano.
+      if (!isDryRun) {
+        try {
+          pipelineState.write({ guardia: guardiaResult, guardiaSegunda, guardiaDesempate });
+          fs.mkdirSync(path.join(__dirname, 'logs'), { recursive: true });
+          fs.appendFileSync(
+            path.join(__dirname, 'logs', 'guardia-feedback.jsonl'),
+            JSON.stringify({ ts: new Date().toISOString(), songId, passedQA, qaFailures, guardiaResult, guardiaSegunda, guardiaDesempate }) + '\n',
+            'utf-8'
           );
+        } catch {
+          // best-effort — la señal ya se mostró en consola/run-log
         }
-      } else {
-        console.log(`🛡️  El Guardia no disponible (${guardiaResult.error}) — sin señal esta vez, no bloquea.`);
+      }
+
+      // Gate real ANTES de Suno. `pauseForHumanInteraction` respeta el
+      // timeout humano de --loop (20 min default): si nadie responde, esta
+      // canción se abandona y el loop sigue con la próxima. Se pausa cuando:
+      //   1. El Guardia rechaza por MAYORÍA de las pasadas disponibles
+      //      (2-de-2, 2-de-3 con desempate; con una sola pasada disponible,
+      //      esa decide; discrepancia sin desempate disponible = pausa, el
+      //      lado conservador). Ollama caído del todo nunca bloquea.
+      //   2. passedQA=false: la letra quedó con ⚠️ ADVERTENCIA tras agotar
+      //      los intentos — con los correctores determinísticos + Haiku esto
+      //      ahora es raro, y cuando pasa, mandarla sola a Suno era
+      //      exactamente el agujero del bug real 2026-07-13 (una letra con
+      //      advertencia llegó hasta el campo de QA sin que nadie la mirara).
+      //      La aprobación del Guardia NO anula al validador duro.
+      const veredictos = [guardiaResult, guardiaSegunda, guardiaDesempate].filter((g) => g && g.ok);
+      const rechazos = veredictos.filter((g) => g.aprobada === false).length;
+      const guardiaRechaza = veredictos.length > 0 && rechazos >= Math.max(1, Math.ceil(veredictos.length / 2));
+      if (!isDryRun && veredictos.length === 0) {
+        await notify(
+          `🛡️ "${parsedJson.titulo}": el Guardia (Ollama) no estuvo disponible en ninguna pasada — esta canción sigue SIN segunda opinión. Revisá que Ollama esté corriendo (ollama serve).`,
+          { title: 'El Guardia no disponible', priority: 'default', tags: 'warning' }
+        ).catch(() => {});
+      }
+
+      const pauseReasons = [];
+      // Solo fallos de CONTENIDO pausan — "LanguageTool no disponible" es un
+      // problema de red con la letra estructuralmente válida: pausar por eso
+      // en --loop abandonaría canciones sanas toda la noche por un outage
+      // ajeno. Ese caso mantiene el comportamiento de siempre (banner de
+      // advertencia + el Guardia informado lo recibe como contexto).
+      const contentFailures = qaFailures.filter((f) => !f.startsWith('LanguageTool no disponible'));
+      if (!passedQA && contentFailures.length > 0) {
+        pauseReasons.push(`quedó con ⚠️ ADVERTENCIA del QA duro (${contentFailures.length} fallo[s]: ${contentFailures.slice(0, 5).join('; ')}${contentFailures.length > 5 ? '; ...' : ''})`);
+      }
+      if (guardiaRechaza) {
+        const detalle = veredictos
+          .filter((g) => g.aprobada === false)
+          .map((g) => `"${g.veredicto}"${g.problemas.length ? ' — ' + g.problemas.join('; ') : ''}`)
+          .join(' | ');
+        pauseReasons.push(`el Guardia la rechazó (${rechazos}/${veredictos.length} pasada[s]): ${detalle}`);
+      }
+      if (!isDryRun && pauseReasons.length > 0) {
+        const motivo = pauseReasons.join(' Y además ');
+        await notify(
+          `🚨 "${parsedJson.titulo}": frenada antes de Suno — ${motivo}`,
+          { title: 'Letra frenada para revisión humana', priority: 'urgent', tags: 'rotating_light' }
+        ).catch(() => {});
+        await pauseForHumanInteraction(
+          `La letra de "${parsedJson.titulo}" ${motivo}. Revisá song.txt antes de continuar con Suno.`
+        );
       }
     }
 

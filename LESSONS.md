@@ -2385,3 +2385,79 @@ mayúscula y deja pasar `hardValidate`, y no toca nada si no hay typos). No
 se corrió en vivo contra Suno/Claude todavía — el próximo REDO o canción
 nueva con un typo de tilde real confirma el corrector determinístico en
 producción.
+
+## El fix de "Maria" abrió un agujero para "Jesus"/"Jose" — suprimir un fallo asumiendo que otro chequeo lo cubre, sin verificarlo (2026-07-13)
+
+**Caso real (encontrado en revisión profunda con Fable, mismo día del fix
+anterior — nunca llegó a producción):** el punto 1 del fix de arriba
+SUPRIMÍA el fallo del chequeo M cuando la forma sin acentuar del nombre
+canónico estaba en la letra, asumiendo que H2 (`Eñe/tilde perdida`) "ya lo
+reporta". Esa suposición nunca se verificó, y es FALSA para la mayoría de
+los nombres: H2 depende de que nspell acepte la variante acentuada en
+MINÚSCULA, y dictionary-es solo trae así unos pocos nombres propios
+("maría" sí — por eso el caso del bug original funcionaba —, "jesús",
+"josé", "sofía", "andrés"... NO). Verificado contra la lista completa:
+**42 de los 58 nombres acentuados de `standard-spanish-names.json` eran
+invisibles para H2** — con esos, M se suprimía, H2 callaba, y "Jesus" o
+"Jose" sin tilde pasaban `hardValidate` ENTERO en silencio (confirmado con
+un end-to-end: cero fallos). En un negocio de canciones cristianas, "Jesús"
+es probablemente la palabra en riesgo más frecuente de todo el pipeline.
+Antes del fix, ese caso al menos disparaba M y forzaba un regen; el fix lo
+convirtió en un pase limpio. Un fallo detectado que molesta NUNCA se
+suprime — se RECLASIFICA.
+
+**Fix (`lib/song-validate.js` + `run.js`):**
+1. H2 registra las palabras que ya marcó (`h2FlaggedWords`); M, en vez de
+   suprimir, RECLASIFICA: si la forma sin acentuar está en la letra y H2 no
+   la cubrió, reporta el typo él mismo con el prefijo patcheable
+   `Eñe/tilde perdida` + `patchableIssues` con sección/línea exactas.
+2. `applyDeterministicAccentFixes` acepta `{ firstNames }` y corrige
+   nombres estándar sin tilde vía la ortografía canónica de la lista curada
+   ("Jesus"->"Jesús") — señal MÁS fuerte que el diccionario. Solo toca
+   ocurrencias CAPITALIZADAS: un token minúscula idéntico a un nombre puede
+   ser palabra común real (destinatario "Tomás" + "cuando tomas mi mano").
+
+**En la misma revisión, mismos archivos (todo verificado con casos en vivo
+antes de cambiar nada):**
+- `ENYE_TYPOS_BLOCKLIST` partido en 2 niveles: el corrector determinístico
+  convertía "El Papa nos bendijo" en "El Papá" y "yo sueno como campana" en
+  "yo sueño" (el blocklist se diseñó cuando el costo de un falso positivo
+  era "Haiku revisa la línea", no "reemplazo ciego"). `papa`/`sueno` ahora
+  se marcan pero solo Haiku (con contexto) los corrige.
+- `applyDeterministicLineFixes` (nuevo orquestador): además de tildes,
+  arregla sin LLM la puntuación prohibida (—;: -> coma) y dígitos->palabras
+  para los números sin problema de género/apócope (1-199 y años 1900-2099;
+  los terminados en 1 y los 200+ quedan para Haiku: "veintiún años" /
+  "doscientas rosas" necesitan contexto).
+- El loop de generación ahora guarda el MEJOR candidato de los 3 intentos
+  (menos fallos; desempate: solo-patcheables), no el último — en el bug
+  original el intento 2 estaba más cerca que el 3 y se descartaba.
+- El parche de Haiku exitoso ahora pasa por `runGrammarGate` igual que el
+  camino valid normal (antes se salteaba LanguageTool por completo), y si
+  el parche no queda limpio se le aplica una pasada determinística extra.
+- El Guardia: pasada 1 ciega + pasada 2 INFORMADA con los fallos del QA
+  duro (antes eran idénticas = solo ruido de sampleo), desempate con 3ra
+  pasada si discrepan (mayoría decide — un veredicto ruidoso a las 3 AM ya
+  no abandona una canción buena vía el timeout de 20 min), reintento con
+  fallback a qwen3:8b si una pasada falla, `keep_alive: '5m'` entre pasadas
+  consecutivas (antes cada pasada recargaba el 14b desde frío — minutos
+  perdidos por pasada), fallos registrados SIEMPRE en
+  `guardia-feedback.jsonl` (una Ollama muerta tras un reinicio ya no
+  desaparece en silencio semanas) + ntfy si ninguna pasada estuvo
+  disponible, campo `confianza` 1-10 y `raw` para calibración.
+- `passedQA=false` con fallos de CONTENIDO ahora PAUSA antes de Suno
+  (la aprobación del Guardia no anula al validador duro — una letra con
+  advertencia yendo sola a Suno era exactamente el agujero del caso
+  original). "LanguageTool no disponible" (red, no contenido) NO pausa.
+- Guardia de audio: corre SIEMPRE (antes solo con alarma Levenshtein/NISQA)
+  — un Levenshtein 90% es compatible con el nombre mal cantado, y gateado
+  por alarma nunca junta verdaderos negativos para calibrar. Nuevo campo
+  `nombreCorrecto` (chequeo semántico específico del nombre del
+  destinatario en la transcripción, el error más caro del negocio).
+
+**Verificación:** `npm test` (251 casos, 14 nuevos) + smoke end-to-end
+offline del camino completo ("Jesus" detectado patcheable -> fixer
+determinístico -> revalidación limpia, incluyendo dígitos y em dash en la
+misma letra). La lección de fondo: **cada vez que un fix diga "el chequeo X
+ya lo cubre", correr el caso contra el chequeo X de verdad** — acá la
+suposición era falsa para el 72% de la lista.

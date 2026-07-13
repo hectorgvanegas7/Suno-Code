@@ -1378,9 +1378,10 @@ async function runFlowInner({ resume = false } = {}, hb) {
             const pctA = scoreA != null ? Math.round(scoreA * 100) : '?';
             const pctB = scoreBLev != null ? Math.round(scoreBLev * 100) : '?';
             // El Guardia de audio (lib/ollama-guardia.js, evaluarAudioGuardia)
-            // ya corrió dentro de verify-audio.js cuando esta misma alarma
-            // numérica se disparó — acá se usa su veredicto para decidir QUÉ
-            // hacer con la alarma, en vez de avisar+seguir siempre a ciegas.
+            // ya corrió dentro de verify-audio.js (desde 2026-07-13 corre
+            // SIEMPRE, no solo con alarma — ver comentario ahí) — acá se usa
+            // su veredicto para decidir QUÉ hacer con la alarma, en vez de
+            // avisar+seguir siempre a ciegas.
             // Caso real que motivó esto (2026-07-13, "Un Ángel en Jenner"):
             // Levenshtein/NISQA marcaron alucinación grave en ambas versiones
             // pero el audio real estaba perfecto — falso positivo confirmado

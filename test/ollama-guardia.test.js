@@ -97,6 +97,56 @@ test('parseGuardiaResponse: problemas no-array y veredicto vacío degradan a def
   assert.equal(r.veredicto, '(sin veredicto)');
 });
 
+test('buildGuardiaPrompt con qaContext: la pasada informada incluye los fallos del QA duro y pide juicio propio', () => {
+  const prompt = buildGuardiaPrompt({
+    letras: LETRAS_FAKE,
+    titulo: 'T',
+    survey: 'S',
+    qaContext: { passedQA: false, failures: ['Eñe/tilde perdida: [Chorus 1] línea 1 contiene "maria"'] },
+  });
+  assert.match(prompt, /QA AUTOMÁTICO PREVIO/);
+  assert.match(prompt, /contiene "maria"/);
+  assert.match(prompt, /NO pasó la validación automática/);
+  assert.match(prompt, /no apruebes ni rechaces solo porque el validador/i, 'debe pedir juicio propio, no eco del validador');
+});
+
+test('buildGuardiaPrompt sin qaContext (pasada ciega): NO menciona el QA previo — juicio independiente', () => {
+  const prompt = buildGuardiaPrompt({ letras: LETRAS_FAKE, titulo: 'T', survey: 'S' });
+  assert.ok(!prompt.includes('QA AUTOMÁTICO PREVIO'), 'la pasada ciega no debe ver los fallos del validador');
+});
+
+test('parseGuardiaResponse: confianza se normaliza (clamp 1-10) y es opcional (null si falta, sin invalidar el veredicto)', () => {
+  const con = parseGuardiaResponse(JSON.stringify({ ...RESPUESTA_VALIDA, confianza: 99 }));
+  assert.equal(con.ok, true);
+  assert.equal(con.confianza, 10);
+  const sin = parseGuardiaResponse(JSON.stringify(RESPUESTA_VALIDA));
+  assert.equal(sin.ok, true);
+  assert.equal(sin.confianza, null);
+});
+
+test('validarGuardia: keepAlive viaja al body de Ollama (entre pasadas consecutivas no se recarga el modelo desde frío)', async () => {
+  let sentBody = null;
+  const fetchImpl = async (url, opts) => {
+    sentBody = JSON.parse(opts.body);
+    return { ok: true, status: 200, json: async () => ({ message: { content: JSON.stringify(RESPUESTA_VALIDA) } }), text: async () => '' };
+  };
+  await validarGuardia({ letras: LETRAS_FAKE }, { fetchImpl, keepAlive: '5m' });
+  assert.equal(sentBody.keep_alive, '5m');
+  await validarGuardia({ letras: LETRAS_FAKE }, { fetchImpl });
+  assert.equal(sentBody.keep_alive, 0, 'sin keepAlive explícito, el default sigue siendo 0 (libera VRAM)');
+});
+
+test('validarGuardia: la respuesta cruda de Ollama viaja en `raw` (auditoría/calibración), incluso si el parseo falla', async () => {
+  const okFetch = fakeOllamaFetch({ message: { content: JSON.stringify(RESPUESTA_VALIDA) } });
+  const r1 = await validarGuardia({ letras: LETRAS_FAKE }, { fetchImpl: okFetch });
+  assert.equal(r1.raw, JSON.stringify(RESPUESTA_VALIDA));
+
+  const badFetch = fakeOllamaFetch({ message: { content: '{"basura": true}' } });
+  const r2 = await validarGuardia({ letras: LETRAS_FAKE }, { fetchImpl: badFetch });
+  assert.equal(r2.ok, false);
+  assert.equal(r2.raw, '{"basura": true}', 'sin raw, una respuesta mal tipada se pierde sin dejar evidencia');
+});
+
 test('validarGuardia: respuesta 200 con JSON válido devuelve ok:true con model y durationMs', async () => {
   const fetchImpl = fakeOllamaFetch({ message: { content: JSON.stringify(RESPUESTA_VALIDA) } });
   const r = await validarGuardia({ letras: LETRAS_FAKE, titulo: 'T', survey: 'S' }, { fetchImpl, model: 'qwen3:14b' });
@@ -198,6 +248,25 @@ test('parseAudioGuardiaResponse: JSON malformado o sin similitud no lanza — ok
   const sinSimilitud = parseAudioGuardiaResponse(JSON.stringify({ ...RESPUESTA_AUDIO_VALIDA, similitud: 'alta' }));
   assert.equal(sinSimilitud.ok, false);
   assert.match(sinSimilitud.error, /similitud/);
+});
+
+test('buildAudioGuardiaPrompt con nombres: pide el chequeo específico de nombreCorrecto con los nombres reales', () => {
+  const prompt = buildAudioGuardiaPrompt({
+    titulo: 'T', letraPedida: 'letra', transcripcion: 't', señales: 's',
+    nombres: ['Clara', 'Mateo'],
+  });
+  assert.match(prompt, /nombreCorrecto/);
+  assert.match(prompt, /Clara, Mateo/);
+  assert.match(prompt, /error más caro del negocio/i);
+});
+
+test('parseAudioGuardiaResponse: nombreCorrecto es boolean o null (respuestas viejas sin el campo no se invalidan)', () => {
+  const conCampo = parseAudioGuardiaResponse(JSON.stringify({ ...RESPUESTA_AUDIO_VALIDA, nombreCorrecto: false }));
+  assert.equal(conCampo.ok, true);
+  assert.equal(conCampo.nombreCorrecto, false);
+  const sinCampo = parseAudioGuardiaResponse(JSON.stringify(RESPUESTA_AUDIO_VALIDA));
+  assert.equal(sinCampo.ok, true);
+  assert.equal(sinCampo.nombreCorrecto, null);
 });
 
 test('evaluarAudioGuardia: respuesta 200 con JSON válido devuelve ok:true', async () => {
