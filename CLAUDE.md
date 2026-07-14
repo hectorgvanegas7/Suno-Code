@@ -133,6 +133,14 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
 
 ## Reglas importantes
 
+- **Protocolo de Co-Desarrollo (Antigravity & Claude Code)**:
+  Ambos agentes operan sobre este mismo repositorio en paralelo. Para evitar pisarse:
+  1. Correr `git status` y `git diff` antes de tocar cualquier archivo, y leer cambios sin commitear.
+  2. Commitear inmediatamente los fixes validados con mensajes claros.
+  3. NUNCA correr el pipeline vivo (`start-flow.js --loop`, etc.) mientras se edita código usado por el mismo.
+  4. Documentar cada bug y fix en `LESSONS.md`.
+  5. No reportar resultados de tests unitarios sin haberlos ejecutado en la sesión actual.
+  6. Dejar notas en `LESSONS.md` (o `WORKING.md`) si se deja un fix a medias.
 - **El tiempo se extrae automáticamente de "Recent completions"** cuando Chrome está
   abierto y el título coincide. Si falla, queda vacío para que Gabo lo llene a mano.
 - **La verificación visual antes de Create NO es opcional** — ya atrapó defectos
