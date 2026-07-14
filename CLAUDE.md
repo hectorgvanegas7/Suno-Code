@@ -303,6 +303,20 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
   5 min expiran solos). Requiere Ollama instalado + `ollama pull
   qwen3:14b` (y `qwen3:8b` de fallback) — sin eso el pipeline sigue
   exactamente igual, solo sin esta señal.
+  `extraerHechosLetra({ letras, titulo })` + `compararHechosConEncuesta`
+  (2026-07-14): extracción CERRADA de hechos — el modelo solo LISTA
+  lugares/personas/fechas que la letra afirma (extraer es fácil; JUZGAR
+  fidelidad no funciona: verificado en vivo que da fidelidad=10 a una letra
+  con "Miami" inventado) y la comparación contra la encuesta se hace EN
+  CÓDIGO (pura, testeada: dígitos de la encuesta expandidos a palabras —
+  "13 de mayo" respalda "trece de mayo" —, whitelist religiosa, nombres).
+  Corre en run.js tras la pasada 2 (modelo caliente, ~10-30s). INFORMATIVO
+  hasta calibrar en el jsonl (`extraccionHechos`/`hechosSinRespaldo`);
+  verificado en vivo: atrapa "Miami" en la letra mala real, CERO falsos
+  positivos en la buena. Criterio de graduación: cuando el jsonl acumule
+  casos sin falsos positivos sobre letras buenas, puede pasar a disparar
+  regen automático (camino al 100% auto — complementa el chequeo N
+  determinístico, que solo ve tokens Capitalizados mid-línea).
   `evaluarAudioGuardia({ titulo, letraPedida, transcripcion, señales,
   nombres })` (2026-07-13): mismo Guardia, ahora también como Capa 4 sobre
   AUDIO — lo llama `verify-audio.js` SIEMPRE, por cada versión (antes solo

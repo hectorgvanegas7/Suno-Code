@@ -380,3 +380,79 @@ test('evaluarAudioGuardia: sin letra pedida devuelve ok:false sin llamar a fetch
   assert.equal(r.ok, false);
   assert.equal(called, false);
 });
+
+// ── Extracción cerrada de hechos + comparación en código (2026-07-14) ───────
+// Caso real "El Hombre De Mi Vida": el juicio de fidelidad del Guardia dio
+// 10/10 a una letra con "Miami" inventado (verificado en vivo, incluso con
+// prompt endurecido). La extracción cerrada + comparación EN CÓDIGO es el
+// reemplazo: el LLM lista, el código decide.
+const { parseExtraccionResponse, compararHechosConEncuesta, extraerHechosLetra, buildExtraccionPrompt } = require('../lib/ollama-guardia');
+
+const SURVEY_HECHOS = 'el se fue de Cuba y a los 10 años yo vine también a Estados Unidos pero hace 16 años todo empezó un 13 de mayo. Tenía 14 años y yo 17. tenemos 3 hermosos nietos';
+
+test('compararHechosConEncuesta: lugar inventado ("Miami") se marca sin respaldo — caso real 2026-07-14', () => {
+  const { evaluados, sinRespaldo } = compararHechosConEncuesta(
+    { lugares: ['Miami', 'Cuba', 'Estados Unidos'], personas: [], fechasOMomentos: [] },
+    SURVEY_HECHOS,
+    { firstNames: ['damian'] }
+  );
+  assert.equal(evaluados, 3);
+  assert.equal(sinRespaldo.length, 1, `esperaba solo Miami sin respaldo: ${JSON.stringify(sinRespaldo)}`);
+  assert.equal(sinRespaldo[0].valor, 'Miami');
+});
+
+test('compararHechosConEncuesta: fechas/edades en palabras respaldadas por dígitos de la encuesta ("trece de mayo" <- "13 de mayo")', () => {
+  const { sinRespaldo } = compararHechosConEncuesta(
+    { lugares: [], personas: [], fechasOMomentos: ['trece de mayo', 'diecisiete años', 'catorce años', 'tres nietos'] },
+    SURVEY_HECHOS,
+    { firstNames: [] }
+  );
+  assert.equal(sinRespaldo.length, 0, `nada debía quedar sin respaldo: ${JSON.stringify(sinRespaldo)}`);
+});
+
+test('compararHechosConEncuesta: momento temporal inventado entero ("un martes de octubre") se marca aunque no tenga mayúsculas', () => {
+  const { sinRespaldo } = compararHechosConEncuesta(
+    { lugares: [], personas: [], fechasOMomentos: ['un martes de octubre'] },
+    SURVEY_HECHOS,
+    { firstNames: [] }
+  );
+  assert.equal(sinRespaldo.length, 1);
+  assert.equal(sinRespaldo[0].valor, 'un martes de octubre');
+});
+
+test('compararHechosConEncuesta: persona del destinatario y términos religiosos pasan; persona inventada se marca', () => {
+  const { sinRespaldo } = compararHechosConEncuesta(
+    { lugares: [], personas: ['Damian', 'Dios', 'Daniel'], fechasOMomentos: [] },
+    SURVEY_HECHOS,
+    { firstNames: ['damian'] }
+  );
+  assert.equal(sinRespaldo.length, 1, JSON.stringify(sinRespaldo));
+  assert.equal(sinRespaldo[0].valor, 'Daniel');
+});
+
+test('parseExtraccionResponse: respuesta válida se normaliza; basura no lanza', () => {
+  const ok = parseExtraccionResponse('{"lugares":["Miami"],"personas":[],"fechasOMomentos":["  trece de mayo "]}');
+  assert.equal(ok.ok, true);
+  assert.deepEqual(ok.lugares, ['Miami']);
+  assert.deepEqual(ok.fechasOMomentos, ['trece de mayo']);
+  assert.equal(parseExtraccionResponse('no es json').ok, false);
+  assert.equal(parseExtraccionResponse('[1,2]').ok, false);
+});
+
+test('extraerHechosLetra: usa fetchImpl inyectable y nunca lanza ante error de red', async () => {
+  const fetchImpl = async () => ({ ok: true, json: async () => ({ message: { content: '{"lugares":["Cuba"],"personas":["Damian"],"fechasOMomentos":[]}' } }) });
+  const r = await extraerHechosLetra({ letras: { 'Verse 1': ['línea'] }, titulo: 'T' }, { fetchImpl });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.lugares, ['Cuba']);
+
+  const fetchBoom = async () => { throw new Error('ECONNREFUSED'); };
+  const err = await extraerHechosLetra({ letras: { 'Verse 1': ['línea'] }, titulo: 'T' }, { fetchImpl: fetchBoom });
+  assert.equal(err.ok, false);
+  assert.match(err.error, /ECONNREFUSED/);
+});
+
+test('buildExtraccionPrompt: incluye la letra y pide listas sin juicio', () => {
+  const prompt = buildExtraccionPrompt({ letras: { 'Verse 1': ['nos cruzó por Miami'] }, titulo: 'T' });
+  assert.ok(prompt.includes('nos cruzó por Miami'));
+  assert.ok(prompt.includes('NO evalúes'));
+});

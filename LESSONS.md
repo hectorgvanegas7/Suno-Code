@@ -2660,3 +2660,35 @@ verificado que persista). (2) El ticker `[Countdown]` de la espera del
 Submit solo escribe con TTY real: con stdout a un archivo (`--loop > log`)
 el `\r` no sobreescribe y cada tick se apilaba — cientos de repeticiones por
 línea inflando los logs de la noche.
+
+## Extracción cerrada de hechos: el LLM lista, el código juzga — el reemplazo del juicio de fidelidad que sí funciona (2026-07-14, mismo día, seguimiento del caso "Miami")
+
+Seguimiento inmediato de la entrada de "Miami": si pedirle al Guardia que
+JUZGUE fidelidad no detecta hechos inventados (fidelidad=10 verificado en
+vivo, dos veces, con y sin prompt endurecido), la salida no es un mejor
+prompt de juicio — es cambiar la tarea. Extraer es mucho más fácil que
+juzgar: `extraerHechosLetra` (lib/ollama-guardia.js) le pide al mismo
+qwen3:14b que solo LISTE lugares/personas/fechas que la letra afirma
+(schema cerrado, sin opinar), y `compararHechosConEncuesta` decide EN
+CÓDIGO si cada hecho está respaldado por la encuesta (tokens normalizados,
+dígitos expandidos a palabras — "13 de mayo" respalda "trece de mayo" —,
+whitelist religiosa de la regla 8, respellings).
+
+Verificado en vivo el mismo día contra las dos letras reales del caso:
+- Letra MALA: extracción lista "Miami" como lugar en 28s (el juicio de
+  fidelidad tardaba 83s en NO verlo) → comparación lo marca sin respaldo.
+- Letra BUENA: extracción limpia, CERO falsos positivos — la propiedad que
+  importa para graduarlo a gate.
+- Ruido observado: sobre la letra mala qwen3 a veces sobre-extrae frases
+  poéticas como "momentos" ("un mismo destino", "la isla") que se marcan de
+  más — aceptable, cae del lado seguro (la letra YA es mala); el prompt
+  excluye explícitamente frases abstractas y aún así puede colarse alguna.
+
+INFORMATIVO por ahora (protocolo estándar Capa 3): consola + state.json +
+guardia-feedback.jsonl con `extraccionHechos`/`hechosSinRespaldo` en cada
+canción. **Criterio de graduación a gate (camino al 100% automático):**
+cuando el jsonl acumule un puñado de canciones reales con extracción limpia
+en letras buenas (sin falsos positivos), `hechosSinRespaldo` puede pasar a
+disparar el MISMO regen automático que el chequeo N — cero pausas nuevas.
+La lección general: **cuando un LLM falla juzgando, no le pidas mejor
+juicio — pedile datos y juzgá en código.**

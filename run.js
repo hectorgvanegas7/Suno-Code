@@ -1239,6 +1239,8 @@ process.on('uncaughtException', async (err) => {
       logPass('El Guardia — pasada 1 (ciega)', guardiaResult);
       let guardiaSegunda = null;
       let guardiaDesempate = null;
+      let extraccionHechos = null;
+      let hechosSinRespaldo = null;
 
       if (guardiaResult.ok && !isDryRun) {
         // Pasada 2: INFORMADA — recibe los fallos que el QA duro dejó sin
@@ -1253,6 +1255,36 @@ process.on('uncaughtException', async (err) => {
           keepAlive: '5m',
         });
         logPass('El Guardia — pasada 2 (informada)', guardiaSegunda);
+
+        // ── Extracción cerrada de hechos + comparación EN CÓDIGO (2026-07-14) ──
+        // El juicio de "fidelidad" del Guardia NO detecta hechos inventados
+        // (verificado en vivo: fidelidad=10 a la letra con "Miami" — ver
+        // LESSONS.md). Extraer sí es una tarea que el modelo hace bien: acá
+        // solo LISTA lugares/personas/fechas que la letra afirma, y
+        // compararHechosConEncuesta decide en código si cada uno está
+        // respaldado. INFORMATIVO hasta calibrar en el jsonl (protocolo
+        // estándar de la Capa 3) — el criterio de graduación a gate/regen
+        // automático está documentado en lib/ollama-guardia.js. Con el
+        // modelo aún caliente ('5m' de la pasada 2), cuesta segundos.
+        const { extraerHechosLetra, compararHechosConEncuesta } = require('./lib/ollama-guardia');
+        extraccionHechos = await extraerHechosLetra(
+          { letras: parsedJson.letras, titulo: parsedJson.titulo },
+          { keepAlive: '5m' }
+        );
+        if (extraccionHechos.ok) {
+          const surveyNames = extractFirstNames(surveyContent);
+          hechosSinRespaldo = compararHechosConEncuesta(extraccionHechos, surveyContent, { firstNames: surveyNames });
+          console.log(`\n🧾 Extracción de hechos (Ollama/${extraccionHechos.model}, ${Math.round(extraccionHechos.durationMs / 1000)}s): ${hechosSinRespaldo.evaluados} afirmación(es) concreta(s) en la letra.`);
+          if (hechosSinRespaldo.sinRespaldo.length === 0) {
+            console.log('   ✅ Todas respaldadas por la encuesta.');
+          } else {
+            for (const h of hechosSinRespaldo.sinRespaldo) {
+              console.warn(`   🚨 HECHO SIN RESPALDO en la encuesta (${h.tipo}): "${h.valor}" — ${h.motivo} (informativo — revisar antes de confiar; ver LESSONS.md 2026-07-14)`);
+            }
+          }
+        } else {
+          console.log(`\n🧾 Extracción de hechos no disponible (${extraccionHechos.error}) — sin esta señal.`);
+        }
 
         // Desempate: si las 2 pasadas disponibles DISCREPAN en aprobada, una
         // 3ra pasada ciega decide por mayoría — un solo veredicto ruidoso a
@@ -1281,11 +1313,11 @@ process.on('uncaughtException', async (err) => {
       // poder cruzar el veredicto del Guardia contra el QA duro y el humano.
       if (!isDryRun) {
         try {
-          pipelineState.write({ guardia: guardiaResult, guardiaSegunda, guardiaDesempate });
+          pipelineState.write({ guardia: guardiaResult, guardiaSegunda, guardiaDesempate, hechosSinRespaldo });
           fs.mkdirSync(path.join(__dirname, 'logs'), { recursive: true });
           fs.appendFileSync(
             path.join(__dirname, 'logs', 'guardia-feedback.jsonl'),
-            JSON.stringify({ ts: new Date().toISOString(), songId, passedQA, qaFailures, guardiaResult, guardiaSegunda, guardiaDesempate }) + '\n',
+            JSON.stringify({ ts: new Date().toISOString(), songId, passedQA, qaFailures, guardiaResult, guardiaSegunda, guardiaDesempate, extraccionHechos, hechosSinRespaldo }) + '\n',
             'utf-8'
           );
         } catch {
