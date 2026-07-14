@@ -506,7 +506,10 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
     `state.json`: salta letra/Suno/Flow ya completados. Nunca re-clickea Create (evita
     gastar créditos doble) — si los MP3 no están en disco (ventana de 180 min), Create y
     descarga quedan manuales. Si `song.txt` no coincide con `state.json`, aborta con error
-    en vez de mezclar canciones.
+    en vez de mezclar canciones. Desde 2026-07-14 consulta primero los **intents
+    write-ahead** (`interpretResume`): un Submit clickeado sin cierre registrado se
+    VERIFICA en el Flow antes de tocar nada (jamás re-submit ciego — ver el bloque de
+    intents más abajo). `--explain-resume` muestra la decisión sin ejecutar nada.
   - `node start-flow.js --dry-run` = ensayo completo sin gastar nada: run.js con
     mock local (cero API — valida contra la encuesta MOCK de
     `lib/llm-provider.js`, consistente con la respuesta mock, así el ensayo
@@ -581,18 +584,46 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
       nueva) — corre en el preflight inicial Y cada 30 min dentro del loop de
       poll, para agarrar disco lleno (Whisper/demucs/MP3s/logs) DURANTE la
       noche, no solo al arrancar.
-  - Reintento automático del Create INICIAL (`MAX_CREATE_RETRIES`, fijo en 2,
-    no configurable por flag): si `createAndDownload()` falla del todo (0 MP3
-    descargados — ver LESSONS.md), antes el pipeline se quedaba sin subir nada
-    y sin avisar claramente (bug real en un REDO); ahora re-clickea Create
-    automáticamente hasta 2 veces más sobre el mismo formulario (gasta créditos
-    de nuevo cada vez), y si los 3 intentos totales fallan avisa por ntfy
-    `urgent` con los comandos de recuperación manual exactos
-    (`node suno-create.js` + `node upload-to-flow.js --version A|B`).
+  - Reintentos de Create/descarga SIN re-Create automático (rediseño
+    2026-07-14 — la versión anterior re-clickeaba Create hasta 2 veces si la
+    descarga fallaba, gastando créditos sin confirmación; contradecía la
+    regla firme de Hector): la decisión vive en `decideCreateRetry`
+    (lib/suno-create-dl.js, pura, testeada) sobre el **intent write-ahead**
+    de state.json (`intents.create.clickedAt`, escrito ANTES del click
+    físico). Fallo demostrablemente PRE-click (clickedAt ausente) →
+    reintenta `createAndDownload` (seguro, no gastó nada). Fallo POST-click →
+    reintenta SOLO la descarga con `downloadOnly()` (busca las 2 cards más
+    recientes del título en la UI de Suno y las baja — jamás toca Create).
+    3 intentos totales; al agotarlos avisa por ntfy `urgent` con los pasos
+    manuales exactos según el caso (si Create ya se clickeó: "descargá de
+    suno.com, NO vuelvas a crear").
     (Existió un `--max-rerolls N`/auto-reroll por mala pronunciación del
     nombre del destinatario — removido el 2026-07-04: la señal de "nombre
     ausente" de Whisper no era confiable y, visto en vivo, agotó los 2
     rerolls sin resolver nada, solo gastando créditos. Ver LESSONS.md.)
+  - **Intents write-ahead en state.json** (auditoría de idempotencia
+    2026-07-14): cada acción irreversible registra su intención ANTES de
+    ejecutarla — `intents.create` (songId/requestedAt/clickedAt/downloadedAt,
+    lib/suno-create-dl.js), `intents.submit` (clickedAt ANTES del click del
+    Auto-Submit, confirmedAt tras el modal, start-flow.js) e `intents.upload`
+    (verifiedAt SOLO tras ver el archivo en el DOM del Flow,
+    upload-to-flow.js). `interpretResume` (lib/pipeline-state.js, pura,
+    testeada) los interpreta en un `--resume`: Submit clickeado sin cierre →
+    `resumeAfterSubmitIntent` verifica en "Recent completions" y JAMÁS
+    re-llena/re-sube/re-submitea a ciegas (cierra con runDone si el Submit
+    prendió; si es ambiguo avisa urgente y no toca nada). `startNew()` limpia
+    los intents (canción nueva, pizarra limpia). Además `downloads` en
+    state.json registra path+sha256 exactos de cada MP3 descargado:
+    upload-to-flow.js sube ESE archivo (la búsqueda por título+recencia quedó
+    como fallback con advertencia), y `uploadConfirmed` en start-flow.js ya
+    NO se infiere del exit code — exige `intents.upload.verifiedAt` con el
+    songId correcto. El Auto-Submit decide con `shouldAutoSubmit`
+    (lib/flow-helpers.js, pura, testeada): bloquea por submit previo
+    clickeado (doble Submit) o upload sin verificar.
+  - `node start-flow.js --explain-resume` = solo lee state.json, explica qué
+    haría un `--resume` (decisión de `interpretResume` + intents) y sale. Sin
+    browser, sin red, sin escritura — para inspeccionar un estado dudoso
+    antes de retomar.
   - Chequeo TEMPRANO de duración anómala post-descarga (2026-07-14): si
     AMBAS versiones salen MUY fuera de rango (`isDurationWildlyOff`,
     margen 1.5x sobre 2:45-3:30 — caso real "El Hombre De Mi Vida": 5:26 y

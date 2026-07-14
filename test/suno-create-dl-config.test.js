@@ -12,7 +12,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { DOWNLOAD_WAIT_TIMEOUT_MS, GENERATION_TIMEOUT_MS } = require('../lib/suno-create-dl');
+const { DOWNLOAD_WAIT_TIMEOUT_MS, GENERATION_TIMEOUT_MS, decideCreateRetry } = require('../lib/suno-create-dl');
 
 test('DOWNLOAD_WAIT_TIMEOUT_MS no baja del piso de 5 minutos', () => {
   assert.ok(
@@ -28,6 +28,39 @@ test('GENERATION_TIMEOUT_MS no baja del piso de 8 minutos', () => {
     `GENERATION_TIMEOUT_MS es ${GENERATION_TIMEOUT_MS}ms — por debajo de 8 min es más corto ` +
     'que el valor de diseño original (ver LESSONS.md, 2026-07-01).'
   );
+});
+
+// ─── decideCreateRetry: la regla firme de Hector (2026-07-14) ─────────────────
+// NUNCA re-clickear Create automáticamente si ya se clickeó una vez.
+
+test('decideCreateRetry: NUNCA re-clickea Create automáticamente si ya se clickeó', () => {
+  // Recorre todos los intentos posibles: con clickedAt presente, JAMÁS puede
+  // salir 'retry-create' — esa es la regla inquebrantable completa.
+  for (let attempt = 1; attempt <= 10; attempt++) {
+    const decision = decideCreateRetry({ clickedAt: '2026-07-14T03:00:00Z', attempt, maxAttempts: 3 });
+    assert.notEqual(
+      decision,
+      'retry-create',
+      `Con clickedAt presente y attempt=${attempt}, decideCreateRetry devolvió 'retry-create' — ` +
+      'eso re-clickearía Create y gastaría créditos de Suno sin confirmación humana (regla firme de Hector).'
+    );
+  }
+});
+
+test('decideCreateRetry: clickedAt presente y quedan intentos → solo reintenta la descarga', () => {
+  assert.equal(decideCreateRetry({ clickedAt: 't', attempt: 1, maxAttempts: 3 }), 'retry-download-only');
+  assert.equal(decideCreateRetry({ clickedAt: 't', attempt: 2, maxAttempts: 3 }), 'retry-download-only');
+});
+
+test('decideCreateRetry: fallo pre-click (sin clickedAt) puede reintentar Create — no se gastó nada', () => {
+  assert.equal(decideCreateRetry({ clickedAt: null, attempt: 1, maxAttempts: 3 }), 'retry-create');
+  assert.equal(decideCreateRetry({ clickedAt: undefined, attempt: 2, maxAttempts: 3 }), 'retry-create');
+});
+
+test('decideCreateRetry: intentos agotados → give-up (pausa/aviso, nunca acción automática)', () => {
+  assert.equal(decideCreateRetry({ clickedAt: null, attempt: 3, maxAttempts: 3 }), 'give-up');
+  assert.equal(decideCreateRetry({ clickedAt: 't', attempt: 3, maxAttempts: 3 }), 'give-up');
+  assert.equal(decideCreateRetry({ clickedAt: 't', attempt: 7, maxAttempts: 3 }), 'give-up');
 });
 
 test('lib/suno-create-dl.js no reintrodujo la descarga por interceptación de red', () => {

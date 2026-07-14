@@ -2801,3 +2801,70 @@ llamada real de punta a punta — es la única forma de atrapar esta clase de
 bug, y salió barato (unos centavos, un puñado de llamadas a Haiku) comparado
 con haberlo descubierto recién a la noche, con el loop corriendo solo y sin
 nadie mirando.
+
+## Auditoría de idempotencia: intents write-ahead en state.json — el re-click automático de Create contradecía la regla firme, y un kill entre Submit y COMPLETED podía doble-submitear (2026-07-14)
+
+Auditoría a fondo de las 3 acciones irreversibles del pipeline (Create de
+Suno = créditos reales, upload al Flow, Submit to QA) contra reinicios del
+watchdog (`taskkill /F` + relanzamiento con `--loop --resume`) y doble-runs.
+Tres agujeros reales encontrados y cerrados:
+
+**1. El retry-loop de Create RE-CLICKEABA Create automáticamente.** El
+`while` de `MAX_CREATE_RETRIES` en start-flow.js decía literalmente
+"re-clickeando Create sobre el mismo formulario (gasta créditos de nuevo)" —
+contradiciendo la regla firme de Hector (2026-07-14, caso duración anómala:
+"avisar+pausar, NUNCA re-clickear Create solo"). Fix: **intents
+write-ahead** — `lib/suno-create-dl.js` registra en state.json
+`intents.create.clickedAt` ANTES del click físico y `downloadedAt` al
+confirmar el primer MP3 en disco. La decisión de reintento es ahora
+`decideCreateRetry` (pura, testeada con un test que recorre attempts 1-10 y
+exige que con clickedAt presente JAMÁS salga 'retry-create'): fallo
+pre-click → re-Create seguro; fallo post-click → SOLO se reintenta la
+descarga con `downloadOnly()` (nueva: busca las 2 cards más recientes del
+título en la UI de Suno, espera la generación si hace falta y descarga con
+el mecanismo compartido `downloadReadyCards`). Conservador a propósito: un
+clickedAt registrado con un click que en realidad no prendió cuesta una
+confirmación humana, nunca créditos dobles en silencio.
+
+**2. Kill entre el click de Submit y la escritura de COMPLETED → --resume
+re-subía y RE-SUBMITEABA.** La etapa quedaba en `flow-filled` y el resume
+clásico re-llenaba el Flow (peor aún: si el Flow ya había asignado OTRA
+canción, `enterFlowAndEnsureAssignment` la cargaba y flow-submit llenaba la
+asignación nueva con los datos de la canción vieja). Fix:
+`intents.submit.clickedAt` se escribe ANTES de `submitBtn.click()` y
+`confirmedAt` tras el modal; `interpretResume` (pura, 10 tests) detecta el
+caso y `resumeAfterSubmitIntent` verifica en "Recent completions" antes de
+tocar NADA: card visible → solo cierre (runDone); confirmado sin card →
+runDone(null) (mismo camino que --done); ambiguo → ntfy urgente + no tocar
+nada, decide un humano. El Auto-Submit además consulta `shouldAutoSubmit`
+(lib/flow-helpers.js, pura): un intent de submit ya clickeado para la misma
+canción bloquea el click aunque el timer y el upload estén verdes.
+
+**3. `uploadConfirmed` se infería del exit code.** Un ENTER humano en la
+pausa de upload-to-flow.js "para destrabar" (sin subir nada) daba exit 0 y
+start-flow marcaba la subida como confirmada → el Auto-Submit podía mandar
+a QA una subida inexistente (en un REDO, la versión VIEJA). Fix:
+upload-to-flow.js registra `intents.upload.verifiedAt` SOLO tras ver el
+archivo en el DOM del Flow (y re-verifica tras el ENTER manual);
+start-flow.js exige ese intent con el songId correcto. Además
+`downloads: {A: {path, sha256, bytes}, B}` en state.json (escrito por
+downloadReadyCards al descargar): upload-to-flow.js sube el archivo EXACTO
+registrado (verificando sha256) y la búsqueda legacy por título+recencia
+(que podía agarrar un MP3 viejo o de otra canción con título parecido en la
+ventana de 60-180 min) quedó como fallback con advertencia fuerte.
+
+**Herramientas nuevas:** `node start-flow.js --explain-resume` (solo lee
+state.json, imprime la decisión de interpretResume y sale — cero browser,
+cero red, corre ANTES del flush de galería a propósito) para inspeccionar
+un estado dudoso. `startNew()` limpia los intents (canción nueva = pizarra
+limpia; sin esto, un downloadedAt viejo de la canción anterior enmascaraba
+un create-clicked-no-download de la actual — bug atrapado en diseño, antes
+de escribir el código).
+
+**Preflight ampliado (idea de IDEAS.md, cableada):** `checkCdpPort`
+distingue "Chrome debug listo" / "puerto libre" / "ocupado por algo que NO
+responde como Chrome debug" (este último era el fallo confuso a mitad de
+flujo); `checkLanguageTool` avisa como warning si la Capa 2 va a degradar
+(antes se apagaba en silencio); y un preflight fallido ahora NOTIFICA por
+ntfy urgente (antes solo consola — en --loop desatendido reintentaba toda
+la noche sin que llegara ningún push). `runPreflight` pasó a ser async.

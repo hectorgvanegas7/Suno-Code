@@ -108,7 +108,7 @@ const fs = require('fs');
 const path = require('path');
 const { chromium } = require('playwright');
 const { isLoggedIn, clickByText, isPortUp, confirmToContinue, pauseForHumanInteraction } = require('./lib/playwright-helpers');
-const { enterFlowAndEnsureAssignment, FLOW_URL } = require('./lib/flow-helpers');
+const { enterFlowAndEnsureAssignment, FLOW_URL, shouldAutoSubmit } = require('./lib/flow-helpers');
 const { runPreflight, checkDiskSpace } = require('./lib/preflight');
 const { notify } = require('./lib/ntfy');
 const state = require('./lib/pipeline-state');
@@ -1038,6 +1038,63 @@ async function tryDriveScreenshot(localPngPath, sheetRow, tabName) {
   }
 }
 
+// ─── Resume tras un click de Submit sin cierre registrado ────────────────────
+// Una corrida anterior clickeó Submit (intent write-ahead en state.json) pero
+// murió antes de escribir COMPLETED. Verificar en el Flow qué pasó de verdad:
+//   - Si "Recent completions" ya muestra la canción → el Submit prendió: solo
+//     falta el cierre (runDone). Cero acciones sobre el formulario.
+//   - Si no aparece y el submit estaba CONFIRMADO (modal clickeado) → prendió
+//     casi seguro pero la card no está visible aún: cerrar con runDone(null)
+//     (mismo camino que el --done manual).
+//   - Ambiguo (solo clickedAt, sin confirmación de modal, card no visible) →
+//     avisar urgente y NO tocar nada: un humano decide. Jamás re-submit ciego.
+async function resumeAfterSubmitIntent(st, action, hb) {
+  hb.setStage('resume-verificar-submit', { maxMinutes: 10 });
+  console.log(`🔁 --resume: "${st.titulo}" tiene un click de Submit registrado sin cierre (${action}).`);
+  console.log('   Verificando en el Flow qué pasó de verdad — NUNCA se re-submitea a ciegas.\n');
+
+  if (!(await isPortUp(DEBUG_PORT))) {
+    console.log('⚠️ Chrome no está en el puerto de debug — no se puede verificar el estado del Submit.');
+    await notify(
+      `"${st.titulo}": una corrida anterior clickeó Submit pero el cierre nunca se registró, y Chrome no está abierto para verificar. NO se rehace nada automáticamente.\nVerificá en el Flow: si la canción ya no está asignada, cerrá con node start-flow.js --done; si sigue asignada, hacé el Submit a mano.`,
+      { title: `⚠️ Submit sin verificar — ${st.titulo}`, priority: 'urgent', tags: 'warning' }
+    ).catch(() => {});
+    return;
+  }
+
+  let completion = null;
+  const verifyDeadline = Date.now() + 60000;
+  while (!completion && Date.now() < verifyDeadline) {
+    try {
+      completion = await readRecentCompletion(st.titulo);
+    } catch {
+      // título aún no visible / DOM sin cargar — reintentar hasta el deadline
+    }
+    if (!completion) await new Promise((r) => setTimeout(r, 5000));
+  }
+
+  if (completion) {
+    console.log(`✅ Verificado: "${completion.title}" aparece en Recent completions — el Submit anterior prendió. Cerrando.`);
+    hb.setStage('cierre', { maxMinutes: 15 });
+    return await runDone(completion);
+  }
+
+  if (action === 'run-done-only') {
+    console.log('El Submit estaba CONFIRMADO (modal clickeado) pero la card no apareció en 60s — cerrando igual con el camino del --done manual.');
+    hb.setStage('cierre', { maxMinutes: 15 });
+    return await runDone(null);
+  }
+
+  console.log('⚠️ Ambiguo: hay un click de Submit registrado pero la canción no aparece en Recent completions.');
+  console.log('   NO se rehace nada automáticamente. Verificá el Flow a mano:');
+  console.log('   - Si la canción sigue asignada con el formulario lleno → el click no prendió: hacé Submit a mano.');
+  console.log('   - Si ya no está asignada → prendió: cerrá con node start-flow.js --done');
+  await notify(
+    `"${st.titulo}": una corrida anterior clickeó Submit pero no se pudo confirmar el resultado (no aparece en Recent completions). NO se rehace nada automáticamente.\n- Si sigue asignada en el Flow → Submit a mano.\n- Si ya no está asignada → node start-flow.js --done`,
+    { title: `⚠️ Submit ambiguo — ${st.titulo}`, priority: 'urgent', tags: 'warning' }
+  ).catch(() => {});
+}
+
 // ─── MODO normal: flujo completo ──────────────────────────────────────────────
 // Con resume=true retoma un pipeline cortado usando state.json: salta los pasos
 // cuya etapa ya quedó registrada. El caso ambiguo es un crash después de
@@ -1072,6 +1129,16 @@ async function runFlowInner({ resume = false } = {}, hb) {
       console.log('Para una canción nueva corré: node start-flow.js');
       return;
     } else {
+      // ── Intents write-ahead (2026-07-14): ANTES del resume clásico por
+      // etapa, chequear si una corrida anterior murió entre el click de
+      // Submit y el cierre. En ese caso el resume clásico re-llenaría el
+      // Flow, re-subiría el MP3 y RE-SUBMITEARÍA — doble Submit a QA, o
+      // peor: si el Flow ya asignó otra canción, llenaría la asignación
+      // nueva con los datos de la canción vieja. Jamás seguir de largo acá.
+      const resumeAction = state.interpretResume(st);
+      if (resumeAction === 'submit-pending-verify' || resumeAction === 'run-done-only') {
+        return await resumeAfterSubmitIntent(st, resumeAction, hb);
+      }
       resumeStage = st.stage;
       console.log(`🔁 --resume: retomando "${st.titulo}" (${st.songId}) desde la etapa "${resumeStage}".\n`);
     }
@@ -1081,8 +1148,15 @@ async function runFlowInner({ resume = false } = {}, hb) {
   console.log(`📝 Log de esta corrida: ${RUN_LOG_PATH}`);
   hb.setStage('preflight', { maxMinutes: 5 });
   console.log('=== Paso 0/4: preflight ===');
-  const pre = runPreflight();
+  const pre = await runPreflight();
   if (!pre.ok) {
+    // Antes esto solo quedaba en la consola: en --loop desatendido, un
+    // preflight roto (API key vencida, disco lleno, puerto CDP ocupado)
+    // reintentaba en silencio toda la noche sin que llegara ningún push.
+    await notify(
+      `🛑 Preflight falló:\n${pre.problems.map((p) => `• ${p}`).join('\n')}`,
+      { title: 'Preflight falló — pipeline detenido', priority: 'urgent', tags: 'no_entry' }
+    ).catch(() => {});
     throw new Error('Preflight falló. Resolvé lo de arriba y volvé a correr.');
   }
 
@@ -1243,23 +1317,38 @@ async function runFlowInner({ resume = false } = {}, hb) {
     // de 8 min — techo generoso; una pausa humana (20 min) también entra.
     hb.setStage('create-descarga', { maxMinutes: 45 });
 
-    // Reintentos si la descarga falla POR COMPLETO (0 archivos — createAndDownload
-    // lanza). Bug real (2026-07-04, ver LESSONS.md): si este primer intento
-    // fallaba del todo, `mp3sDescargados` quedaba en false para TODA la corrida
-    // — eso saltaba ENTERO el Paso 5 (subida automática): el pipeline solo
-    // logueaba el error y seguía sin subir nada, dejando lo que hubiera antes
-    // en el Flow (en un REDO, la versión vieja ya rechazada por QC) hasta que
-    // Gabo lo notara y subiera a mano.
-    const MAX_CREATE_RETRIES = 2;
+    // Reintentos si la descarga falla POR COMPLETO (0 archivos). Bug real
+    // (2026-07-04, ver LESSONS.md): si el primer intento fallaba del todo,
+    // `mp3sDescargados` quedaba en false para TODA la corrida y el Paso 5 se
+    // salteaba entero, dejando en el Flow lo que hubiera antes (en un REDO,
+    // la versión vieja rechazada).
+    //
+    // REDISEÑO 2026-07-14 (regla firme de Hector: NUNCA re-clickear Create
+    // automáticamente — gasta créditos reales): la versión anterior de este
+    // loop re-clickeaba Create hasta 2 veces si la descarga fallaba. Ahora la
+    // decisión vive en decideCreateRetry (pura, testeada) sobre el intent
+    // write-ahead de state.json: si `clickedAt` quedó registrado, los créditos
+    // YA se gastaron y solo se reintenta la DESCARGA (downloadOnly, que busca
+    // las cards ya generadas en la UI de Suno); re-Create automático solo si
+    // el fallo fue demostrablemente ANTES del click (clickedAt ausente).
+    const MAX_CREATE_ATTEMPTS = 3;
     let createAttempt = 0;
     let createSucceeded = false;
     let dlVersionA = null;
     let dlVersionB = null;
-    while (createAttempt <= MAX_CREATE_RETRIES && !createSucceeded) {
+    const { createAndDownload, downloadOnly, decideCreateRetry } = require('./lib/suno-create-dl');
+    while (!createSucceeded) {
       createAttempt++;
       try {
-        const { createAndDownload } = require('./lib/suno-create-dl');
-        const { versionA, versionB } = await createAndDownload();
+        const preSt = state.read();
+        const preIntent = preSt?.intents?.create;
+        const alreadyClicked = !!(preIntent && preIntent.songId === preSt?.songId && preIntent.clickedAt);
+        if (alreadyClicked && createAttempt > 1) {
+          console.log('\n  🔁 Create ya se clickeó en un intento anterior (intent en state.json) — solo se reintenta la DESCARGA, sin gastar créditos de nuevo.');
+        }
+        const { versionA, versionB } = alreadyClicked
+          ? await downloadOnly({ titulo: preSt?.titulo })
+          : await createAndDownload();
         dlVersionA = versionA;
         dlVersionB = versionB;
         mp3sDescargados = true;
@@ -1281,24 +1370,42 @@ async function runFlowInner({ resume = false } = {}, hb) {
           console.log('\n  (--no-auto-verify: saltando el análisis automático — corré node verify-audio.js a mano)');
         }
       } catch (e) {
-        const tituloActual = state.read()?.titulo || '(sin título)';
-        if (createAttempt <= MAX_CREATE_RETRIES) {
-          console.log(`\n  ⚠️ Create/descarga falló por completo (intento ${createAttempt}/${MAX_CREATE_RETRIES + 1}): ${e.message}`);
-          console.log('  Reintentando — re-clickeando Create sobre el mismo formulario (gasta créditos de nuevo)...');
+        const postSt = state.read();
+        const tituloActual = postSt?.titulo || '(sin título)';
+        const postIntent = postSt?.intents?.create;
+        const clickedAt = (postIntent && postIntent.songId === postSt?.songId) ? postIntent.clickedAt : null;
+        const decision = decideCreateRetry({ clickedAt, attempt: createAttempt, maxAttempts: MAX_CREATE_ATTEMPTS });
+
+        if (decision === 'retry-create') {
+          console.log(`\n  ⚠️ Create falló ANTES del click (intento ${createAttempt}/${MAX_CREATE_ATTEMPTS}): ${e.message}`);
+          console.log('  Reintentando Create — seguro: el click nunca prendió, no se gastaron créditos.');
           await notify(
-            `⚠️ Create/descarga falló en "${tituloActual}" (intento ${createAttempt}). Reintentando automáticamente...`,
-            { title: 'Reintento de Create', priority: 'default', tags: 'arrows_counterclockwise' }
+            `⚠️ Create falló antes del click en "${tituloActual}" (intento ${createAttempt}). Reintentando (sin créditos gastados)...`,
+            { title: 'Reintento de Create (pre-click)', priority: 'default', tags: 'arrows_counterclockwise' }
           ).catch(() => {});
-        } else {
-          console.log(`\n  ⚠️ Create/descarga automático falló ${createAttempt} veces seguidas: ${e.message}`);
-          console.log('  Continuando con el resto del pipeline SIN subir nada automáticamente. Create manual disponible con:');
-          console.log('    node suno-create.js   (clickea Create)');
-          console.log('    node verify-audio.js  (analiza después de descargar)');
-          console.log('    node upload-to-flow.js --version A|B   (subida manual)');
+        } else if (decision === 'retry-download-only') {
+          console.log(`\n  ⚠️ La descarga falló (intento ${createAttempt}/${MAX_CREATE_ATTEMPTS}): ${e.message}`);
+          console.log('  Reintentando SOLO la descarga (downloadOnly) — Create ya se clickeó, jamás se re-clickea.');
           await notify(
-            `🛑 Create/descarga falló ${createAttempt} veces seguidas en "${tituloActual}" — necesita intervención manual (node suno-create.js + upload-to-flow.js). No se subió nada automáticamente.`,
+            `⚠️ Descarga falló en "${tituloActual}" (intento ${createAttempt}). Reintentando solo la descarga — sin re-Create.`,
+            { title: 'Reintento de descarga', priority: 'default', tags: 'arrows_counterclockwise' }
+          ).catch(() => {});
+        } else { // 'give-up'
+          console.log(`\n  ⚠️ Create/descarga automático falló ${createAttempt} veces seguidas: ${e.message}`);
+          console.log('  Continuando con el resto del pipeline SIN subir nada automáticamente. Pasos manuales:');
+          if (clickedAt) {
+            console.log('    (Create YA se clickeó — las versiones pueden estar generadas en suno.com/create)');
+            console.log('    Descargá los 2 MP3 a Downloads/suno/ y corré: node upload-to-flow.js --version A|B');
+          } else {
+            console.log('    node suno-create.js   (clickea Create)');
+            console.log('    node verify-audio.js  (analiza después de descargar)');
+            console.log('    node upload-to-flow.js --version A|B   (subida manual)');
+          }
+          await notify(
+            `🛑 Create/descarga falló ${createAttempt} veces seguidas en "${tituloActual}" — necesita intervención manual${clickedAt ? ' (OJO: Create YA se clickeó, los créditos están gastados — descargá de suno.com, NO vuelvas a crear)' : ' (node suno-create.js + upload-to-flow.js)'}. No se subió nada automáticamente.`,
             { title: 'Create/descarga falló — acción manual necesaria', priority: 'urgent', tags: 'warning' }
           ).catch(() => {});
+          break;
         }
       }
     }
@@ -1475,10 +1582,26 @@ async function runFlowInner({ resume = false } = {}, hb) {
     try {
       await runScript(`upload-to-flow.js --version ${versionToUpload}`);
       state.write({ stage: state.STAGES.FLOW_FILLED });
-      uploadConfirmed = true;
-      console.log(`\n✅ Versión ${versionToUpload} subida al Flow exitosamente.`);
+      // Confirmación REAL (auditoría 2026-07-14): ya no alcanza con que el
+      // script no haya lanzado — upload-to-flow.js registra
+      // intents.upload.verifiedAt SOLO tras ver el archivo en el DOM del
+      // Flow. Sin ese intent (o con songId de otra canción), el auto-Submit
+      // queda bloqueado por el gate de siempre.
+      const stAfterUpload = state.read();
+      const upIntent = stAfterUpload?.intents?.upload;
+      uploadConfirmed = !!(upIntent && upIntent.songId === stAfterUpload?.songId && upIntent.verifiedAt);
+      if (uploadConfirmed) {
+        console.log(`\n✅ Versión ${versionToUpload} subida al Flow y VERIFICADA en el DOM.`);
+      } else {
+        console.log(`\n⚠️ upload-to-flow.js terminó sin lanzar, pero la subida NO quedó verificada en el DOM del Flow.`);
+        console.log('   El auto-Submit queda bloqueado — verificá a mano y subí de nuevo si hace falta.');
+        await notify(
+          `⚠️ La Versión ${versionToUpload} no quedó VERIFICADA en el Flow (el script terminó pero el archivo no se vio en el DOM). Auto-Submit bloqueado. Reintento manual: node upload-to-flow.js --version ${versionToUpload}`,
+          { title: 'Upload sin verificar — auto-Submit bloqueado', priority: 'high', tags: 'warning' }
+        ).catch(() => {});
+      }
       const otra = versionToUpload === 'B' ? 'A' : 'B';
-      if (hayVersionB) {
+      if (uploadConfirmed && hayVersionB) {
         console.log(`   (Si preferís la otra: node upload-to-flow.js --version ${otra} — pisa la subida en el Flow.)`);
       }
     } catch (e) {
@@ -1808,12 +1931,29 @@ async function runFlowInner({ resume = false } = {}, hb) {
         const currentState = state.read();
         const redoTag = currentState?.isRedo ? ' [REDO]' : '';
 
-        // GATE de upload (auditoría 2026-07-09): sin un MP3 nuevo confirmado
-        // en esta corrida, NO se submitea — en un REDO el Flow todavía tiene
-        // la versión vieja rechazada por QC, y submitearla de nuevo es un
-        // redo sin cobrar. Se avisa urgente y se sigue esperando un Submit
-        // MANUAL (el loop de detección continúa normal).
-        if (!uploadConfirmed) {
+        // Decisión centralizada en shouldAutoSubmit (lib/flow-helpers.js, pura
+        // y testeada): gate de upload (auditoría 2026-07-09) + gate de doble
+        // Submit (intents write-ahead, 2026-07-14 — si una corrida anterior ya
+        // clickeó Submit y murió antes del cierre, repetirlo sería un doble
+        // Submit a QA).
+        const submitDecision = shouldAutoSubmit({
+          elapsedMin,
+          autoSubmitMinutes,
+          uploadConfirmed,
+          submitIntent: currentState?.intents?.submit,
+          songId: currentState?.songId,
+        });
+
+        if (submitDecision.reason === 'submit-already-clicked') {
+          notifiedDanger = true;
+          console.log(`\n🛑 [Auto-Submit${redoTag}] BLOQUEADO: un intent de Submit de esta canción ya registra un click (${currentState?.intents?.submit?.clickedAt}). NO se repite — sería un doble Submit a QA.`);
+          console.log('   Si el Submit anterior no prendió, hacelo a mano en el Flow (la detección del cierre sigue activa).');
+          logAutoSubmitEvent({ event: 'blocked-submit-intent', elapsedMin, autoSubmitMinutes, titulo: currentTitulo, isRedo: !!currentState?.isRedo });
+          await notify(
+            `El timer llegó (min ${elapsedMin.toFixed(1)}) pero ya hay un click de Submit registrado para "${currentTitulo}" (corrida anterior cortada a mitad). NO se repite el Submit automáticamente.\n\nVerificá en el Flow: si la canción ya no está asignada, el Submit anterior prendió (cerrá con node start-flow.js --done si no se detecta solo); si sigue asignada, hacé el Submit a mano.`,
+            { title: `🛑 Auto-Submit bloqueado (posible doble Submit) — ${currentTitulo}`, priority: 'urgent', tags: 'no_entry' }
+          ).catch(() => {});
+        } else if (submitDecision.reason === 'no-upload') {
           notifiedDanger = true; // el aviso genérico de "+2 min" sobraría — este es más preciso
           console.log(`\n🛑 [Auto-Submit${redoTag}] BLOQUEADO: no hay un MP3 subido/confirmado en esta corrida. NO se envía a QA.`);
           console.log('   Subí a mano: node upload-to-flow.js --version A|B  → después hacé Submit manual (la detección sigue activa).');
@@ -1827,6 +1967,14 @@ async function runFlowInner({ resume = false } = {}, hb) {
           logAutoSubmitEvent({ event: 'attempt', elapsedMin, autoSubmitMinutes, titulo: currentTitulo, isRedo: !!currentState?.isRedo });
           try {
             const submitBtn = workPage.locator('button:has-text("Complete Song"), button:has-text("Submit to QA")').first();
+            // Write-ahead intent (2026-07-14): registrar ANTES del click. Si el
+            // proceso muere entre el click y la escritura de COMPLETED, un
+            // --resume ve el intent y JAMÁS re-submitea a ciegas (verifica en
+            // el Flow primero — ver interpretResume en lib/pipeline-state.js).
+            state.recordIntent('submit', {
+              songId: currentState?.songId || null,
+              clickedAt: new Date().toISOString(),
+            });
             await submitBtn.click({ timeout: 5000 });
             console.log(`  ✅ Clickeado "Submit to QA" / "Complete Song" inicial.`);
 
@@ -1837,6 +1985,7 @@ async function runFlowInner({ resume = false } = {}, hb) {
               await confirmBtn.waitFor({ state: 'visible', timeout: 6000 });
               await confirmBtn.click({ timeout: 5000 });
               console.log(`  ✅ Clickeado botón de confirmación modal "Yes, Complete Song" exitosamente.`);
+              state.recordIntent('submit', { confirmedAt: new Date().toISOString() });
               logAutoSubmitEvent({ event: 'confirmed', elapsedMin, autoSubmitMinutes, titulo: currentTitulo, isRedo: !!currentState?.isRedo });
               await notify(
                 `Submit to QA enviado en el minuto ${elapsedMin.toFixed(1)}${redoTag}. El cierre (Sheets + Drive + screenshot) sigue solo — te aviso cuando quede registrada.`,
@@ -2006,7 +2155,7 @@ async function runDryRun() {
 
   console.log('=== Paso 0/4: preflight (informativo — en dry-run no aborta) ===');
   try {
-    runPreflight();
+    await runPreflight();
   } catch (e) {
     console.log(`  (preflight lanzó "${e.message}" — se ignora en dry-run)`);
   }
@@ -2152,9 +2301,39 @@ async function runPoll(rawArgs) {
   }
 }
 
+// ─── --explain-resume: qué haría un --resume, sin tocar nada ─────────────────
+// Solo lee state.json — para probar los escenarios de intents editando
+// state.json a mano (auditoría de idempotencia 2026-07-14).
+function explainResume() {
+  const st = state.read();
+  if (!st) {
+    console.log('state.json no existe o es inválido → un --resume arrancaría desde cero.');
+    return;
+  }
+  const action = state.interpretResume(st);
+  console.log(`Canción: "${st.titulo}" (${st.songId}) — etapa: ${st.stage}${st.isRedo ? ' [REDO]' : ''}`);
+  console.log(`Intents: ${JSON.stringify(st.intents || {}, null, 2)}`);
+  console.log(`\nDecisión de interpretResume: ${action}`);
+  const explain = {
+    'create-clicked-no-download': 'Create se clickeó (créditos gastados) sin descarga confirmada → un --resume busca los MP3 (disco/Suno) y JAMÁS re-clickea Create.',
+    'submit-pending-verify': 'Submit se clickeó sin cierre registrado → un --resume verifica en el Flow y JAMÁS re-llena/re-sube/re-submitea a ciegas.',
+    'run-done-only': 'Submit confirmado (modal clickeado) sin cierre → un --resume solo corre el cierre (runDone).',
+    'resume-safe': `Sin intents pendientes → resume clásico por etapa ("${st.stage}").`,
+  };
+  console.log(explain[action]);
+}
+
 // ─── Entrada ──────────────────────────────────────────────────────────────────
 (async () => {
   const rawArgs = process.argv.slice(2);
+
+  // ── --explain-resume: solo lee state.json, explica qué haría un --resume y
+  // sale. ANTES de cualquier side-effect (el flush de galería postea de
+  // verdad) — este flag promete cero red, cero browser, cero escritura.
+  if (rawArgs.includes('--explain-resume')) {
+    explainResume();
+    process.exit(0);
+  }
 
   // 1. Flush de imágenes pendientes a la galería antes de cualquier otra cosa.
   // NUNCA en --dry-run: el ensayo promete "cero red/side-effects" y este flush

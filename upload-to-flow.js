@@ -80,18 +80,47 @@ function parseArgs(argv) {
       exitAfterDelay(1);
     }
     console.log(`\n🔍 Buscando Versión ${cliArgs.version} para: "${titulo}"`);
-    try {
-      const { versionA, versionB } = findSunoMp3s(titulo, { recencyMinutes: cliArgs.minutes || 60 });
-      const chosen = cliArgs.version === 'A' ? versionA : versionB;
-      if (!chosen) {
-        console.error(`❌ No se encontró Versión ${cliArgs.version}. Usá --file directamente.`);
+
+    // Fuente PRIMARIA (auditoría 2026-07-14): el registro exacto que
+    // suno-create-dl.js dejó en state.json al descargar (path + sha256).
+    // Sube el archivo EXACTO de esta canción — la búsqueda legacy por
+    // título+recencia (fallback de abajo) puede agarrar un MP3 viejo o de
+    // otra canción con título parecido dentro de la ventana temporal.
+    const stForDownloads = state.read();
+    const rec = (stForDownloads && stForDownloads.titulo === titulo)
+      ? stForDownloads.downloads?.[cliArgs.version]
+      : null;
+    if (rec && rec.path && fs.existsSync(rec.path)) {
+      let shaOk = true;
+      if (rec.sha256) {
+        const crypto = require('crypto');
+        const actual = crypto.createHash('sha256').update(fs.readFileSync(rec.path)).digest('hex').slice(0, 16);
+        shaOk = actual === rec.sha256;
+        if (!shaOk) {
+          console.warn(`  ⚠️ El archivo registrado en state.json cambió desde la descarga (sha ${rec.sha256} → ${actual}). Se ignora el registro y se cae a la búsqueda por título.`);
+        }
+      }
+      if (shaOk) {
+        mp3Path = rec.path;
+        console.log(`   Archivo (registro exacto de state.json): ${mp3Path}`);
+      }
+    }
+
+    if (!mp3Path) {
+      try {
+        console.warn('  ⚠️ Sin registro exacto en state.json — cayendo a la búsqueda legacy por título+recencia (menos confiable: puede agarrar un MP3 viejo o de otra canción con título parecido).');
+        const { versionA, versionB } = findSunoMp3s(titulo, { recencyMinutes: cliArgs.minutes || 60 });
+        const chosen = cliArgs.version === 'A' ? versionA : versionB;
+        if (!chosen) {
+          console.error(`❌ No se encontró Versión ${cliArgs.version}. Usá --file directamente.`);
+          exitAfterDelay(1);
+        }
+        mp3Path = chosen.path;
+        console.log(`   Archivo: ${mp3Path}`);
+      } catch (e) {
+        console.error(`❌ ${e.message}`);
         exitAfterDelay(1);
       }
-      mp3Path = chosen.path;
-      console.log(`   Archivo: ${mp3Path}`);
-    } catch (e) {
-      console.error(`❌ ${e.message}`);
-      exitAfterDelay(1);
     }
   } else {
     console.error('❌ Usá --version A|B o --file "ruta.mp3"');
@@ -297,18 +326,50 @@ function parseArgs(argv) {
 
   await page.screenshot({ path: 'flow-upload-verify.png', fullPage: true });
 
+  // Registra el intent de upload VERIFICADO en state.json — desde la auditoría
+  // 2026-07-14, start-flow.js ya no infiere "subida confirmada" del exit code
+  // de este script (un ENTER humano en una pausa sin subir nada daba exit 0 y
+  // contaba como confirmado): exige intents.upload.verifiedAt con el songId
+  // correcto. Este es el ÚNICO lugar que lo escribe, y solo tras ver el
+  // archivo en el DOM del Flow.
+  const recordVerifiedUpload = () => {
+    try {
+      const crypto = require('crypto');
+      const sha = crypto.createHash('sha256').update(fs.readFileSync(mp3Path)).digest('hex').slice(0, 16);
+      state.recordIntent('upload', {
+        songId: state.read()?.songId || null,
+        version: cliArgs.version || null,
+        path: mp3Path,
+        sha256: sha,
+        verifiedAt: new Date().toISOString(),
+      });
+    } catch (e) {
+      console.warn(`  ⚠️ No se pudo registrar el intent de upload: ${e.message}`);
+    }
+  };
+
   if (uploadConfirmed) {
     console.log('  ✅ Archivo visible en la UI del Flow.');
+    recordVerifiedUpload();
   } else {
-    // No es solo un warning cosmético: si seguimos de largo acá, el proceso
-    // termina con exit 0 y start-flow.js marca `uploadConfirmed = true` SOLO
-    // porque el script no lanzó excepción — sin que nadie haya verificado que
-    // el archivo realmente llegó al Flow. Mismo fallback que un error real de
+    // No es solo un warning cosmético: si seguimos de largo acá sin verificar,
+    // el auto-Submit podría mandar a QA una subida que nunca llegó (en un
+    // REDO, la versión vieja rechazada). Mismo fallback que un error real de
     // subida (pauseForHumanInteraction): pausa, avisa, y en --loop se
     // abandona la canción por timeout en vez de auto-submitear una subida sin
     // confirmar (ver LESSONS.md, 2026-07-10).
     console.log('  ⚠️  No se pudo confirmar que el archivo quedó en la UI tras 12s de poll (revisá flow-upload-verify.png).');
     await pauseForHumanInteraction('No se pudo confirmar que el MP3 quedó visible en el Flow tras subirlo. Revisá flow-upload-verify.png y confirmá a mano que el archivo correcto está cargado antes de continuar.');
+    // Tras el ENTER humano, re-verificar en el DOM: solo si AHORA se ve el
+    // archivo se registra la verificación — un ENTER "para destrabar" sin
+    // haber subido nada ya no habilita el auto-Submit.
+    uploadConfirmed = await checkUploadInDom();
+    if (uploadConfirmed) {
+      console.log('  ✅ Verificado tras la confirmación manual: el archivo está en el Flow.');
+      recordVerifiedUpload();
+    } else {
+      console.log('  🛑 Sigue sin verse el archivo en el Flow — NO se registra la subida como verificada (el auto-Submit va a quedar bloqueado).');
+    }
   }
 
   // ══════════════════════════════════════════════════════════════════════════
