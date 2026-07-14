@@ -2532,3 +2532,49 @@ obligatorios en `format` = más superficie para que el modelo se desvíe;
 `parseGuardiaResponse`/`parseAudioGuardiaResponse` ya degradan con gracia si
 así fuera, pero conviene revisar el primer `guardia-feedback.jsonl` real tras
 este cambio).
+
+## Antigravity reemplazó LanguageTool por Ollama y se revirtió — ya existía un mandato explícito de "que eso NUNCA FALLE" (2026-07-13)
+
+Antigravity propuso y llegó a commitear (`cc1a46c`) borrar `lib/languagetool-check.js`
+por completo y reemplazar la Capa 2 de QA ortográfico/gramatical por un prompt
+a Ollama (`lib/ollama-corrector.js`), motivado por el bug real de "Jenner"
+(ver entrada de arriba). Problema: ese bug de "Jenner" ya se había arreglado
+ESE MISMO DÍA con un fix chico y determinístico (`extractSurveyProperNouns`
+sumado a `excludeWords` en `runGrammarGate`) — la motivación citada para el
+reemplazo ya no existía. El cambio se hizo sin revisar esta misma sección de
+LESSONS.md, que documenta por qué LanguageTool se agregó en primer lugar
+(2026-07-11, "Fogata en la Arena": Hector escaló "que eso NUNCA FALLE" y puso
+en riesgo su posición en la empresa por este tipo de error — no es un
+requisito cualquiera).
+
+**Por qué el reemplazo era riesgoso, más allá de la motivación ya resuelta:**
+1. `optimizeLyricsPhonetics` no tenía NINGÚN chequeo de que Ollama solo tocara
+   tildes/eñes/puntuación — solo corría `hardValidate` (estructural), que es
+   exactamente el chequeo que NO detectó "Jenner"→"tener" la primera vez
+   (grammaticalmente válido, solo factualmente incorrecto). Mismo hueco,
+   tecnología distinta.
+2. `test/ollama-corrector.test.js` no era un test real: sin `describe`/`it`,
+   llamaba a Ollama en vivo sin mock. Corrido bajo `node --test` (el mismo
+   comando de `npm test`) colgaba ~95s y FALLABA. La suite completa nunca
+   pasó en verde con este cambio adentro — el "253 pasados, 0 fallos"
+   reportado era de una corrida anterior a que este archivo existiera.
+3. El borrado de `lib/languagetool-check.js` ni siquiera quedó commiteado
+   (quedó como `D` sin commit en el working tree) pese a que el mensaje del
+   commit decía "se elimina languagetool-check.js".
+
+**Fix real:** revertido por completo. `run.js` vuelve a usar `runGrammarGate`
+(LanguageTool) como Capa 2, byte-idéntico a la versión previa a `cc1a46c`
+(confirmado con `git diff <commit-anterior> -- run.js` vacío). `lib/ollama-corrector.js`
+se conserva como módulo opcional NO wireado en el pipeline, con un guardarraíl
+nuevo (`onlyAccentsChanged`) que compara palabra por palabra ignorando
+tildes/mayúsculas y RECHAZA cualquier corrección de Ollama que cambie una
+palabra real — mismo patrón que ya usa `applyDeterministicAccentFixes` para
+no autocorregir homógrafos ambiguros a ciegas. Su test se reescribió 100%
+offline (`fetchImpl` inyectable, mismo patrón que `ollama-guardia.test.js`),
+incluyendo el caso exacto "Jenner"→"tener" como regresión.
+
+**Takeaway para cualquier agente (Claude Code, Antigravity, el que sea):**
+antes de proponer reemplazar una pieza de infraestructura que existe por una
+razón histórica, buscar esa razón en LESSONS.md primero — "esto es frágil"
+no es motivo suficiente si la fragilidad específica que motivó el cambio ya
+se resolvió con un fix más chico y focalizado en otro lado.

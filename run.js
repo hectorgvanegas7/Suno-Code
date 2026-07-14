@@ -32,7 +32,7 @@ const { getSurveyHash, readCache, writeCache } = require('./lib/cache-helpers');
 const { hardValidate, validateContentForWrite, extractField, convertJsonToMarkdown, isSafeToPatch, applyDeterministicLineFixes } = require('./lib/song-validate');
 const { patchSongLines } = require('./lib/song-corrector');
 const { extractFirstNames, extractLyricNameVariants, extractSurveyProperNouns } = require('./lib/text-helpers');
-
+const { checkGrammarAndSpelling } = require('./lib/languagetool-check');
 const { validarGuardia, formatGuardiaProblem, DEFAULT_MODEL: GUARDIA_DEFAULT_MODEL } = require('./lib/ollama-guardia');
 
 const args = process.argv.slice(2);
@@ -515,25 +515,68 @@ const MAX_TOKENS_CEILING = 16000; // por encima de esto conviene streaming, que 
 // NUNCA FALLE", ver LESSONS.md). Nunca falla en silencio: si LanguageTool
 // no responde, la canción NO se asume limpia — se marca para revisión
 // manual en vez de mandarla igual.
-async function runPhoneticGate(parsedJson, surveyContent) {
-  const { optimizeLyricsPhonetics } = require('./lib/ollama-corrector');
-  
-  console.log('\n🎙️ Pasando letra por el Corrector Fonético (Ollama) para optimización TTS...');
-  const result = await optimizeLyricsPhonetics(parsedJson, surveyContent, { keepAlive: '5m' });
+const MAX_GRAMMAR_PATCH_ROUNDS = 2;
 
-  if (!result.ok) {
-    console.warn(`\n⚠️ Corrector Fonético no disponible o falló (${result.error}) — se entrega con advertencia de revisión manual.`);
-    return {
-      clean: false,
-      unavailable: true,
-      parsedJson,
-      failures: [`Corrector Fonético falló (${result.error}) — revisar ortografía/tildes a mano antes de mandar a Suno`],
-    };
+async function runGrammarGate(parsedJson, surveyContent) {
+  const firstNames = extractFirstNames(surveyContent);
+  const lyricsText = Object.values(parsedJson.letras || {}).flat().join('\n');
+  const phoneticVariants = Object.values(extractLyricNameVariants(lyricsText, firstNames));
+  let dictVariants = [];
+  try {
+    const dictPath = path.join(__dirname, 'lib', 'name-dictionary.json');
+    if (fs.existsSync(dictPath)) {
+      dictVariants = Object.values(JSON.parse(fs.readFileSync(dictPath, 'utf-8')));
+    }
+  } catch (e) {
+    // Best-effort — si no se puede leer, el filtro de exclusión queda más
+    // corto pero el gate igual corre (no bloquea la entrega por esto).
   }
+  const surveyProperNouns = extractSurveyProperNouns(surveyContent);
+  const excludeWords = [...firstNames, ...phoneticVariants, ...dictVariants, ...surveyProperNouns];
 
-  // Si pasamos acá, Ollama devolvió el JSON (o no cambió nada) y pasó el hardValidate interno
-  console.log('✅ Corrector Fonético completado.');
-  return { clean: true, parsedJson: result.parsedJson, fullResponse: JSON.stringify(result.parsedJson) };
+  let currentJson = parsedJson;
+  for (let round = 0; round <= MAX_GRAMMAR_PATCH_ROUNDS; round++) {
+    const result = await checkGrammarAndSpelling(currentJson.letras, { excludeWords });
+
+    if (!result.ok) {
+      console.warn(`\n⚠️ LanguageTool no disponible (${result.error}) — se entrega con advertencia de revisión manual en vez de asumir que la letra está limpia.`);
+      return {
+        clean: false,
+        unavailable: true,
+        parsedJson: currentJson,
+        failures: [`LanguageTool no disponible (${result.error}) — revisar ortografía/gramática a mano antes de mandar a Suno`],
+      };
+    }
+
+    if (result.issues.length === 0) {
+      console.log(round === 0 ? '✅ LanguageTool: sin errores de ortografía/gramática.' : `✅ LanguageTool: limpio tras ${round} ronda(s) de corrección.`);
+      return { clean: true, parsedJson: currentJson, fullResponse: JSON.stringify(currentJson) };
+    }
+
+    console.log(`\n📝 LanguageTool encontró ${result.issues.length} error(es) de ortografía/gramática:`);
+    result.issues.forEach((i) => console.log(`  • [${i.section}] línea ${i.lineIndex + 1}: ${i.detail}`));
+
+    if (round === MAX_GRAMMAR_PATCH_ROUNDS) {
+      return {
+        clean: false,
+        parsedJson: currentJson,
+        failures: result.issues.map((i) => `LanguageTool: [${i.section}] línea ${i.lineIndex + 1}: ${i.detail}`),
+      };
+    }
+
+    try {
+      const patchedJson = await patchSongLines(currentJson, result.issues);
+      const revalidated = hardValidate(JSON.stringify(patchedJson), surveyContent);
+      if (!revalidated.valid) {
+        console.log(`⚠️ El parche de LanguageTool rompió una regla estructural (${revalidated.failures.join(' | ')}) — se detiene el gate, sigue el flujo normal.`);
+        return { clean: false, parsedJson: patchedJson, failures: revalidated.failures };
+      }
+      currentJson = revalidated.parsedJson;
+    } catch (e) {
+      console.log(`⚠️ Corrector barato falló parcheando errores de LanguageTool (${e.message}) — se entrega con advertencia de revisión manual.`);
+      return { clean: false, parsedJson: currentJson, failures: result.issues.map((i) => `LanguageTool: [${i.section}] línea ${i.lineIndex + 1}: ${i.detail}`) };
+    }
+  }
 }
 
 async function generateSongWithSelfCorrection(surveyContent, baseUserMessageOverride) {
@@ -601,7 +644,7 @@ async function generateSongWithSelfCorrection(surveyContent, baseUserMessageOver
     if (valid) {
       console.log('✅ Validación estructural + QA: todos los ítems pasaron.');
 
-      const grammarResult = await runPhoneticGate(parsedJson, surveyContent);
+      const grammarResult = await runGrammarGate(parsedJson, surveyContent);
       if (grammarResult.clean) {
         return { fullResponse: grammarResult.fullResponse, parsedJson: grammarResult.parsedJson, passedQA: true };
       }
@@ -654,9 +697,8 @@ async function generateSongWithSelfCorrection(surveyContent, baseUserMessageOver
           console.log('✅ Parche barato resolvió todos los fallos — se evitó un regen completo con el modelo caro.');
           // Mismo gate gramatical que el camino valid normal — antes el
           // parche exitoso se salteaba LanguageTool por completo, una vara
-          ({ valid, failures, parsedJson, patchableIssues } = revalidated);
-          
-          const patchedGrammar = await runPhoneticGate(revalidated.parsedJson, surveyContent);
+          // distinta para la misma letra (auditoría 2026-07-13).
+          const patchedGrammar = await runGrammarGate(revalidated.parsedJson, surveyContent);
           if (patchedGrammar.clean) {
             return { fullResponse: patchedGrammar.fullResponse, parsedJson: patchedGrammar.parsedJson, passedQA: true };
           }
