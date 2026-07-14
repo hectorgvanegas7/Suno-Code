@@ -1,0 +1,5 @@
+{
+  "descripcion": "Caso real 2026-07-14: la letra regenerada correcta del mismo pedido — preserva los dos capítulos de vida, sin lugares inventados. Debe pasar TODO limpio (cero falsos positivos).",
+  "letraEsBuena": true,
+  "hechosInventadosEsperados": []
+}

@@ -2692,3 +2692,35 @@ en letras buenas (sin falsos positivos), `hechosSinRespaldo` puede pasar a
 disparar el MISMO regen automático que el chequeo N — cero pausas nuevas.
 La lección general: **cuando un LLM falla juzgando, no le pidas mejor
 juicio — pedile datos y juzgá en código.**
+
+## think:true tampoco arregla el juicio de fidelidad + nace el banco dorado, que atrapó su primer falso positivo el mismo día (2026-07-14, cierre del caso "Miami")
+
+Dos cierres del mismo día:
+
+**1. La pregunta abierta de `think: false` quedó respondida.** El comentario
+de lib/ollama-guardia.js decía "verificar efecto en vivo". Se corrió el
+juicio de fidelidad con `think: true` (razonamiento completo de qwen3:14b,
+145s) sobre la letra mala de "Miami", mismo prompt endurecido: **fidelidad=10,
+aprobada=true, confianza=10**, y el veredicto hasta afirmó "sin inventar ni
+alterar la cronología". El razonamiento visible muestra al modelo comparando
+TEMAS (¿Cuba está? ¿el 13 de mayo está?) en vez de verificar afirmaciones.
+Conclusión definitiva: no era la config ni el prompt — JUZGAR fidelidad está
+fuera del alcance de este modelo. No gastar más esfuerzo en prompts de
+juicio; la arquitectura correcta es extraer + juzgar en código (entrada
+anterior).
+
+**2. `guardia-benchmark.js` + `golden/`** — el testeo manual contra letras
+reales que se hizo dos veces a mano hoy, convertido en herramienta: cada
+incidente real agrega una carpeta a `golden/` (song.txt + survey.txt +
+expect.json) y cualquier cambio de prompt/modelo se mide con
+`node guardia-benchmark.js` (costo cero — todo Ollama local). En su PRIMERA
+corrida completa ya pagó: atrapó que la extracción marcaba "la casa" como
+hecho sin respaldo en la letra BUENA (la encuesta decía "hogar") — falso
+positivo que dos verificaciones manuales previas no habían visto (varianza
+de sampleo de qwen3). Fix calibrado: hechos en minúscula solo se marcan si
+contienen un dato temporal/numérico sin respaldo; sustantivos comunes son
+escenografía poética que la regla 2 permite. Tras el fix, banco completo en
+verde con precisión mejor que antes (la letra mala marca exactamente
+"Miami", sin ruido). La lección: **la propiedad "cero falsos positivos en
+letras buenas" — la que decide si una señal puede graduarse a gate — solo se
+puede afirmar con un banco de casos reales, nunca con 1-2 corridas manuales.**

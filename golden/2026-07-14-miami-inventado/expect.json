@@ -1,0 +1,5 @@
+{
+  "descripcion": "Caso real 2026-07-14: la letra inventa 'Miami' (la encuesta solo dice Cuba/Estados Unidos) y aplana la línea de tiempo. El Guardia dio fidelidad=10 dos veces.",
+  "letraEsBuena": false,
+  "hechosInventadosEsperados": ["Miami"]
+}

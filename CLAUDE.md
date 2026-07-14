@@ -317,6 +317,22 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
   casos sin falsos positivos sobre letras buenas, puede pasar a disparar
   regen automático (camino al 100% auto — complementa el chequeo N
   determinístico, que solo ve tokens Capitalizados mid-línea).
+  Regla de comparación calibrada con el banco dorado (2026-07-14): tokens
+  Capitalizados sin respaldo → flag; hechos en minúscula solo si contienen
+  un dato TEMPORAL/NUMÉRICO sin respaldo (mes/día/número en palabras) —
+  sustantivos comunes ("la casa", "la isla") son escenografía poética
+  permitida por la regla 2 y NUNCA se marcan (falso positivo real atrapado
+  por el banco). ⚠️ `think: true` NO arregla el juicio de fidelidad:
+  verificado en vivo (145s de razonamiento) que igual da fidelidad=10 a la
+  letra con "Miami" — no gastar más esfuerzo en prompts de juicio.
+- `guardia-benchmark.js` — banco de casos DORADOS (`golden/<caso>/{song.txt,
+  survey.txt, expect.json}`): mide chequeo N + extracción (+ `--judgment`
+  opcional) contra letras reales ya etiquetadas buena/mala. `--offline` =
+  solo chequeo N, sin red. Sale 1 si algo falla. **Correr tras CUALQUIER
+  cambio de prompt/modelo del Guardia** — los prompts no se ajustan más "a
+  ojo" (así se descubrió que el prompt endurecido de fidelidad no servía).
+  Cada incidente real nuevo debe agregar su carpeta a `golden/`. Todo corre
+  en Ollama LOCAL: costo cero, sin API ni créditos.
   `evaluarAudioGuardia({ titulo, letraPedida, transcripcion, señales,
   nombres })` (2026-07-13): mismo Guardia, ahora también como Capa 4 sobre
   AUDIO — lo llama `verify-audio.js` SIEMPRE, por cada versión (antes solo

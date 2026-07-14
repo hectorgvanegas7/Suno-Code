@@ -456,3 +456,25 @@ test('buildExtraccionPrompt: incluye la letra y pide listas sin juicio', () => {
   assert.ok(prompt.includes('nos cruzó por Miami'));
   assert.ok(prompt.includes('NO evalúes'));
 });
+
+test('compararHechosConEncuesta: sustantivo común sin dato temporal ("la casa") NUNCA se marca — falso positivo real atrapado por el banco dorado (2026-07-14)', () => {
+  // La letra buena de "El Hombre De Mi Vida" decía "la casa que hoy tenemos"
+  // y la encuesta decía "hogar" — escenografía poética permitida por la
+  // regla 2 del SYSTEM_PROMPT, jamás un hecho inventado.
+  const { sinRespaldo } = compararHechosConEncuesta(
+    { lugares: ['la casa'], personas: [], fechasOMomentos: ['la isla', 'el mar'] },
+    SURVEY_HECHOS,
+    { firstNames: [] }
+  );
+  assert.equal(sinRespaldo.length, 0, JSON.stringify(sinRespaldo));
+});
+
+test('compararHechosConEncuesta: dato temporal/numérico SIN respaldo sí se marca aunque venga en minúscula ("veinte años juntos" que la encuesta no dice)', () => {
+  const { sinRespaldo } = compararHechosConEncuesta(
+    { lugares: [], personas: [], fechasOMomentos: ['veinte años juntos'] },
+    SURVEY_HECHOS,
+    { firstNames: [] }
+  );
+  assert.equal(sinRespaldo.length, 1, JSON.stringify(sinRespaldo));
+  assert.equal(sinRespaldo[0].valor, 'veinte años juntos');
+});
