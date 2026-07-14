@@ -1190,38 +1190,31 @@ process.on('uncaughtException', async (err) => {
       }
     }
 
-    // ── "El Guardia" — Capa 3 de QA de letra (Ollama local, informativo) ────
-    // Segunda opinión INDEPENDIENTE sobre cómo está armada la canción
-    // (coherencia/rima/tono/fidelidad/gancho) — hoy ese juicio subjetivo solo
-    // lo hace el propio modelo generador vía su qaChecklist autoevaluado.
-    // NUNCA bloquea ni gasta reintentos (mismo criterio que CLAP/NISQA:
-    // informativo hasta calibrar en vivo — ver LESSONS.md). Corre SIEMPRE
-    // que haya letra, pase o no pase hardValidate (pedido explícito de
-    // Hector 2026-07-13: "OLLAMA SIEMPRE CORRA no a veces SIEMPRE" — antes
+    // ── "El Guardia" — Capa 3 de QA de letra (Haiku, informativo) ────
+    //
+    // Se ejecuta DESPUÉS de hardValidate y LanguageTool. Recibe la letra YA
+    // validada estructural y gramaticalmente y la juzga con criterio subjetivo
+    // (coherencia, rima, tono, fidelidad a la encuesta, gancho).
+    //
+    // Hector 2026-07-13: "HAIKU SIEMPRE CORRA no a veces SIEMPRE" — antes
     // se saltaba entero si passedQA era false, así que una letra con
     // ⚠️ ADVERTENCIA tras agotar los 3 intentos se quedaba SIN la segunda
-    // opinión justo cuando más falta hacía. Ollama es local y gratis, así
-    // que no hay costo real en correrlo también sobre letras con warning.
-    if (parsedJson?.letras) {
-      // Una consulta al Guardia con UN reintento ante fallo (Ollama es local
-      // y gratis — "sin límite de reintentos" tiene que ser verdad en la
-      // práctica, no solo en el diseño). Si el modelo primario es el 14b, el
-      // reintento baja al 8b (entra entero en VRAM, responde en segundos):
-      // el fallo típico es timeout de carga fría del 14b con offload parcial.
-      const guardiaPrimario = process.env.GUARDIA_MODEL || GUARDIA_DEFAULT_MODEL;
-      const guardiaFallback = guardiaPrimario === 'qwen3:8b' ? null : 'qwen3:8b';
-      const consultarGuardia = async (etiqueta, { qaContext = null, keepAlive = 0 } = {}) => {
+    // opinión justo cuando más falta hacía.
+    //
+    // ⚠️ isDryRun SIEMPRE salta este bloque entero (2026-07-14): cuando esto
+    // corría en Ollama local era gratis, así que correrlo también en
+    // --dry-run no costaba nada. Migrado a Haiku (API real, créditos reales),
+    // seguir llamándolo en dry-run rompería la garantía documentada de
+    // "--dry-run = cero API, cero gasto" (CLAUDE.md) — un ensayo no debe
+    // gastar plata nunca, ni un centavo.
+    if (parsedJson?.letras && !isDryRun) {
+      const consultarGuardia = async (etiqueta, { qaContext = null } = {}) => {
         const payload = { letras: parsedJson.letras, titulo: parsedJson.titulo, survey: surveyContent, qaContext, estiloSuno: parsedJson.estiloSuno };
-        let r = await validarGuardia(payload, { keepAlive });
-        if (!r.ok && guardiaFallback) {
-          console.log(`🛡️  ${etiqueta} falló (${r.error}) — reintentando con ${guardiaFallback}...`);
-          r = await validarGuardia(payload, { keepAlive, model: guardiaFallback });
-        }
-        return r;
+        return await validarGuardia(payload);
       };
       const logPass = (etiqueta, g) => {
         if (g.ok) {
-          console.log(`🛡️  ${etiqueta} (Ollama/${g.model}, ${Math.round(g.durationMs / 1000)}s): ${g.veredicto}`);
+          console.log(`🛡️  ${etiqueta} (Haiku/${g.model}, ${Math.round(g.durationMs / 1000)}s): ${g.veredicto}`);
           console.log(`   coherencia=${g.coherencia} rima=${g.rima} tono=${g.tono} fidelidad=${g.fidelidad} gancho=${g.gancho} confianza=${g.confianza ?? '-'} estiloCoincide=${g.estiloCoincide ?? '-'} aprobada=${g.aprobada}`);
           g.problemas.forEach((p) => console.log(`   • ${formatGuardiaProblem(p)}`));
         } else {
@@ -1230,12 +1223,8 @@ process.on('uncaughtException', async (err) => {
       };
 
       // Pasada 1: CIEGA (sin el resultado del QA duro) — juicio independiente.
-      // keepAlive '5m' salvo que sea la única pasada (--dry-run): las pasadas
-      // siguientes son inmediatas y recargar el 14b desde frío en cada una
-      // duplicaba la latencia total al pedo; los 5 min expiran solos mucho
-      // antes de que el pipeline de audio necesite la VRAM.
-      console.log('\n🛡️  Consultando al Guardia (Ollama local, puede tardar unos minutos la primera vez)...');
-      const guardiaResult = await consultarGuardia('Pasada 1', { keepAlive: isDryRun ? 0 : '5m' });
+      console.log('\n🛡️  Consultando al Guardia (Haiku, respondiendo en segundos)...');
+      const guardiaResult = await consultarGuardia('Pasada 1');
       logPass('El Guardia — pasada 1 (ciega)', guardiaResult);
       let guardiaSegunda = null;
       let guardiaDesempate = null;
@@ -1251,8 +1240,7 @@ process.on('uncaughtException', async (err) => {
         // validador?" (2026-07-13). --dry-run se queda con una sola pasada.
         console.log('\n🛡️  Segunda pasada del Guardia (informada con el resultado del QA duro)...');
         guardiaSegunda = await consultarGuardia('Pasada 2', {
-          qaContext: { passedQA, failures: qaFailures },
-          keepAlive: '5m',
+          qaContext: { passedQA, failures: qaFailures }
         });
         logPass('El Guardia — pasada 2 (informada)', guardiaSegunda);
 
@@ -1262,19 +1250,15 @@ process.on('uncaughtException', async (err) => {
         // LESSONS.md). Extraer sí es una tarea que el modelo hace bien: acá
         // solo LISTA lugares/personas/fechas que la letra afirma, y
         // compararHechosConEncuesta decide en código si cada uno está
-        // respaldado. INFORMATIVO hasta calibrar en el jsonl (protocolo
-        // estándar de la Capa 3) — el criterio de graduación a gate/regen
-        // automático está documentado en lib/ollama-guardia.js. Con el
-        // modelo aún caliente ('5m' de la pasada 2), cuesta segundos.
+        // respaldado. INFORMATIVO hasta calibrar en el jsonl.
         const { extraerHechosLetra, compararHechosConEncuesta } = require('./lib/ollama-guardia');
         extraccionHechos = await extraerHechosLetra(
-          { letras: parsedJson.letras, titulo: parsedJson.titulo },
-          { keepAlive: '5m' }
+          { letras: parsedJson.letras, titulo: parsedJson.titulo }
         );
         if (extraccionHechos.ok) {
           const surveyNames = extractFirstNames(surveyContent);
           hechosSinRespaldo = compararHechosConEncuesta(extraccionHechos, surveyContent, { firstNames: surveyNames });
-          console.log(`\n🧾 Extracción de hechos (Ollama/${extraccionHechos.model}, ${Math.round(extraccionHechos.durationMs / 1000)}s): ${hechosSinRespaldo.evaluados} afirmación(es) concreta(s) en la letra.`);
+          console.log(`\n🧾 Extracción de hechos (Haiku/${extraccionHechos.model}, ${Math.round(extraccionHechos.durationMs / 1000)}s): ${hechosSinRespaldo.evaluados} afirmación(es) concreta(s) en la letra.`);
           if (hechosSinRespaldo.sinRespaldo.length === 0) {
             console.log('   ✅ Todas respaldadas por la encuesta.');
           } else {
@@ -1292,22 +1276,13 @@ process.on('uncaughtException', async (err) => {
         // en --loop la ABANDONA tras 20 min) ni deja pasar una mala.
         if (guardiaSegunda.ok && guardiaResult.aprobada !== guardiaSegunda.aprobada) {
           console.log('\n🛡️  Las 2 pasadas discrepan — tercera pasada de desempate...');
-          guardiaDesempate = await consultarGuardia('Desempate', { keepAlive: 0 });
+          guardiaDesempate = await consultarGuardia('Desempate');
           logPass('El Guardia — desempate (ciega)', guardiaDesempate);
-        } else {
-          // Las pasadas coinciden o no hubo segunda pasada: descargar modelo manualmente
-          if (!isDryRun) {
-            fetch('http://localhost:11434/api/chat', {
-              method: 'POST',
-              headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({ model: process.env.GUARDIA_MODEL || GUARDIA_DEFAULT_MODEL, messages: [], keep_alive: 0 })
-            }).catch(() => {}); // fire and forget
-          }
         }
       }
 
       // Registro SIEMPRE (incluso con el Guardia caído — sin esto, una
-      // Ollama muerta tras un reinicio de Windows desaparecía del jsonl en
+      // API de Haiku inalcanzable tras un error de red desaparecía del jsonl en
       // silencio durante semanas y la "red de seguridad" no existía sin que
       // nadie lo supiera). passedQA + qaFailures viajan en cada entrada para
       // poder cruzar el veredicto del Guardia contra el QA duro y el humano.
@@ -1331,7 +1306,7 @@ process.on('uncaughtException', async (err) => {
       //   1. El Guardia rechaza por MAYORÍA de las pasadas disponibles
       //      (2-de-2, 2-de-3 con desempate; con una sola pasada disponible,
       //      esa decide; discrepancia sin desempate disponible = pausa, el
-      //      lado conservador). Ollama caído del todo nunca bloquea.
+      //      lado conservador). Haiku caído del todo nunca bloquea.
       //   2. passedQA=false: la letra quedó con ⚠️ ADVERTENCIA tras agotar
       //      los intentos — con los correctores determinísticos + Haiku esto
       //      ahora es raro, y cuando pasa, mandarla sola a Suno era
@@ -1339,11 +1314,108 @@ process.on('uncaughtException', async (err) => {
       //      advertencia llegó hasta el campo de QA sin que nadie la mirara).
       //      La aprobación del Guardia NO anula al validador duro.
       const veredictos = [guardiaResult, guardiaSegunda, guardiaDesempate].filter((g) => g && g.ok);
-      const rechazos = veredictos.filter((g) => g.aprobada === false).length;
-      const guardiaRechaza = veredictos.length > 0 && rechazos >= Math.max(1, Math.ceil(veredictos.length / 2));
+      let rechazos = veredictos.filter((g) => g.aprobada === false).length;
+      let guardiaRechaza = veredictos.length > 0 && rechazos >= Math.max(1, Math.ceil(veredictos.length / 2));
+      
+      // --- HAIKU REPROMPT (Feedback de Haiku -> Corrector) ---
+      // Si el Guardia encontró problemas específicos a nivel de línea, intentamos
+      // arreglarlos con Haiku antes de declarar el rechazo definitivo.
+      const guardiaIssues = [];
+      for (const v of veredictos) {
+        if (v.problemas && v.problemas.length > 0) {
+          for (const p of v.problemas) {
+            if (p.seccion && p.linea > 0) {
+              const issue = {
+                section: p.seccion,
+                lineIndex: p.linea - 1,
+                kind: p.tipo,
+                detail: p.detalle,
+              };
+              // Evitar duplicados
+              if (!guardiaIssues.some(i => i.section === issue.section && i.lineIndex === issue.lineIndex && i.detail === issue.detail)) {
+                guardiaIssues.push(issue);
+              }
+            }
+          }
+        }
+      }
+
+      let haikuFixedIt = false;
+      if (guardiaIssues.length > 0 && parsedJson) {
+        console.log(`\n💊 El Guardia encontró ${guardiaIssues.length} problema(s) poético/estructural(es) a nivel de línea — pidiendo parche a Haiku...`);
+        try {
+          const { patchSongLines } = require('./lib/song-corrector');
+          const { hardValidate, convertJsonToMarkdown } = require('./lib/song-validate');
+          const patchedJson = await patchSongLines(parsedJson, guardiaIssues);
+
+          let patchedText = JSON.stringify(patchedJson);
+          // hardValidate incluye el chequeo N (findInventedProperNouns, ver
+          // LESSONS.md 2026-07-14) — un lugar/persona CAPITALIZADO que Haiku
+          // haya colado al "arreglar" una línea de fidelidad ya lo atrapa acá.
+          let revalidated = hardValidate(patchedText, surveyContent);
+
+          if (revalidated.valid) {
+            // ── Re-verificación de fidelidad ANTES de levantar el veto (2026-07-14) ──
+            // El chequeo N (arriba, dentro de hardValidate) solo ve nombres
+            // propios Capitalizados. Si el problema que Haiku "arregló" era de
+            // tipo fidelidad (un hecho inventado en minúscula, o una fusión de
+            // capítulos de vida — ver caso real "Miami"/LESSONS.md), hardValidate
+            // solo no alcanza para confirmar que el parche realmente lo resolvió.
+            // Se re-corre la extracción de hechos sobre el TEXTO PARCHEADO antes
+            // de confiar en que Haiku arregló algo — nunca se levanta el rechazo
+            // del Guardia a ciegas solo porque la estructura quedó bien.
+            const huboProblemaDeFidelidad = guardiaIssues.some((i) => i.kind === 'fidelidad');
+            let fidelidadOkTrasParche = true;
+            if (huboProblemaDeFidelidad) {
+              const { extraerHechosLetra, compararHechosConEncuesta } = require('./lib/ollama-guardia');
+              const reextraccion = await extraerHechosLetra({ letras: revalidated.parsedJson.letras, titulo: revalidated.parsedJson.titulo });
+              if (reextraccion.ok) {
+                const surveyNamesReverif = extractFirstNames(surveyContent);
+                const reverificacion = compararHechosConEncuesta(reextraccion, surveyContent, { firstNames: surveyNamesReverif });
+                if (reverificacion.sinRespaldo.length > 0) {
+                  fidelidadOkTrasParche = false;
+                  console.log(`⚠️ El parche de Haiku NO resolvió la fidelidad — sigue habiendo ${reverificacion.sinRespaldo.length} hecho(s) sin respaldo tras el parche, descartando parche:`);
+                  for (const h of reverificacion.sinRespaldo) console.log(`   🚨 (${h.tipo}) "${h.valor}" — ${h.motivo}`);
+                }
+              } else {
+                // Sin señal de la re-extracción (API caída) no hay forma de
+                // confirmar que el parche arregló la fidelidad — lado
+                // conservador: no levantar el veto sin poder verificarlo.
+                fidelidadOkTrasParche = false;
+                console.log(`⚠️ No se pudo re-verificar fidelidad tras el parche (${reextraccion.error}) — por las dudas, descartando parche.`);
+              }
+            }
+
+            if (fidelidadOkTrasParche) {
+              console.log('✅ Haiku arregló los problemas poéticos/lógicos sugeridos por el Guardia.');
+              // Sobrescribir song.txt
+              const now = new Date();
+              const dateStr = `${now.getMonth() + 1}.${String(now.getDate()).padStart(2, '0')}.${now.getFullYear()}`;
+              const notesLine = `NOTES: ${dateStr}. Hector. PS0180. Letra + Suno. Song ID: ${songId}`;
+              const songContent = `${passedQA ? '' : '⚠️ ADVERTENCIA: no pasó la validación después de ' + MAX_GENERATION_ATTEMPTS + ' intentos. Revisar manualmente.\\n\\n'}${convertJsonToMarkdown(revalidated.parsedJson)}\n\n${notesLine}`;
+              fs.writeFileSync(SONG_PATH, songContent, 'utf-8');
+
+              // Actualizar referencias locales para que el pipeline no se frene
+              parsedJson = revalidated.parsedJson;
+              fullResponse = patchedText;
+              haikuFixedIt = true;
+              guardiaRechaza = false; // Levantamos el veto del guardia porque Haiku lo arregló Y se re-verificó
+              rechazos = 0;
+            }
+            // fidelidadOkTrasParche === false: NO se escribe nada, NO se levanta
+            // guardiaRechaza — sigue el flujo original con el rechazo intacto.
+          } else {
+            console.log(`⚠️ El parche de Haiku rompió la estructura (${revalidated.failures.length} fallo[s]) — descartando parche, sigue el flujo original.`);
+          }
+        } catch (e) {
+          console.log(`⚠️ Corrector de Haiku falló (${e.message}) — sigue el flujo original con los errores del Guardia.`);
+        }
+      }
+      // --------------------------------------------------------
+
       if (!isDryRun && veredictos.length === 0) {
         await notify(
-          `🛡️ "${parsedJson.titulo}": el Guardia (Ollama) no estuvo disponible en ninguna pasada — esta canción sigue SIN segunda opinión. Revisá que Ollama esté corriendo (ollama serve).`,
+          `🛡️ "${parsedJson.titulo}": el Guardia (Haiku) no estuvo disponible en ninguna pasada — esta canción sigue SIN segunda opinión. Revisá tu conexión a internet o ANTHROPIC_API_KEY.`,
           { title: 'El Guardia no disponible', priority: 'default', tags: 'warning' }
         ).catch(() => {});
       }

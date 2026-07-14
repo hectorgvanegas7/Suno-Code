@@ -265,11 +265,23 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
   regeneración en un problema de red. Ver LESSONS.md para el detalle
   completo y la entrada de `lib/ollama-guardia.js` para la Capa 3.
 - `lib/ollama-guardia.js` — `validarGuardia({ letras, titulo, survey })`:
-  Capa 3 de QA de letra, "El Guardia" (2026-07-12): segunda opinión
-  INDEPENDIENTE vía LLM local (Ollama en `localhost:11434`, default
-  `qwen3:14b` con offload parcial en 8GB de VRAM — `GUARDIA_MODEL=qwen3:8b`
-  como escape hatch rápido). Juzga cómo está ARMADA la canción contra la
-  encuesta real: coherencia/rima/tono/fidelidad/gancho (1-10) +
+  Capa 3 de QA de letra, "El Guardia" (2026-07-12). ⚠️ **MIGRADO de Ollama
+  local a Claude Haiku el 2026-07-14** (nombre de archivo conservado por no
+  romper imports) — YA NO ES GRATIS: cada llamada gasta créditos reales de
+  `ANTHROPIC_API_KEY`, en cada canción, todas las pasadas. `--dry-run` por
+  eso saltea el bloque entero del Guardia (antes lo corría igual porque
+  Ollama no costaba nada). Bugs reales del día de la migración, arreglados
+  y re-verificados EN VIVO (no solo con mocks — ver LESSONS.md): (1)
+  `output_config.format` de Anthropic exige `additionalProperties: false`
+  explícito en cada objeto del schema — sin esto, 400 silencioso, el
+  Guardia nunca funcionó desde el primer commit; (2) Anthropic rechaza
+  `minimum`/`maximum` en propiedades `integer` del schema (Ollama sí los
+  toleraba) — el clamp a 1-10 se mantiene, pero ahora vive solo en
+  `parseGuardiaResponse`, no en el schema. Modelo: `GUARDIA_MODEL` (env,
+  debe ser un model ID de Anthropic válido — ej. `claude-haiku-4-5`; un
+  nombre de Ollama como `qwen3:8b` rompe todas las llamadas en silencio).
+  Juzga cómo está ARMADA la canción contra la encuesta real:
+  coherencia/rima/tono/fidelidad/gancho (1-10) +
   `estiloCoincide` (¿el estiloSuno pedido —género/instrumentación/energía—
   tiene sentido para la ocasión de la encuesta? hardValidate solo chequea
   que incluya "seseo", nadie juzgaba el estilo en sí) + `problemas`
@@ -281,28 +293,27 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
   modelo se desvía del schema) — lo que ni el diccionario ni LanguageTool
   pueden ver, y que antes solo se autoevaluaba el propio modelo generador.
   Corre en
-  `run.js` SIEMPRE que haya letra (2026-07-13: antes se saltaba entero si
-  `passedQA` era `false` tras agotar los 3 intentos de generación —
-  justo la letra que más necesitaba una segunda opinión se quedaba sin
-  ella; pedido explícito de Hector: "OLLAMA SIEMPRE CORRA no a veces
-  SIEMPRE", es local y gratis, no hay costo real en correrlo también sobre
-  letras con warning). Diseño de pasadas (2026-07-13): pasada 1 CIEGA +
+  `run.js` SIEMPRE que haya letra Y no sea `--dry-run` (2026-07-13: antes se
+  saltaba entero si `passedQA` era `false` tras agotar los 3 intentos de
+  generación — justo la letra que más necesitaba una segunda opinión se
+  quedaba sin ella). Diseño de pasadas (2026-07-13): pasada 1 CIEGA +
   pasada 2 INFORMADA (recibe `qaContext` con los fallos del QA duro y debe
   confirmarlos/descartarlos — antes eran idénticas y solo medían ruido de
   sampleo) + 3ra pasada de DESEMPATE si las dos discrepan en `aprobada`
   (mayoría decide la pausa; con una sola pasada disponible, esa decide).
-  Cada pasada fallida se reintenta una vez con fallback a `qwen3:8b`.
-  Nunca lanza — Ollama caído = "sin señal esta vez": consola +
-  `state.json` (`guardia`/`guardiaSegunda`/`guardiaDesempate`) +
+  Nunca lanza — API caída o `ANTHROPIC_API_KEY` faltante = "sin señal esta
+  vez": consola + `state.json` (`guardia`/`guardiaSegunda`/`guardiaDesempate`) +
   `logs/guardia-feedback.jsonl` (SIEMPRE se registra, incluso el fallo —
   con `passedQA`/`qaFailures`/`confianza`/`raw` para calibrar contra el QA
   humano) + ntfy si ninguna pasada estuvo disponible en una canción real.
-  `keepAlive` es opción de `validarGuardia`: '5m' entre pasadas
-  consecutivas (no recargar el 14b desde frío en cada una), 0 en la última
-  de la tanda (libera VRAM — el pipeline de audio corre mucho después, los
-  5 min expiran solos). Requiere Ollama instalado + `ollama pull
-  qwen3:14b` (y `qwen3:8b` de fallback) — sin eso el pipeline sigue
-  exactamente igual, solo sin esta señal.
+  **Reprompt automático (2026-07-14):** si el Guardia marca problemas con
+  sección+línea, `run.js` le pide un parche a `lib/song-corrector.js`
+  (`patchSongLines`, gasta otra llamada a Haiku) y solo levanta el rechazo
+  si `hardValidate` pasa Y —cuando el problema era de tipo `fidelidad`— la
+  extracción de hechos se re-corre sobre el parche y sigue sin encontrar
+  nada sin respaldo. Si la re-verificación falla, el parche se descarta
+  entero y el rechazo original queda en pie (nunca se tapa un problema de
+  fidelidad real solo porque la estructura quedó bien — ver LESSONS.md).
   `extraerHechosLetra({ letras, titulo })` + `compararHechosConEncuesta`
   (2026-07-14): extracción CERRADA de hechos — el modelo solo LISTA
   lugares/personas/fechas que la letra afirma (extraer es fácil; JUZGAR
@@ -331,8 +342,11 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
   solo chequeo N, sin red. Sale 1 si algo falla. **Correr tras CUALQUIER
   cambio de prompt/modelo del Guardia** — los prompts no se ajustan más "a
   ojo" (así se descubrió que el prompt endurecido de fidelidad no servía).
-  Cada incidente real nuevo debe agregar su carpeta a `golden/`. Todo corre
-  en Ollama LOCAL: costo cero, sin API ni créditos.
+  Cada incidente real nuevo debe agregar su carpeta a `golden/`.
+  ⚠️ Desde la migración a Haiku (2026-07-14): `--offline` sigue costando
+  cero (solo chequeo N, sin red); la extracción y `--judgment` ahora SÍ
+  gastan créditos reales de Haiku por caso — correrlo sin `--offline` ya no
+  es gratis, tenerlo en cuenta antes de correr el banco entero seguido.
   `evaluarAudioGuardia({ titulo, letraPedida, transcripcion, señales,
   nombres })` (2026-07-13): mismo Guardia, ahora también como Capa 4 sobre
   AUDIO — lo llama `verify-audio.js` SIEMPRE, por cada versión (antes solo
@@ -406,6 +420,14 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
   name-check/` y `truncated-words/`) de más de 30 días, y recorta los `.jsonl`
   crecientes por cantidad de líneas. Se llama al final de un `start-flow.js
   --done` exitoso (best-effort, nunca lanza ni bloquea el cierre de la canción).
+  **MP3s (2026-07-14, pedido de Hector — SSD lleno: Downloads/suno pesaba
+  824M, mp3/ 367M):** dos retenciones DISTINTAS. `Downloads/suno/` (los
+  archivos SUELTOS en la raíz, no las subcarpetas de arriba) se limpia a los
+  `SUNO_WORKING_RETENTION_DAYS` (7 días) — son copias de TRABAJO, pura
+  redundancia efímera. `mp3/` (el respaldo con Song ID de canciones YA
+  ENTREGADAS a clientes, la única copia archivada) se limpia a los
+  `RETENTION_DAYS` de siempre (30 días) — no se le bajó la retención porque
+  es la fuente si algún día hay que reenviar un archivo.
 - `suno-fill.js` — llenado de Suno (canónico; suno-fill2.js fue fusionado y borrado).
   Si un selector de la UI falla, cae a `pauseForHumanInteraction` en vez de matar
   el proceso — ver `lib/playwright-helpers.js`.

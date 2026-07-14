@@ -1,9 +1,12 @@
 // test/ollama-guardia.test.js — Suite de regresión local para
 // lib/ollama-guardia.js ("El Guardia").
 //
-// 100% offline: nunca llama a Ollama real — `validarGuardia` acepta
-// `fetchImpl` inyectable y acá se le pasan respuestas fake con el mismo
-// shape que /api/chat devuelve ({ message: { content: '<json>' } }).
+// 100% offline: nunca llama a la API real de Anthropic — `validarGuardia`
+// acepta `fetchImpl` inyectable y acá se le pasan respuestas fake con el
+// mismo shape que POST /v1/messages devuelve
+// ({ content: [{ type: 'text', text: '<json>' }] }).
+// El nombre del archivo quedó de la época de Ollama (migrado a Claude Haiku
+// 2026-07-14, ver LESSONS.md) — no se renombró para no romper imports.
 // Corré con: npm test
 
 const test = require('node:test');
@@ -41,9 +44,16 @@ const RESPUESTA_VALIDA = {
   aprobada: true,
 };
 
-function fakeOllamaFetch(body, { status = 200 } = {}) {
+// `content` es el string de texto que la API real devuelve dentro de
+// content[0].text (normalmente JSON.stringify de la respuesta esperada).
+// Para simular un error HTTP, pasá cualquier string en `content` — solo el
+// `status` importa en ese caso (el código arma el mensaje de error con
+// response.text(), nunca parsea el body de error como JSON).
+function fakeAnthropicFetch(content, { status = 200 } = {}) {
+  const isSuccess = status >= 200 && status < 300;
+  const body = isSuccess ? { content: [{ type: 'text', text: content }] } : { error: content };
   return async () => ({
-    ok: status >= 200 && status < 300,
+    ok: isSuccess,
     status,
     json: async () => body,
     text: async () => JSON.stringify(body),
@@ -186,47 +196,70 @@ test('formatGuardiaProblem: arma un string legible con sección/línea solo si a
   );
 });
 
-test('validarGuardia: keepAlive viaja al body de Ollama (entre pasadas consecutivas no se recarga el modelo desde frío)', async () => {
+test('validarGuardia: manda los headers correctos de la API de Anthropic (x-api-key, anthropic-version)', async () => {
+  let sentHeaders = null;
   let sentBody = null;
   const fetchImpl = async (url, opts) => {
+    sentHeaders = opts.headers;
     sentBody = JSON.parse(opts.body);
-    return { ok: true, status: 200, json: async () => ({ message: { content: JSON.stringify(RESPUESTA_VALIDA) } }), text: async () => '' };
+    return { ok: true, status: 200, json: async () => ({ content: [{ type: 'text', text: JSON.stringify(RESPUESTA_VALIDA) }] }), text: async () => '' };
   };
-  await validarGuardia({ letras: LETRAS_FAKE }, { fetchImpl, keepAlive: '5m' });
-  assert.equal(sentBody.keep_alive, '5m');
-  await validarGuardia({ letras: LETRAS_FAKE }, { fetchImpl });
-  assert.equal(sentBody.keep_alive, 0, 'sin keepAlive explícito, el default sigue siendo 0 (libera VRAM)');
+  const prevKey = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = 'test-key';
+  try {
+    await validarGuardia({ letras: LETRAS_FAKE }, { fetchImpl });
+    assert.equal(sentHeaders['x-api-key'], 'test-key');
+    assert.equal(sentHeaders['anthropic-version'], '2023-06-01');
+    assert.equal(sentBody.output_config.format.type, 'json_schema');
+  } finally {
+    process.env.ANTHROPIC_API_KEY = prevKey;
+  }
 });
 
-test('validarGuardia: la respuesta cruda de Ollama viaja en `raw` (auditoría/calibración), incluso si el parseo falla', async () => {
-  const okFetch = fakeOllamaFetch({ message: { content: JSON.stringify(RESPUESTA_VALIDA) } });
+test('validarGuardia: sin ANTHROPIC_API_KEY devuelve ok:false sin llamar a fetch', async () => {
+  let called = false;
+  const fetchImpl = async () => { called = true; };
+  const prevKey = process.env.ANTHROPIC_API_KEY;
+  delete process.env.ANTHROPIC_API_KEY;
+  try {
+    const r = await validarGuardia({ letras: LETRAS_FAKE }, { fetchImpl });
+    assert.equal(r.ok, false);
+    assert.match(r.error, /ANTHROPIC_API_KEY/);
+    assert.equal(called, false);
+  } finally {
+    process.env.ANTHROPIC_API_KEY = prevKey;
+  }
+});
+
+test('validarGuardia: la respuesta cruda de Anthropic viaja en `raw` (auditoría/calibración), incluso si el parseo falla', async () => {
+  const okFetch = fakeAnthropicFetch(JSON.stringify(RESPUESTA_VALIDA));
   const r1 = await validarGuardia({ letras: LETRAS_FAKE }, { fetchImpl: okFetch });
   assert.equal(r1.raw, JSON.stringify(RESPUESTA_VALIDA));
 
-  const badFetch = fakeOllamaFetch({ message: { content: '{"basura": true}' } });
+  const badFetch = fakeAnthropicFetch('{"basura": true}');
   const r2 = await validarGuardia({ letras: LETRAS_FAKE }, { fetchImpl: badFetch });
   assert.equal(r2.ok, false);
   assert.equal(r2.raw, '{"basura": true}', 'sin raw, una respuesta mal tipada se pierde sin dejar evidencia');
 });
 
 test('validarGuardia: respuesta 200 con JSON válido devuelve ok:true con model y durationMs', async () => {
-  const fetchImpl = fakeOllamaFetch({ message: { content: JSON.stringify(RESPUESTA_VALIDA) } });
-  const r = await validarGuardia({ letras: LETRAS_FAKE, titulo: 'T', survey: 'S' }, { fetchImpl, model: 'qwen3:14b' });
+  const fetchImpl = fakeAnthropicFetch(JSON.stringify(RESPUESTA_VALIDA));
+  const r = await validarGuardia({ letras: LETRAS_FAKE, titulo: 'T', survey: 'S' }, { fetchImpl, model: 'claude-haiku-4-5' });
   assert.equal(r.ok, true);
-  assert.equal(r.model, 'qwen3:14b');
+  assert.equal(r.model, 'claude-haiku-4-5');
   assert.equal(typeof r.durationMs, 'number');
   assert.equal(r.veredicto, RESPUESTA_VALIDA.veredicto);
 });
 
-test('validarGuardia: Ollama caído (fetch rechaza) NO lanza — ok:false con el error', async () => {
-  const fetchImpl = async () => { throw new Error('fetch failed: ECONNREFUSED 127.0.0.1:11434'); };
+test('validarGuardia: fetch rechaza (sin red / API caída) NO lanza — ok:false con el error', async () => {
+  const fetchImpl = async () => { throw new Error('fetch failed: ECONNREFUSED'); };
   const r = await validarGuardia({ letras: LETRAS_FAKE }, { fetchImpl });
   assert.equal(r.ok, false);
   assert.match(r.error, /ECONNREFUSED/);
 });
 
-test('validarGuardia: non-2xx (modelo no bajado) NO lanza — ok:false con el status', async () => {
-  const fetchImpl = fakeOllamaFetch({ error: 'model "qwen3:14b" not found' }, { status: 404 });
+test('validarGuardia: non-2xx (modelo inválido / rate limit) NO lanza — ok:false con el status', async () => {
+  const fetchImpl = fakeAnthropicFetch('model not found', { status: 404 });
   const r = await validarGuardia({ letras: LETRAS_FAKE }, { fetchImpl });
   assert.equal(r.ok, false);
   assert.match(r.error, /404/);
@@ -245,11 +278,11 @@ test('validarGuardia: timeout aborta y devuelve ok:false con pista de qué proba
   assert.match(r.error, /timeout de 20ms/);
 });
 
-test('validarGuardia: respuesta sin message.content NO lanza', async () => {
-  const fetchImpl = fakeOllamaFetch({ done: true });
+test('validarGuardia: respuesta sin content[].text NO lanza', async () => {
+  const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({ content: [] }), text: async () => '' });
   const r = await validarGuardia({ letras: LETRAS_FAKE }, { fetchImpl });
   assert.equal(r.ok, false);
-  assert.match(r.error, /message\.content/);
+  assert.match(r.error, /sin texto/);
 });
 
 test('validarGuardia: sin letras devuelve ok:false sin siquiera llamar a fetch', async () => {
@@ -356,17 +389,17 @@ test('parseAudioGuardiaResponse: nombreCorrecto es boolean o null (respuestas vi
 });
 
 test('evaluarAudioGuardia: respuesta 200 con JSON válido devuelve ok:true', async () => {
-  const fetchImpl = fakeOllamaFetch({ message: { content: JSON.stringify(RESPUESTA_AUDIO_VALIDA) } });
+  const fetchImpl = fakeAnthropicFetch(JSON.stringify(RESPUESTA_AUDIO_VALIDA));
   const r = await evaluarAudioGuardia(
     { titulo: 'T', letraPedida: 'letra', transcripcion: 'transcripcion', señales: 'Levenshtein: 60%' },
-    { fetchImpl, model: 'qwen3:14b' }
+    { fetchImpl, model: 'claude-haiku-4-5' }
   );
   assert.equal(r.ok, true);
-  assert.equal(r.model, 'qwen3:14b');
+  assert.equal(r.model, 'claude-haiku-4-5');
   assert.equal(r.aprobada, true);
 });
 
-test('evaluarAudioGuardia: Ollama caído NO lanza — ok:false con el error', async () => {
+test('evaluarAudioGuardia: API caída NO lanza — ok:false con el error', async () => {
   const fetchImpl = async () => { throw new Error('fetch failed: ECONNREFUSED'); };
   const r = await evaluarAudioGuardia({ letraPedida: 'letra' }, { fetchImpl });
   assert.equal(r.ok, false);
@@ -440,7 +473,7 @@ test('parseExtraccionResponse: respuesta válida se normaliza; basura no lanza',
 });
 
 test('extraerHechosLetra: usa fetchImpl inyectable y nunca lanza ante error de red', async () => {
-  const fetchImpl = async () => ({ ok: true, json: async () => ({ message: { content: '{"lugares":["Cuba"],"personas":["Damian"],"fechasOMomentos":[]}' } }) });
+  const fetchImpl = async () => ({ ok: true, json: async () => ({ content: [{ type: 'text', text: '{"lugares":["Cuba"],"personas":["Damian"],"fechasOMomentos":[]}' }] }) });
   const r = await extraerHechosLetra({ letras: { 'Verse 1': ['línea'] }, titulo: 'T' }, { fetchImpl });
   assert.equal(r.ok, true);
   assert.deepEqual(r.lugares, ['Cuba']);
