@@ -769,3 +769,68 @@ test('nombre NO estándar (anglicanizado) sigue sin chequeo de ortografía exact
     `no debería aplicar el backstop a nombres no estándar, encontrado: ${failures.filter((f) => f.includes('español estándar')).join(' | ')}`
   );
 });
+
+// ── Chequeo N: nombres propios inventados (2026-07-14) ──────────────────────
+// Bug real ("El Hombre De Mi Vida"): "un mismo destino nos cruzó por Miami"
+// — la encuesta solo mencionaba Cuba y Estados Unidos. Ni el validador ni El
+// Guardia (fidelidad=10 en 2 pasadas, incluso con prompt endurecido) lo
+// atraparon. Un token capitalizado en MEDIO de línea que no está en la
+// encuesta es un nombre propio inventado — detección determinística.
+
+const SURVEY_DAMIAN = "Who's this for?: Esposo\nWhat's their name?: Frank\nSpecial moments: el se fue de Cuba y vine a Estados Unidos, todo empezó un trece de mayo";
+
+test('BUG REAL 2026-07-14 ("El Hombre De Mi Vida"): lugar inventado mid-línea ("Miami") no presente en la encuesta se detecta', () => {
+  const response = buildResponse({
+    verse1: ['Una tarde tranquila el cielo se abrió', 'La isla se quedó detrás en el silencio', 'Un mismo destino nos cruzó por Miami', 'Algo en mi pecho supo que eras bueno'],
+  });
+  const { valid, failures } = hardValidate(response, SURVEY_DAMIAN);
+  assert.equal(valid, false);
+  const inventedFailures = failures.filter((f) => f.startsWith('Nombre propio ausente de la encuesta'));
+  assert.equal(inventedFailures.length, 1, `esperaba 1 fallo de nombre inventado, encontrados: ${inventedFailures.join(' | ')}`);
+  assert.ok(inventedFailures[0].includes('"Miami"'));
+  assert.ok(inventedFailures[0].includes('[Verse 1]'));
+  assert.equal(isSafeToPatch(failures), false, 'un hecho inventado NUNCA es parcheable — necesita regen con contexto');
+});
+
+test('chequeo N: el mismo lugar mid-línea SÍ presente en la encuesta pasa limpio', () => {
+  const response = buildResponse({
+    verse1: ['Una tarde tranquila el cielo se abrió', 'La isla se quedó detrás en el silencio', 'Un mismo destino nos cruzó por Miami', 'Algo en mi pecho supo que eras bueno'],
+  });
+  const { failures } = hardValidate(response, SURVEY_DAMIAN + '\nnos reencontramos en Miami');
+  assert.equal(failures.filter((f) => f.startsWith('Nombre propio ausente')).length, 0);
+});
+
+test('chequeo N: términos religiosos mid-línea (Dios, Señor) NUNCA se marcan aunque no estén en la encuesta (regla 8 del prompt)', () => {
+  const response = buildResponse({
+    bridge: ['Aquella noche me tomaste la mano', 'Le pedí a Dios cuidar cada verano', 'La gracia del Señor quedó cercana', 'Fue la prueba de un amor soberano'],
+  });
+  const { failures } = hardValidate(response, SURVEY_SINGLE);
+  assert.equal(failures.filter((f) => f.startsWith('Nombre propio ausente')).length, 0, `fallos inesperados: ${failures.join(' | ')}`);
+});
+
+test('chequeo N: capital de INICIO de línea nunca se marca (todas las líneas arrancan capitalizadas)', () => {
+  const response = buildResponse({
+    verse2: ['Bailamos toda esa noche sin parar', 'Sacabas fuerzas para hacernos reír', 'Cada tropiezo lo hiciste sentir', 'Como un paso más hacia el porvenir'],
+  });
+  const { failures } = hardValidate(response, SURVEY_SINGLE);
+  assert.equal(failures.filter((f) => f.startsWith('Nombre propio ausente')).length, 0);
+});
+
+test('chequeo N: respelling fonético del destinatario con foneticaAplicada=true se tolera mid-línea (levenshtein vs encuesta)', () => {
+  const response = buildResponse({
+    foneticaAplicada: true,
+    verse2: ['Después de un turno largo volvías feliz', 'Y siempre Yoelin cantaba al reír', 'Cada tropiezo lo hiciste sentir', 'Como un paso más hacia el porvenir'],
+    chorus1: ['Yoelin, hoy te canto con todo mi amor', 'Gracias por darme siempre tu calor', 'Cada momento contigo brilla mejor', 'Eres mi orgullo y mi mayor honor'],
+    chorus2: ['Yoelin, admiro tu fuerza y tu bondad', 'Marcaste mi vida con sinceridad', 'Nunca dudé de tu generosidad', 'Eres ejemplo puro de humanidad'],
+  });
+  const { failures } = hardValidate(response, "What's their name?: Johelyn");
+  assert.equal(failures.filter((f) => f.startsWith('Nombre propio ausente')).length, 0, `fallos inesperados: ${failures.join(' | ')}`);
+});
+
+test('chequeo N: nombre propio tras puntuación de nueva oración mid-línea (¡/¿/.) no se marca como inventado', () => {
+  const response = buildResponse({
+    verse2: ['Después de un turno largo volvías feliz. Siempre reías', 'Sacabas fuerzas para hacernos reír', 'Cada tropiezo lo hiciste sentir', 'Como un paso más hacia el porvenir'],
+  });
+  const { failures } = hardValidate(response, SURVEY_SINGLE);
+  assert.equal(failures.filter((f) => f.startsWith('Nombre propio ausente')).length, 0);
+});

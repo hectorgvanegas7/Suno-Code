@@ -30,7 +30,7 @@ const path = require('path');
 const { findSunoMp3s, SUNO_DIR } = require('./lib/audio-match');
 const { extractFirstNames } = require('./lib/text-helpers');
 const { applyPhoneticReplacements, readSunoLyricsCache, parseSongFile } = require('./lib/song-file');
-const { analyzeAudio, prepareVocals, cleanupVocalsTmp, transcribeFiles, runClapScoreWithVocalIsolation, runNisqaScore, runMuqEvalScore, runAudioboxScore, runF0GenderCheck, reconcileF0Octave, resolveVocalOrMixPaths, stripStructuralTags, printReport, pickBestVersion, parseLyricsFromSongFile, parseTituloFromSongFile, getDurationAsync, formatDuration, formatElapsed, SONG_PATH } = require('./lib/audio-analysis');
+const { analyzeAudio, prepareVocals, cleanupVocalsTmp, transcribeFiles, runClapScoreWithVocalIsolation, runNisqaScore, runMuqEvalScore, runAudioboxScore, runF0GenderCheck, reconcileF0Octave, resolveVocalOrMixPaths, stripStructuralTags, printReport, pickBestVersion, parseLyricsFromSongFile, parseTituloFromSongFile, getDurationAsync, formatDuration, formatElapsed, SONG_PATH, MIN_DURATION_S, MAX_DURATION_S, isDurationWildlyOff } = require('./lib/audio-analysis');
 const { evaluarAudioGuardia } = require('./lib/ollama-guardia');
 const { notify } = require('./lib/ntfy');
 const pipelineState = require('./lib/pipeline-state');
@@ -125,6 +125,26 @@ function parseArgs(argv) {
     versionB ? getDurationAsync(versionB.path) : Promise.resolve(null),
   ]);
   console.log(`⏱️  Duración — A: ${formatDuration(durationA)}${versionB ? `, B: ${formatDuration(durationB)}` : ''}\n`);
+
+  // Aviso temprano de duración muy anómala (2026-07-14): ffprobe es
+  // instantáneo, pero el aviso real de "duración fuera de rango" solo
+  // llegaba DESPUÉS de 6+ min de Whisper/demucs/CLAP/NISQA (analyzeAudio más
+  // abajo) — si ambas versiones ya vinieron el doble (o más) de largo de lo
+  // esperado, es una señal mecánica fuerte de que Suno generó mal (versos
+  // repetidos/loop), y no hace falta esperar el análisis caro para avisar.
+  // Puramente informativo — NO se salta el análisis ni se reintenta Create
+  // solo (eso gastaría créditos sin confirmación humana): el resto del
+  // pipeline sigue exactamente igual, esto solo adelanta el aviso. La PAUSA
+  // real (misma señal) vive en start-flow.js, que corre este mismo chequeo
+  // apenas termina la descarga — isDurationWildlyOff es el criterio único
+  // compartido (lib/audio-analysis.js).
+  if (isDurationWildlyOff(durationA) && (!versionB || isDurationWildlyOff(durationB))) {
+    console.log(`🚨 Duración MUY fuera de rango en ${versionB ? 'AMBAS versiones' : 'la única versión descargada'} (esperado ${formatDuration(MIN_DURATION_S)}-${formatDuration(MAX_DURATION_S)}) — probable generación anómala de Suno (versos repetidos/loop). Sigue el análisis completo, pero revisá de oído sin esperarlo.\n`);
+    await notify(
+      `🚨 "${titulo}": duración MUY anormal (A: ${formatDuration(durationA)}${versionB ? `, B: ${formatDuration(durationB)}` : ''}, esperado ${formatDuration(MIN_DURATION_S)}-${formatDuration(MAX_DURATION_S)}) — probable generación anómala de Suno. El análisis completo sigue corriendo, pero convendría escuchar antes de confiar en la recomendación.`,
+      { title: 'Duración anómala detectada temprano', priority: 'default', tags: 'stopwatch' }
+    ).catch(() => {});
+  }
 
   // Analizar cada versión. Con 2 versiones se usa el camino batcheado:
   // demucs por versión (secuencial — GPU) y UNA sola invocación de Whisper para

@@ -368,3 +368,32 @@ test('reconcileF0Octave: si el mix tiene error, se devuelve la voz aislada sin t
   assert.equal(result.detectedGender, 'Femenina');
   assert.equal(result.octaveConflict, undefined);
 });
+
+// ── isDurationWildlyOff (2026-07-14, "El Hombre De Mi Vida") ────────────────
+// Ambas versiones salieron 5:26-5:36 (esperado 2:45-3:30) con versos
+// repetidos — la señal mecánica de "generación rota de Suno" tiene que
+// dispararse ahí, pero NO con canciones apenas largas/cortas (eso ya lo
+// cubre durationOk, el rango fino informativo).
+const { isDurationWildlyOff } = require('../lib/audio-analysis');
+
+test('isDurationWildlyOff: 5:36 (caso real de generación rota) dispara', () => {
+  assert.equal(isDurationWildlyOff(5 * 60 + 36), true);
+});
+
+test('isDurationWildlyOff: 3:45 es apenas largo — NO dispara (solo el rango fino lo marca)', () => {
+  assert.equal(isDurationWildlyOff(3 * 60 + 45), false);
+});
+
+test('isDurationWildlyOff: dentro del rango ideal NO dispara', () => {
+  assert.equal(isDurationWildlyOff(3 * 60), false);
+});
+
+test('isDurationWildlyOff: 1:20 (mucho más corta de lo esperado) dispara', () => {
+  assert.equal(isDurationWildlyOff(80), true);
+});
+
+test('isDurationWildlyOff: null/undefined/NaN (ffprobe no disponible) NUNCA dispara', () => {
+  assert.equal(isDurationWildlyOff(null), false);
+  assert.equal(isDurationWildlyOff(undefined), false);
+  assert.equal(isDurationWildlyOff(NaN), false);
+});

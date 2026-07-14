@@ -151,14 +151,30 @@ function parseArgs(argv) {
     'input[type="file"]',
   ];
 
+  // Reintentos con espera progresiva (2026-07-14). Fallo real ("La Pelota Que
+  // Se Soltó", 2026-07-13): una sola pasada del cascade dio 0 inputs y cayó
+  // directo al fallback manual — con --loop desatendido eso significa el
+  // timeout humano de 20 min y canción abandonada. La espera de 5s de arriba
+  // ya cubre el re-render normal de React, pero una carga lenta puntual puede
+  // superarla; 3 intentos (0s/8s/15s extra) cuestan nada y salvan la corrida.
+  // A propósito NO se hace page.reload(): la misma pestaña tiene título/letra/
+  // notas recién llenados por flow-submit.js y no está verificado que el Flow
+  // los persista tras un reload — perderlos sería peor que el fallback manual.
   let fileInput = null;
-  for (const sel of fileInputSelectors) {
-    const inputs = page.locator(sel);
-    const count = await inputs.count();
-    if (count > 0) {
-      fileInput = inputs.first();
-      console.log(`   Campo encontrado: ${sel}`);
-      break;
+  const RETRY_WAITS_MS = [0, 8000, 15000];
+  for (let attempt = 0; attempt < RETRY_WAITS_MS.length && !fileInput; attempt++) {
+    if (RETRY_WAITS_MS[attempt] > 0) {
+      console.log(`   Reintentando búsqueda del campo de carga en ${RETRY_WAITS_MS[attempt] / 1000}s (intento ${attempt + 1}/${RETRY_WAITS_MS.length})...`);
+      await page.waitForTimeout(RETRY_WAITS_MS[attempt]);
+    }
+    for (const sel of fileInputSelectors) {
+      const inputs = page.locator(sel);
+      const count = await inputs.count().catch(() => 0);
+      if (count > 0) {
+        fileInput = inputs.first();
+        console.log(`   Campo encontrado: ${sel}`);
+        break;
+      }
     }
   }
 
@@ -177,7 +193,13 @@ function parseArgs(argv) {
       fileInput = page.locator('input[type="file"]').first();
       console.log('   Usando primer input[type="file"] disponible.');
     } else {
-      console.error('\n❌ No se encontró ningún campo de carga de archivo en el Flow.');
+      // Screenshot de diagnóstico ANTES del fallback: si esto pasa a las 3 AM
+      // con --loop, el screenshot es la única evidencia de cómo estaba la UI
+      // (¿selector drift? ¿sesión caída? ¿página en blanco?) — sin él, el
+      // fallo de anoche quedó sin causa raíz diagnosticable.
+      const diagPath = path.join(__dirname, 'flow-upload-diagnosis.png');
+      await page.screenshot({ path: diagPath, fullPage: true }).catch(() => {});
+      console.error(`\n❌ No se encontró ningún campo de carga de archivo en el Flow (tras ${RETRY_WAITS_MS.length} intentos). Screenshot: ${diagPath}`);
       await pauseForHumanInteraction('No se encontró el botón para subir el MP3 en la interfaz del Flow. Por favor, súbelo manualmente y presiona ENTER.');
     }
   }

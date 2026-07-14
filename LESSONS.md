@@ -2578,3 +2578,85 @@ antes de proponer reemplazar una pieza de infraestructura que existe por una
 razón histórica, buscar esa razón en LESSONS.md primero — "esto es frágil"
 no es motivo suficiente si la fragilidad específica que motivó el cambio ya
 se resolvió con un fix más chico y focalizado en otro lado.
+
+## "Miami": un lugar inventado pasó TODAS las capas de QA — la fidelidad del Guardia no detecta hechos inventados, ni con el prompt endurecido (2026-07-14, "El Hombre De Mi Vida")
+
+La letra generada decía "un mismo destino nos cruzó por Miami" y fusionaba
+dos capítulos de vida separados (encuentro adolescente sin relación → vidas
+separadas → matrimonios previos → reencuentro un 13 de mayo) en una sola
+historia de amor continua desde la adolescencia. La encuesta jamás menciona
+Miami (solo Cuba y Estados Unidos) y dice explícitamente "nunca imaginé tener
+una relación con él" del primer encuentro y que ambos venían de matrimonios
+previos. Lo detectó HECTOR leyendo la letra — ninguna capa automática:
+
+- `hardValidate`: nada chequeaba hechos, solo estructura/ortografía/trato.
+- El Guardia (qwen3:14b): **fidelidad=10, aprobada=true en la pasada ciega Y
+  en la informada**. Y lo más importante: tras endurecer el prompt pidiendo
+  chequeo HECHO-POR-HECHO (listar lugares/fechas/secuencia temporal y
+  verificar cada uno contra la encuesta, con instrucción explícita de
+  puntuar 1-4 ante un solo hecho no respaldado), se re-testeó EN VIVO contra
+  la misma letra mala: **fidelidad=10, aprobada=true, cero problemas, 83s**.
+  El juicio de "fidelidad" del modelo verifica que los TEMAS de la encuesta
+  aparezcan en la letra (Cuba ✓, 13 de mayo ✓, nietos ✓), no que cada
+  afirmación de la letra esté respaldada por la encuesta — la dirección
+  inversa, que es donde viven las alucinaciones.
+
+**Fix real (mismo principio que "más de vos" y el chequeo M: lo duro vive en
+código, no en un prompt):**
+1. Chequeo N nuevo en `hardValidate` (`findInventedProperNouns`,
+   lib/song-validate.js): en español, un token Capitalizado en MEDIO de una
+   línea es un nombre propio; si no está en la encuesta, ni es término
+   religioso (regla 8 permite a Dios sin encuesta), ni respelling fonético
+   del destinatario (levenshtein ≤ len/2 con foneticaAplicada, o
+   name-dictionary.json), el modelo lo inventó. NO parcheable: regen con
+   contexto; si persiste 3 intentos, la pausa pre-Suno existente. Verificado
+   contra los datos reales del día: marca "Miami" en la letra mala (sección
+   y línea exactas), cero falsos positivos en la letra buena, en los 278
+   casos de npm test y en el mock del dry-run.
+2. El prompt del GENERADOR (run.js regla 2) sí se endureció con éxito:
+   lugares/fechas/fusión de capítulos listados explícitamente como
+   invención prohibida. La letra regenerada preservó los dos capítulos
+   reales ("Volviste separado y yo también volví") y eliminó Miami —
+   verificado leyendo la letra Y contra la transcripción Whisper del audio
+   final que se entregó.
+3. El prompt del Guardia quedó endurecido igual (no hace daño y deja rastro
+   del criterio), pero **documentado acá que NO es una garantía**: la
+   fusión de línea de tiempo (distorsión de hechos SIN nombres propios
+   nuevos) sigue sin cobertura determinística — hoy la atrapan solo el
+   prompt del generador mejorado y el QA humano.
+
+**Trampa de caché descubierta en el mismo incidente:** para regenerar la
+letra mala se borró `state.json` (el mecanismo documentado para un redo desde
+cero)... y `run.js` sirvió LA MISMA letra mala desde `.cache/<hash>.json` —
+la caché se indexa por hash de la ENCUESTA, que no cambió. Borrar state.json
+solo resetea el pipeline, no el contenido. Fix: flag `--force-regen` en
+run.js (start-flow.js lo reenvía) que saltea la lectura de caché; la letra
+nueva válida se re-cachea al final como siempre.
+
+## Suno generó ambas versiones al doble de duración con versos en loop — la alarma llegaba 6+ min tarde (2026-07-14, mismo día)
+
+Mismo día, tras el redo: Suno generó A=5:36 y B=5:26 (esperado 2:45-3:30)
+con líneas literalmente duplicadas en la transcripción y partes del
+coro/bridge faltantes. El Guardia de audio SÍ lo atrapó (similitud 5-6/10,
+aprobada=false en ambas — funcionó como se diseñó) y el pipeline pausó bien,
+pero la señal más barata y mecánica (la duración, ffprobe <1s) recién se
+reportaba después de los ~6 min de demucs+Whisper+CLAP+NISQA, con el Flow ya
+llenado. Fix: `isDurationWildlyOff` (lib/audio-analysis.js, margen 1.5x
+sobre el rango 2:45-3:30, compartido — nunca dos criterios distintos para lo
+mismo): verify-audio.js avisa por ntfy apenas lee las duraciones, y
+start-flow.js PAUSA para revisión humana apenas termina la descarga, fuera
+del while de reintentos de Create (un timeout de la pausa jamás debe
+re-clickear Create — decisión explícita de Hector: avisar+pausar, nunca
+gastar créditos solo). En --loop la pausa expira a los 20 min y la canción
+se abandona sin subir nada.
+
+**Del mismo repaso, dos robusteces menores:** (1) upload-to-flow.js ahora
+reintenta el cascade de selectores del `input[type="file"]` 3 veces
+(0s/8s/15s) y guarda `flow-upload-diagnosis.png` antes del fallback manual —
+el fallo real del 2026-07-13 ("La Pelota Que Se Soltó", 0 inputs en una sola
+pasada) quedó sin causa raíz diagnosticable por falta de evidencia; nunca
+`page.reload()` acá (la pestaña tiene el formulario recién llenado y no está
+verificado que persista). (2) El ticker `[Countdown]` de la espera del
+Submit solo escribe con TTY real: con stdout a un archivo (`--loop > log`)
+el `\r` no sobreescribe y cada tick se apilaba — cientos de repeticiones por
+línea inflando los logs de la noche.

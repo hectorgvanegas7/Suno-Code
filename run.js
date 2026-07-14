@@ -37,6 +37,16 @@ const { validarGuardia, formatGuardiaProblem, DEFAULT_MODEL: GUARDIA_DEFAULT_MOD
 
 const args = process.argv.slice(2);
 const isDryRun = args.includes('--dry-run');
+// --force-regen: ignora la caché local de letras (.cache/<hash>.json) y fuerza
+// una llamada real al LLM. Necesario para un redo manual intencional cuando el
+// CONTENIDO de una letra ya cacheada resultó estar mal (ej. un hecho inventado
+// que ni hardValidate ni el Guardia atajaron a tiempo): sin esto, borrar
+// state.json a mano para forzar un redo desde cero no alcanza — la caché sigue
+// devolviendo la MISMA letra mala porque está indexada solo por hash de la
+// encuesta, que no cambió (bug real 2026-07-14, "El Hombre de Mi Vida": la
+// caché sirvió la letra con la historia mal contada incluso después de borrar
+// state.json).
+const forceRegen = args.includes('--force-regen');
 const providerArg = args.find(a => a.startsWith('--provider='));
 const provider = providerArg ? providerArg.split('=')[1] : 'claude';
 
@@ -235,7 +245,7 @@ Suno is singing in Latin American Spanish, so it will mispronounce names that ha
 
 1. **Show, don't tell.** "Your patience, your dedication, your love" = automatic regeneration. Every quality must be shown through a scene or action, not explained.
 
-2. **Nothing invented (with one exception).** Do not invent facts, major life events, or specific memories not in the survey. However, if the survey is extremely generic (e.g., "I love her way of being"), you MUST infer small, universally relatable micro-actions (e.g., a subtle smile, looking out the window, the way she walks) to ground the emotion in a cinematic scene. Never just list the generic adjective.
+2. **Nothing invented (with one exception).** Do not invent facts, major life events, or specific memories not in the survey. This explicitly includes: **place names** (cities, countries, neighborhoods — if the survey never names a specific place, never invent one, not even a plausible-sounding one) and **specific dates or milestones tied to an event the survey did not tie them to**. It also includes **merging separate life chapters into one continuous story**: if the survey describes a first encounter that led nowhere (e.g. "never imagined a relationship because of X"), followed much later by a separate, distinct event (a reunion after other relationships, marriages, moves, or years apart), do NOT compress that gap into an unbroken romance — the gap and the separate chapters ARE the real story, and erasing them to make the story flow better is exactly as much an invention as adding a fake object or place. Before writing, mentally list every place, date, and distinct life-chapter the survey actually states, in the order it states them, and treat that list as a hard ceiling — nothing outside it may appear in the lyrics. If the survey's own wording is garbled or ambiguous, prefer the reading that preserves every distinct event it mentions over a smoother reading that quietly erases one. However, if the survey is extremely generic (e.g., "I love her way of being"), you MUST infer small, universally relatable micro-actions (e.g., a subtle smile, looking out the window, the way she walks) to ground the emotion in a cinematic scene — this exception covers generic *adjectives* only, never concrete facts like places, dates, or event sequences.
 
 3. **Consistent address form (Spanish).** Use tú, usted, or vos based on the survey — never mix. This includes imperative phrases (e.g. "no tardes" = tú / "no tarde" = usted / "no tardés" = vos). Verify every single line including the Outro. ⚠️ ABSOLUTE: if the survey says tú, the word "vos" and voseo verb forms (sos, tenés, podés, querés, hacés, decís...) must NEVER appear — not even to complete a rhyme with "voz", "dos" or "sol". The rhyme rules NEVER override this rule: if a rhyme needs "vos", rewrite the whole line instead. (Real failure: "quise saber más de vos" in a tú song — unacceptable, the client notices immediately.)
 
@@ -1032,7 +1042,8 @@ process.on('uncaughtException', async (err) => {
     }
 
     const surveyHash = getSurveyHash(surveyContent);
-    const cachedResponse = !isDryRun ? readCache(surveyHash) : null;
+    if (forceRegen) console.log('🔁 --force-regen: ignorando la caché local, se llama al LLM de nuevo aunque haya una letra cacheada.');
+    const cachedResponse = !isDryRun && !forceRegen ? readCache(surveyHash) : null;
 
     let fullResponse, parsedJson, passedQA;
     let qaFailures = []; // fallos del QA duro que quedaron sin resolver — contexto para la pasada informada del Guardia

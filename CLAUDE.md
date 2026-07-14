@@ -181,7 +181,11 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
   al Flow, `lib/llm-provider.js` para el LLM, `lib/cache-helpers.js` para la caché de
   respuestas, `lib/text-helpers.js` para extraer nombres de destinatarios, y escribe
   `state.json` al terminar. `--provider=claude|gemini` (default claude), `--dry-run`
-  (mock local, sin API ni Chrome, útil para probar el pipeline sin gastar saldo).
+  (mock local, sin API ni Chrome, útil para probar el pipeline sin gastar saldo),
+  `--force-regen` (2026-07-14: ignora la caché de letras y fuerza una llamada real
+  al LLM — necesario para un redo intencional por CONTENIDO malo de una letra ya
+  cacheada; borrar state.json a mano NO alcanza porque la caché se indexa por hash
+  de la encuesta, que no cambió. `start-flow.js` lo reenvía tal cual a run.js).
 - `lib/song-validate.js` — `hardValidate`, `validateContentForWrite`, `parseSections`,
   `extractField`: la validación estructural dura de la letra (movida desde `run.js` para
   poder testearla sin ejecutar el pipeline entero). Cubierta por
@@ -212,6 +216,17 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
   Con fallos de CONTENIDO sin resolver (`passedQA=false`), run.js PAUSA
   para revisión humana antes de Suno (LanguageTool caído no pausa — es
   red, no contenido).
+  Chequeo N (2026-07-14, `findInventedProperNouns`): nombres propios
+  INVENTADOS — un token capitalizado en MEDIO de una línea que no está en
+  la encuesta (ni es término religioso de la regla 8, ni respelling
+  fonético del destinatario vía levenshtein/name-dictionary) es un
+  lugar/persona que el modelo inventó. Bug real ("El Hombre De Mi Vida":
+  "nos cruzó por Miami" — la encuesta solo decía Cuba/Estados Unidos). NO
+  parcheable a propósito: regen con contexto, y si persiste, la pausa
+  pre-Suno existente. ⚠️ El Guardia NO cubre esto: verificado EN VIVO
+  (2026-07-14) que qwen3:14b da fidelidad=10/aprobada=true a esa letra
+  incluso con el prompt endurecido pidiendo chequeo hecho-por-hecho — la
+  garantía vive acá, no en el prompt (mismo principio que "más de vos").
 - `lib/spanish-spellcheck.js` — `findAccentTypos(text)`: chequeo GENERAL de
   tildes/eñes faltantes en cualquier palabra de la letra (no solo nombres
   propios), contra un diccionario real de español (`nspell` + `dictionary-es`,
@@ -399,7 +414,14 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
   (`page.waitForSelector`) a que React lo monte — corre justo después de que
   flow-submit.js termina de escribir en la MISMA pestaña, y un chequeo
   inmediato podía dar 0 inputs por pura cuestión de timing (bug real, ver
-  LESSONS.md). El campo existe siempre, incluso en un REDO (dentro de la zona
+  LESSONS.md). Si igual no aparece: 3 pasadas del cascade de selectores con
+  esperas progresivas (0s/8s/15s — fallo real 2026-07-13, "La Pelota Que Se
+  Soltó": una sola pasada dio 0 inputs y cayó directo al fallback manual) y,
+  si sigue sin aparecer, screenshot de diagnóstico
+  (`flow-upload-diagnosis.png`) ANTES del fallback, para que un fallo a las
+  3 AM deje evidencia de cómo estaba la UI. NUNCA `page.reload()` acá: la
+  pestaña tiene título/letra/notas recién llenados y no está verificado que
+  el Flow los persista. El campo existe siempre, incluso en un REDO (dentro de la zona
   "Replace MP3", oculto pero interactuable) — no hace falta clickear
   "reemplazar" antes. La verificación final de que la subida funcionó compara
   el `src` del `<audio>` contra el que había ANTES de subir, no solo si existe
@@ -519,6 +541,17 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
     nombre del destinatario — removido el 2026-07-04: la señal de "nombre
     ausente" de Whisper no era confiable y, visto en vivo, agotó los 2
     rerolls sin resolver nada, solo gastando créditos. Ver LESSONS.md.)
+  - Chequeo TEMPRANO de duración anómala post-descarga (2026-07-14): si
+    AMBAS versiones salen MUY fuera de rango (`isDurationWildlyOff`,
+    margen 1.5x sobre 2:45-3:30 — caso real "El Hombre De Mi Vida": 5:26 y
+    5:36 con versos repetidos/loop), ntfy urgente + `pauseForHumanInteraction`
+    apenas termina la descarga (ffprobe <1s), sin esperar los ~6 min del
+    análisis completo (que sigue corriendo en paralelo mientras tanto).
+    Decisión explícita de Hector: avisar+pausar, NUNCA re-clickear Create
+    solo. En --loop la pausa expira a los 20 min y la canción se abandona
+    sin subir nada. El chequeo vive FUERA del while de reintentos de Create
+    a propósito — un timeout de la pausa jamás debe re-clickear Create.
+    verify-audio.js corre el mismo chequeo como aviso temprano informativo.
   - `node start-flow.js --done` = cierre: registra en la hoja + marca state.json.
   - `node start-flow.js --poll [N]` = vigía de cola. Default: intervalo aleatorio
     10-15s. Acepta minutos ("3"), segundos ("30s") o rangos ("10-15s", "1-2").

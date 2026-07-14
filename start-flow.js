@@ -1108,7 +1108,10 @@ async function runFlowInner({ resume = false } = {}, hb) {
     const preRunState = state.read();
     const providerArg = process.argv.find((a) => a.startsWith('--provider='));
     const providerFlag = providerArg ? ` ${providerArg}` : '';
-    await runScript(`run.js${providerFlag}`);
+    // --force-regen se reenvía tal cual a run.js (ver ahí: bypassea la caché
+    // de letras para un redo intencional por contenido, no solo por crash).
+    const forceRegenFlag = process.argv.includes('--force-regen') ? ' --force-regen' : '';
+    await runScript(`run.js${providerFlag}${forceRegenFlag}`);
 
     // ── Salvaguarda contra Create duplicado (gasta créditos reales) ─────────
     // run.js siempre resetea state.json a stage "generated" al terminar
@@ -1250,11 +1253,15 @@ async function runFlowInner({ resume = false } = {}, hb) {
     const MAX_CREATE_RETRIES = 2;
     let createAttempt = 0;
     let createSucceeded = false;
+    let dlVersionA = null;
+    let dlVersionB = null;
     while (createAttempt <= MAX_CREATE_RETRIES && !createSucceeded) {
       createAttempt++;
       try {
         const { createAndDownload } = require('./lib/suno-create-dl');
         const { versionA, versionB } = await createAndDownload();
+        dlVersionA = versionA;
+        dlVersionB = versionB;
         mp3sDescargados = true;
         hayVersionB = !!versionB;
         createSucceeded = true;
@@ -1293,6 +1300,41 @@ async function runFlowInner({ resume = false } = {}, hb) {
             { title: 'Create/descarga falló — acción manual necesaria', priority: 'urgent', tags: 'warning' }
           ).catch(() => {});
         }
+      }
+    }
+
+    // ── Chequeo TEMPRANO de duración anómala (2026-07-14) ───────────────────
+    // Caso real ("El Hombre De Mi Vida"): Suno generó AMBAS versiones de
+    // 5:26-5:36 (esperado 2:45-3:30) con versos repetidos/loop — el pipeline
+    // recién lo señalaba tras 6+ min de Whisper/demucs, y la pausa llegaba al
+    // final, con el Flow ya llenado. ffprobe tarda <1s: si las dos versiones
+    // salieron MUY fuera de rango (isDurationWildlyOff, margen 1.5x), es casi
+    // seguro una generación rota — se avisa urgente y se PAUSA acá mismo para
+    // que un humano escuche antes de seguir. Decisión explícita de Hector
+    // (2026-07-14): avisar+pausar, NUNCA re-clickear Create solo (gastaría
+    // créditos sin confirmación). En --loop la pausa tiene el timeout humano
+    // de 20 min: sin respuesta, la canción se abandona (sin subir nada) y el
+    // loop sigue con la próxima — el análisis de audio en paralelo (Paso 3c)
+    // sigue corriendo mientras tanto, así que si el humano espera, tiene el
+    // reporte completo para decidir. Fuera del while de reintentos a
+    // propósito: un throw del timeout acá NO debe re-clickear Create.
+    if (createSucceeded && dlVersionA) {
+      const { getDurationAsync, formatDuration, isDurationWildlyOff, MIN_DURATION_S, MAX_DURATION_S } = require('./lib/audio-analysis');
+      const [durA, durB] = await Promise.all([
+        dlVersionA.path ? getDurationAsync(dlVersionA.path) : Promise.resolve(null),
+        dlVersionB && dlVersionB.path ? getDurationAsync(dlVersionB.path) : Promise.resolve(null),
+      ]);
+      if (isDurationWildlyOff(durA) && (!dlVersionB || isDurationWildlyOff(durB))) {
+        const tituloActual = state.read()?.titulo || '(sin título)';
+        const durTexto = `A: ${formatDuration(durA)}${dlVersionB ? `, B: ${formatDuration(durB)}` : ''} (esperado ${formatDuration(MIN_DURATION_S)}-${formatDuration(MAX_DURATION_S)})`;
+        console.log(`\n🚨 Duración MUY fuera de rango en ${dlVersionB ? 'AMBAS versiones' : 'la única versión descargada'} — ${durTexto}. Probable generación anómala de Suno (versos repetidos/loop).`);
+        await notify(
+          `🚨 "${tituloActual}": duración MUY anormal en ${dlVersionB ? 'ambas versiones' : 'la versión descargada'} — ${durTexto}. Probable generación rota de Suno. Pausado para que escuches antes de seguir (en --loop: 20 min y se abandona sola, sin subir nada ni gastar más créditos).`,
+          { title: 'Duración anómala — revisión humana', priority: 'urgent', tags: 'stopwatch' }
+        ).catch(() => {});
+        await pauseForHumanInteraction(
+          `"${tituloActual}": las versiones descargadas duran ${durTexto} — casi seguro Suno generó mal (versos repetidos/loop). Escuchá los MP3 en Downloads/suno: si están bien, ENTER continúa el pipeline normal; si están rotos, re-generá a mano (node suno-create.js) antes de continuar.`
+        );
       }
     }
   }
@@ -1677,15 +1719,21 @@ async function runFlowInner({ resume = false } = {}, hb) {
     // process.stdout.write a propósito: el console.log parchado copia todo al
     // run-log y 1800 líneas de ticker lo inflarían — el estado ya queda
     // registrado con la línea [Timer] de cada 30s.
-    const ticker = setInterval(() => {
+    // Solo con TTY real (2026-07-14): si stdout es un pipe/archivo (ej.
+    // `node start-flow.js --loop > log`), el \r no sobreescribe nada y cada
+    // tick se APILA como texto plano — un solo ciclo metía cientos de
+    // "[Countdown] ..." repetidos por línea en el log (visto en vivo, infló
+    // loop-console-*.log). Sin TTY el ticker no aporta nada: [Timer] ya
+    // registra el estado cada 30s.
+    const ticker = process.stdout.isTTY ? setInterval(() => {
       const mins = currentElapsedMin;
       let msg;
       if (mins < 25) msg = `⏳ ${mins.toFixed(1)} min — ventana de Submit en ~${(25 - mins).toFixed(1)} min`;
       else if (mins <= autoSubmitMinutes) msg = `✅ ${mins.toFixed(1)} min — Auto-Submit en ~${(autoSubmitMinutes - mins).toFixed(1)} min (o clickealo manual)`;
       else msg = `🤖 ${mins.toFixed(1)} min — Auto-Submit enviado (esperando confirmación)`;
       process.stdout.write(`\r[Countdown] ${msg}      `);
-    }, 1000);
-    if (typeof ticker.unref === 'function') ticker.unref();
+    }, 1000) : null;
+    if (ticker && typeof ticker.unref === 'function') ticker.unref();
 
     // Contador de fallos ESTRUCTURALES consecutivos de readRecentCompletion.
     // "Título aún no coincide" es la espera normal (la primera card sigue
