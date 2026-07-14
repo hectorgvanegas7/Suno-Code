@@ -594,11 +594,14 @@ async function generateSongWithSelfCorrection(surveyContent, baseUserMessageOver
   // guardaba el ÚLTIMO intento, o sea el peor de los tres. Ahora, si se
   // agotan los intentos, se guarda el candidato con MENOS fallos (desempate:
   // el que tenga solo fallos patcheables), no el más reciente.
-  let best = null; // { response, failures }
-  const candidateScore = (failures) => failures.length + (isSafeToPatch(failures) ? 0 : 0.5);
-  const considerCandidate = (response, failures) => {
-    if (!best || candidateScore(failures) < candidateScore(best.failures)) {
-      best = { response, failures };
+  let best = null; // { response, failures, isValid }
+  const candidateScore = (failures, isValid) => {
+    const penalty = isValid ? 0 : 100;
+    return penalty + failures.length + (isSafeToPatch(failures) ? 0 : 0.5);
+  };
+  const considerCandidate = (response, failures, isValid) => {
+    if (!best || candidateScore(failures, isValid) < candidateScore(best.failures, best.isValid)) {
+      best = { response, failures, isValid };
     }
   };
 
@@ -636,7 +639,7 @@ async function generateSongWithSelfCorrection(surveyContent, baseUserMessageOver
         lastFailures = failures;
       }
     }
-    if (!valid) considerCandidate(lastResponse, lastFailures);
+    if (!valid) considerCandidate(lastResponse, lastFailures, false);
 
     if (valid) {
       console.log('✅ Validación estructural + QA: todos los ítems pasaron.');
@@ -660,7 +663,7 @@ async function generateSongWithSelfCorrection(surveyContent, baseUserMessageOver
       lastFailures = grammarResult.failures;
       lastResponse = JSON.stringify(grammarResult.parsedJson);
       parsedJson = grammarResult.parsedJson;
-      considerCandidate(lastResponse, lastFailures);
+      considerCandidate(lastResponse, lastFailures, true);
     }
 
     console.log(`❌ Fallos en intento ${attempt}:`);
@@ -705,10 +708,10 @@ async function generateSongWithSelfCorrection(surveyContent, baseUserMessageOver
           }
           lastFailures = patchedGrammar.failures;
           lastResponse = JSON.stringify(patchedGrammar.parsedJson);
-          considerCandidate(lastResponse, lastFailures);
+          considerCandidate(lastResponse, lastFailures, true);
         } else {
           console.log(`⚠️ El parche no dejó todo limpio (${revalidated.failures.length} fallo[s] restante[s]) — sigue el flujo normal.`);
-          considerCandidate(patchedText, revalidated.failures);
+          considerCandidate(patchedText, revalidated.failures, false);
         }
       } catch (e) {
         console.log(`⚠️ Corrector barato falló (${e.message}) — sigue el flujo normal.`);
@@ -1248,6 +1251,15 @@ process.on('uncaughtException', async (err) => {
           console.log('\n🛡️  Las 2 pasadas discrepan — tercera pasada de desempate...');
           guardiaDesempate = await consultarGuardia('Desempate', { keepAlive: 0 });
           logPass('El Guardia — desempate (ciega)', guardiaDesempate);
+        } else {
+          // Las pasadas coinciden o no hubo segunda pasada: descargar modelo manualmente
+          if (!isDryRun) {
+            fetch('http://localhost:11434/api/chat', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ model: process.env.GUARDIA_MODEL || GUARDIA_DEFAULT_MODEL, messages: [], keep_alive: 0 })
+            }).catch(() => {}); // fire and forget
+          }
         }
       }
 

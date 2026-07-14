@@ -1,5 +1,20 @@
 # Lessons / gotchas
 
+## Descarga de Suno fallaba por discrepancia de mtime y SVG bloqueando el botón ⋯ (2026-07-13)
+
+**Bug 1 (mtime):** El servidor de Suno manda un header `Last-Modified` con la fecha exacta de renderizado (ej: `00:44:08`), y Chrome a veces lo preserva como fecha de modificación del archivo en disco. El script usaba `stat.mtimeMs >= downloadStartTime` (donde el start local era `00:44:11`). El desfase de 3 segundos hacía que `findDownloadedFile` descartara el MP3 correcto por considerarlo "viejo".
+**Fix 1:** Se añadió una tolerancia de 60 segundos por clock drift: `stat.mtimeMs >= (startTime - 60000)`.
+
+**Bug 2 (SVG path):** El botón `⋯` de la card estaba ocasionalmente cubierto por un `<path>` del SVG de la waveform (z-index issue nativo de la UI de Suno). Esto hacía que `safeClick` agotara intentos y usara `force: true`. El problema es que al forzar el click evadiendo el layout, Radix UI no inicializa bien el menú contextual, y el flyout "MP3 Audio" nunca renderiza.
+**Fix 2:** Antes de clickear `⋯`, un `page.evaluate` inyecta `pointer-events: none` recursivo a todos los `<svg>` de la fila de la card. Esto limpia el camino y permite un click natural en el primer intento.
+**Fix 3 (JS fallback):** Si por alguna razón el submenú igual falla en mostrar "MP3 Audio" visualmente, se agregó un `page.evaluate` final que busca el botón en el DOM oculto y le hace click directo vía JS (ya que el CDP intercepta igual la descarga generada por JS).
+
+## Falsas alarmas de "Alucinación Grave" por Levenshtein estricto en el cálculo de fidelidad de letra (2026-07-13)
+
+**Bug:** Canciones que sonaban perfectas ("La Pelota Que Se Soltó") sacaban 66%-67% de score y pausaban el script, porque Suno, en su libertad artística, repetía un coro al final, o Whisper entendía "dos años" en vez de "veintidós". El uso estricto de `levenshteinSimilarity` contra todo el texto inflaba la distancia de edición drásticamente al repetirse bloques enteros de texto.
+**Fix:** Se reemplazó el cálculo general de Levenshtein por un algoritmo de **Cobertura de N-Gramas** (`calculateLyricsCoverage` en `lib/audio-analysis.js`). Éste cuenta cuántos fragmentos de 3 palabras de la letra original existen cantados en la transcripción, ignorando por completo el orden, saltos o estrofas duplicadas. Además, se desactivó `condition_on_previous_text=False` en el llamado a Whisper (`lib/transcribe.py`) para evitar que el modelo invente letra sobre pasajes instrumentales basado en sus iteraciones anteriores.
+
+
 ## Create DUPLICADO en Suno — el pipeline regeneró y re-envió a Suno una canción que YA estaba lista y subida al Flow, gastando créditos dos veces (2026-07-13, incidente real, plata perdida)
 
 **Qué pasó, en orden:** "Un Ángel en Jenner" llegó hasta subir el MP3 al

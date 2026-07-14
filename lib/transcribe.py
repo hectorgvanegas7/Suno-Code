@@ -74,6 +74,7 @@ def transcribe_one(model, actual_device, audio_path, model_size, initial_prompt)
         beam_size=5,
         vad_filter=True,
         word_timestamps=True,
+        condition_on_previous_text=False,
         initial_prompt=initial_prompt or None,
     )
 
