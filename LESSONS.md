@@ -3092,3 +3092,66 @@ la pena arreglar, y el pedido explícito de Hector fue "arreglalo generalizado
 para que nunca vuelva a pasar" — no "dejá pasar más letras". El fix ataca el
 bug real (la caché ciega al rechazo) y la causa raíz de la ambigüedad
 (instrucción de prompt), sin tocar el criterio de aprobación.
+
+## Mejorando lo que hacen Haiku y Sonnet, no solo la plomería alrededor — recuperación automática de rechazos por ambigüedad (2026-07-15, seguimiento del caso "El Pañuelo Azul y Blanco")
+
+Pedido explícito de Hector tras el fix de caché: "mejoralos lo que hace haiku
+y sonnet para que esto en sí no vuelva a pasar" — no alcanzaba con arreglar
+la plomería (la caché) si el patrón de fondo (el Guardia rechazando por
+ambigüedad real, no invención) seguía intacto. Tres mejoras a los dos
+modelos mismos, en capas de defensa creciente:
+
+**1. El prompt del Guardia dejaba `seccion="" linea=0` como salida fácil.**
+La instrucción original decía literalmente que un problema "de toda la
+canción" podía ir sin ancla de línea — y el rechazo real de anoche (fusión
+aparente de dos viajes) salió sin `seccion`/`linea`, así que el mecanismo
+YA EXISTENTE de reprompt de Haiku (que solo arregla problemas con línea
+anclada) nunca se activó, y el pipeline saltó directo a la pausa humana.
+Fix: el prompt ahora exige anclar CUALQUIER problema a la línea más
+representativa, reservando `seccion=""` solo para algo que de verdad no
+vive en ninguna línea (ej. "el arco general es plano"). Verificado en vivo
+contra la API real con el caso exacto de anoche: esta vez ancló el problema
+a `[Verso 2 L2]` en vez de dejarlo suelto.
+
+**2. El prompt de fidelidad no distinguía AMBIGÜEDAD de INVENCIÓN.** El
+criterio decía "fidelidad 1-4 si hay una afirmación sin respaldo O una
+fusión de capítulos" tratando ambos casos igual — pero "aquel camino" sin
+nombrar el viaje no es una fusión real, es una línea que necesita nombrar el
+evento. Nueva cláusula explícita: fusión/invención real = fidelidad 1-4
+siempre; ambigüedad de redacción (el hecho SÍ está en la encuesta, solo
+falta nombrarlo en esa línea) = fidelidad 5-6, tipo "coherencia" no
+"fidelidad". Esto no debilita el veto (una fusión real sigue puntuando
+bajo) — lo hace más preciso, y como consecuencia lateral las etiquetas
+`tipo` quedan más útiles para lo de abajo.
+
+**3. `shouldAttemptAmbiguityRecovery` — tercer nivel de defensa antes de
+pausar** (`lib/ollama-guardia.js`, pura, 8 tests con los veredictos REALES
+del incidente). Después del reprompt de línea existente (que solo parchea
+líneas puntuales sin regenerar), si el Guardia sigue rechazando Y el perfil
+es "ambigüedad, no invención" — extracción de hechos con CERO sin respaldo
+(la señal más confiable, ver caso "Miami") + el resto de los puntajes
+(coherencia/rima/tono) son buenos, solo fidelidad/coherencia bajos por el
+problema puntual — `run.js` le da a Sonnet UN intento automático de
+regeneración completa citando el motivo exacto del Guardia
+(`buildAmbiguityCorrectiveNote`), y vuelve a consultar al Guardia sobre el
+resultado. Si aprueba: se salta la pausa, se sobrescribe `song.txt`, y la
+caché se reemplaza con la versión BUENA (nunca queda la ambigua cacheada).
+Si sigue sin aprobar: cae a la pausa de siempre, pero mostrándole al humano
+la MEJOR versión disponible, no la original. UN solo intento — nunca un
+loop; si el perfil no es "ambigüedad pura" (letra mala en varios frentes, o
+la extracción SÍ encontró algo sin respaldo), no se activa y va derecho a
+la pausa humana, exactamente como antes.
+
+**Validado en vivo, no solo con mocks** (misma lección del caso Haiku):
+`validarGuardia` contra la API real con la encuesta y letra EXACTAS del
+incidente confirmó las tres piezas encadenadas — el rechazo real quedó
+anclado a línea, `shouldAttemptAmbiguityRecovery` disparó `true` sobre la
+respuesta real (no solo sobre datos tipeados a mano), y
+`buildAmbiguityCorrectiveNote` armó una instrucción correctiva clara y
+sin pedir invención. No se gastó en probar el regen completo (reusa
+`generateSongWithSelfCorrection`, ya probado en todo el resto del pipeline).
+
+**Lo que sigue sin tocarse:** el poder de veto del Guardia. Una letra
+genuinamente mala en varios frentes, o con un hecho de verdad inventado,
+sigue yendo directo a pausa humana sin ningún atajo — el pedido fue que la
+AMBIGÜEDAD real (no la calidad en general) deje de trabar canciones buenas.

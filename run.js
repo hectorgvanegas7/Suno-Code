@@ -436,6 +436,7 @@ Respond with EXACTLY this JSON format and nothing else. Do not wrap in markdown 
     "verse_2_con_escena_concreta": true,
     "bridge_con_detalle_vulnerable": true,
     "nada_inventado": true,
+    "eventos_similares_desambiguados": true,
     "trato_consistente": true,
     "numeros_meses_completos": true,
     "titulo_no_cantable": true,
@@ -1417,8 +1418,11 @@ process.on('uncaughtException', async (err) => {
       };
 
       // Pasada 1: CIEGA (sin el resultado del QA duro) — juicio independiente.
+      // `let` (no `const`): la recuperación automática de ambigüedad (más
+      // abajo) reasigna esto si un regen corregido termina reemplazando el
+      // veredicto original.
       console.log('\n🛡️  Consultando al Guardia (Haiku, respondiendo en segundos)...');
-      const guardiaResult = await consultarGuardia('Pasada 1');
+      let guardiaResult = await consultarGuardia('Pasada 1');
       logPass('El Guardia — pasada 1 (ciega)', guardiaResult);
       let guardiaSegunda = null;
       let guardiaDesempate = null;
@@ -1630,6 +1634,101 @@ process.on('uncaughtException', async (err) => {
         }
       }
       // --------------------------------------------------------
+
+      // ── Recuperación automática de rechazos por AMBIGÜEDAD (2026-07-15) ──
+      // Segundo nivel de defensa, DESPUÉS del parche de línea de arriba (que
+      // solo arregla líneas puntuales sin regenerar nada): si el Guardia
+      // sigue rechazando y el perfil es "ambigüedad, no invención" —
+      // extracción de hechos limpia (0 sin respaldo) + el resto de los
+      // puntajes son buenos, ver shouldAttemptAmbiguityRecovery en
+      // lib/ollama-guardia.js — le damos a Sonnet UN intento de regen
+      // completo citando el motivo exacto del Guardia, antes de pausar para
+      // un humano. Caso real que lo motivó ("El Pañuelo Azul y Blanco",
+      // LESSONS.md): 0 hechos sin respaldo, rechazo solo por una línea con
+      // un pronombre ambiguo ("aquel camino") entre dos viajes reales de la
+      // encuesta. UN único intento — nunca un loop; si tampoco alcanza, cae
+      // al flujo de pausa de siempre exactamente igual que antes.
+      if (guardiaRechaza && !isDryRun) {
+        const { shouldAttemptAmbiguityRecovery, buildAmbiguityCorrectiveNote } = require('./lib/ollama-guardia');
+        const rejectingVeredictos = veredictos.filter((g) => g.aprobada === false);
+        if (shouldAttemptAmbiguityRecovery({ rejectingVeredictos, hechosSinRespaldo })) {
+          const correctiveNote = buildAmbiguityCorrectiveNote(rejectingVeredictos);
+          console.log('\n🩹 Rechazo con perfil de AMBIGÜEDAD (0 hechos sin respaldo, resto de puntajes buenos) — un intento automático de corrección antes de pausar:');
+          console.log(correctiveNote);
+          try {
+            const retryResult = await generateSongWithSelfCorrection(surveyContent, `${finalBaseUserMessage}\n\n${correctiveNote}`);
+            if (retryResult.parsedJson?.letras) {
+              console.log('\n🛡️  Re-consultando al Guardia sobre la letra corregida...');
+              const retryPayload = { letras: retryResult.parsedJson.letras, titulo: retryResult.parsedJson.titulo, survey: surveyContent, estiloSuno: retryResult.parsedJson.estiloSuno };
+              const retryGuardia1 = await validarGuardia(retryPayload);
+              logPass('El Guardia — recuperación (pasada 1)', retryGuardia1);
+              const retryGuardia2 = retryGuardia1.ok
+                ? await validarGuardia({ ...retryPayload, qaContext: { passedQA: retryResult.passedQA, failures: retryResult.lastFailures || [] } })
+                : null;
+              if (retryGuardia2) logPass('El Guardia — recuperación (pasada 2)', retryGuardia2);
+
+              const retryVeredictos = [retryGuardia1, retryGuardia2].filter((g) => g && g.ok);
+              const retryRechazos = retryVeredictos.filter((g) => g.aprobada === false).length;
+              const retryGuardiaRechaza = retryVeredictos.length > 0 && retryRechazos >= Math.max(1, Math.ceil(retryVeredictos.length / 2));
+
+              console.log(retryGuardiaRechaza
+                ? '⚠️ La corrección automática NO alcanzó — el Guardia sigue sin aprobar. Se adopta igual la versión corregida (más cerca de lo pedido) para que la revise un humano.'
+                : '✅ La corrección automática funcionó — El Guardia aprueba la letra regenerada. Se salta la pausa.');
+
+              // Adoptar el resultado del intento (apruebe o no) — ya pasó por
+              // el loop de auto-corrección completo (hardValidate +
+              // LanguageTool + FACT_GATE + anti-calco) y está más cerca de lo
+              // pedido que la versión original en cualquiera de los dos casos.
+              parsedJson = retryResult.parsedJson;
+              fullResponse = retryResult.fullResponse;
+              passedQA = retryResult.passedQA;
+              qaFailures = retryResult.lastFailures || [];
+              guardiaResult = retryGuardia1;
+              guardiaSegunda = retryGuardia2;
+              guardiaDesempate = null;
+              extraccionHechos = null; // no se re-corrió sobre este intento — el próximo registro del jsonl lo deja explícito
+              hechosSinRespaldo = null;
+              veredictos.length = 0;
+              veredictos.push(...retryVeredictos);
+              rechazos = retryRechazos;
+              guardiaRechaza = retryGuardiaRechaza;
+
+              const nowRetry = new Date();
+              const dateStrRetry = `${nowRetry.getMonth() + 1}.${String(nowRetry.getDate()).padStart(2, '0')}.${nowRetry.getFullYear()}`;
+              const warningBannerRetry = passedQA ? '' : `⚠️ ADVERTENCIA: no pasó la validación después de ${MAX_GENERATION_ATTEMPTS} intentos. Revisar manualmente.\n\n`;
+              const notesLineRetry = `NOTES: ${dateStrRetry}. Hector. PS0180. Letra + Suno. Song ID: ${songId}`;
+              fs.writeFileSync(SONG_PATH, `${warningBannerRetry}${convertJsonToMarkdown(parsedJson)}\n\n${notesLineRetry}`, 'utf-8');
+
+              if (!retryGuardiaRechaza) {
+                // Reemplazar la caché con la versión BUENA — sin esto, la
+                // entrada vieja (ambigua, rechazada) seguiría sirviéndose en
+                // cualquier corrida futura sobre esta misma encuesta.
+                writeCache(surveyHash, { fullResponse, parsedJson, passedQA });
+              }
+
+              // Registro específico del intento de recuperación (auditoría,
+              // calibración futura de shouldAttemptAmbiguityRecovery) — el
+              // registro "SIEMPRE" de arriba ya capturó el veredicto ORIGINAL
+              // antes de este intento; esto deja constancia del resultado
+              // final para que state.json/--explain-resume no se queden con
+              // el veredicto viejo si la recuperación funcionó. Best-effort,
+              // igual que el registro "SIEMPRE" de arriba.
+              try {
+                pipelineState.write({ guardia: guardiaResult, guardiaSegunda, guardiaDesempate, ambiguityRecovery: { attempted: true, succeeded: !retryGuardiaRechaza } });
+                fs.appendFileSync(
+                  path.join(__dirname, 'logs', 'guardia-feedback.jsonl'),
+                  JSON.stringify({ ts: new Date().toISOString(), songId, event: 'ambiguity-recovery', succeeded: !retryGuardiaRechaza, guardiaResult: retryGuardia1, guardiaSegunda: retryGuardia2 }) + '\n',
+                  'utf-8'
+                );
+              } catch {
+                // best-effort — la señal ya se mostró en consola/run-log
+              }
+            }
+          } catch (e) {
+            console.log(`⚠️ El intento de recuperación automática falló (${e.message}) — sigue el flujo original con la letra previa.`);
+          }
+        }
+      }
 
       if (!isDryRun && veredictos.length === 0) {
         await notify(

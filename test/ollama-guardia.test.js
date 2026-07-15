@@ -547,3 +547,91 @@ test('decideFactGateAction: degradación automática tras 2 regens en la misma c
 test('decideFactGateAction: el modo es case-insensitive (REGEN de un .env de Windows vale)', () => {
   assert.equal(decideFactGateAction({ sinRespaldoCount: 1, mode: 'REGEN', regenCount: 0 }), 'regen');
 });
+
+// ─── shouldAttemptAmbiguityRecovery / buildAmbiguityCorrectiveNote (2026-07-15) ─
+// Caso real: "El Pañuelo Azul y Blanco" — el Guardia rechazó 2/3 pasadas por
+// "fidelidad" (fusión aparente de dos viajes), pero la extracción de hechos
+// encontró CERO afirmaciones sin respaldo. Veredictos reproducidos de
+// logs/guardia-feedback.jsonl del incidente real.
+
+const { shouldAttemptAmbiguityRecovery, buildAmbiguityCorrectiveNote } = require('../lib/ollama-guardia');
+
+const PANUELO_RECHAZO_1 = {
+  aprobada: false, coherencia: 8, rima: 8, tono: 9, fidelidad: 4, gancho: 8,
+  problemas: [
+    { seccion: 'Verse 2', linea: 3, tipo: 'fidelidad', gravedad: 'alta', detalle: "La letra fusiona dos viajes SEPARADOS (Tierra Santa 2022 y Portugal 2025) en una misma estrofa sin aclaración temporal clara. La frase 'aquel camino' podría referirse a cualquiera de los dos." },
+    { seccion: 'Verse 2', linea: 4, tipo: 'fidelidad', gravedad: 'media', detalle: "La mención del fruto de Chiapas crea confusión temporal." },
+  ],
+};
+const PANUELO_RECHAZO_3 = {
+  aprobada: false, coherencia: 9, rima: 8, tono: 9, fidelidad: 4, gancho: 8,
+  problemas: [
+    { seccion: 'Verse 2', linea: 3, tipo: 'fidelidad', gravedad: 'alta', detalle: 'La letra fusiona dos viajes separados por tres años en una secuencia narrativa continua sin marcar la separación temporal.' },
+  ],
+};
+const HECHOS_SIN_RESPALDO_VACIO = { evaluados: 13, sinRespaldo: [] };
+
+test('shouldAttemptAmbiguityRecovery: dispara con el caso real "El Pañuelo Azul y Blanco" (0 hechos sin respaldo + perfil de ambigüedad)', () => {
+  const result = shouldAttemptAmbiguityRecovery({
+    rejectingVeredictos: [PANUELO_RECHAZO_1, PANUELO_RECHAZO_3],
+    hechosSinRespaldo: HECHOS_SIN_RESPALDO_VACIO,
+  });
+  assert.equal(result, true);
+});
+
+test('shouldAttemptAmbiguityRecovery: NUNCA dispara dos veces (alreadyAttempted corta incluso con el mismo caso real)', () => {
+  const result = shouldAttemptAmbiguityRecovery({
+    rejectingVeredictos: [PANUELO_RECHAZO_1, PANUELO_RECHAZO_3],
+    hechosSinRespaldo: HECHOS_SIN_RESPALDO_VACIO,
+    alreadyAttempted: true,
+  });
+  assert.equal(result, false);
+});
+
+test('shouldAttemptAmbiguityRecovery: NO dispara si la extracción encontró hechos sin respaldo (caso real de invención, ej. "Miami")', () => {
+  const result = shouldAttemptAmbiguityRecovery({
+    rejectingVeredictos: [PANUELO_RECHAZO_1],
+    hechosSinRespaldo: { evaluados: 5, sinRespaldo: [{ tipo: 'lugar', valor: 'Miami', motivo: 'no está en la encuesta' }] },
+  });
+  assert.equal(result, false);
+});
+
+test('shouldAttemptAmbiguityRecovery: NO dispara sin señal de extracción (API caída — lado conservador)', () => {
+  assert.equal(shouldAttemptAmbiguityRecovery({ rejectingVeredictos: [PANUELO_RECHAZO_1], hechosSinRespaldo: null }), false);
+  assert.equal(shouldAttemptAmbiguityRecovery({ rejectingVeredictos: [PANUELO_RECHAZO_1], hechosSinRespaldo: { ok: false } }), false);
+});
+
+test('shouldAttemptAmbiguityRecovery: NO dispara si una letra está genuinamente mal en varios frentes (coherencia/rima/tono bajos)', () => {
+  const letraMalaEnGeneral = {
+    aprobada: false, coherencia: 4, rima: 3, tono: 5, fidelidad: 4, gancho: 3,
+    problemas: [{ seccion: 'Verse 1', linea: 1, tipo: 'fidelidad', gravedad: 'alta', detalle: 'x' }],
+  };
+  const result = shouldAttemptAmbiguityRecovery({
+    rejectingVeredictos: [letraMalaEnGeneral],
+    hechosSinRespaldo: HECHOS_SIN_RESPALDO_VACIO,
+  });
+  assert.equal(result, false, 'una letra mala en varios frentes necesita un humano, no un auto-fix de una línea');
+});
+
+test('shouldAttemptAmbiguityRecovery: sin veredictos rechazados no dispara', () => {
+  assert.equal(shouldAttemptAmbiguityRecovery({ rejectingVeredictos: [], hechosSinRespaldo: HECHOS_SIN_RESPALDO_VACIO }), false);
+  assert.equal(shouldAttemptAmbiguityRecovery({ hechosSinRespaldo: HECHOS_SIN_RESPALDO_VACIO }), false);
+});
+
+test('buildAmbiguityCorrectiveNote: cita los detalles reales, deduplicados, y nunca pide inventar', () => {
+  const note = buildAmbiguityCorrectiveNote([PANUELO_RECHAZO_1, PANUELO_RECHAZO_3]);
+  assert.match(note, /aquel camino/);
+  assert.match(note, /NO invención/);
+  assert.match(note, /\[Verse 2 línea 3\]/);
+  // El detalle de "fusiona dos viajes separados por tres años..." aparece en
+  // ambos veredictos con texto distinto — no debería duplicar el idéntico,
+  // pero acá son textos distintos así que ambos entran; confirmamos que al
+  // menos no se repite un detalle CHAR-BY-CHAR idéntico.
+  const lineas = note.split('\n').filter((l) => l.startsWith('- '));
+  assert.equal(new Set(lineas).size, lineas.length, 'no debería haber líneas idénticas duplicadas');
+});
+
+test('buildAmbiguityCorrectiveNote: sin problemas de fidelidad/coherencia da un mensaje vacío de detalles pero no lanza', () => {
+  const note = buildAmbiguityCorrectiveNote([{ problemas: [{ seccion: 'Verse 1', linea: 1, tipo: 'rima', gravedad: 'baja', detalle: 'x' }] }]);
+  assert.equal(typeof note, 'string');
+});
