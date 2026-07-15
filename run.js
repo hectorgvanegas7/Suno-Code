@@ -349,7 +349,7 @@ Pick the template below that matches the survey's real energy (not everything is
 
 ### GOLDEN EXAMPLE (real survey → real approved lyrics)
 
-This is a REAL production song that passed QA. Study the LEVEL of craft — do NOT reuse its imagery, phrases, rhymes or structure choices in other songs. Every song must be built from ITS OWN survey.
+This is a REAL production song that passed QA. Study the LEVEL of craft — do NOT reuse its imagery, phrases, rhymes or structure choices in other songs. Every song must be built from ITS OWN survey. ⚠️ Copying observed in production and BANNED: opening the Bridge with "Cuando ya no esté para decirlo..." (or any close variant of this example's lines). If your draft shares a recognizable phrase with this example, rewrite it — the example shows the QUALITY BAR, never source material.
 
 **Survey (verbatim, imperfect wording and all):**
 Who's this for?: Esposo
