@@ -2978,3 +2978,30 @@ componente que gatea exige recalibrar contra el banco dorado. Ahorro
 estimado: centavos/día (Haiku). Riesgo/beneficio no cierra hoy; si el banco
 crece a ≥10 casos, rehacerlo midiendo antes/después. `estiloCoincide` ya lo
 juzga el propio Guardia (campo del schema) — no hace falta un juez aparte.
+
+## Higiene automatizada: drift check diario de selectores, npm test como gate del loop, e inventario de idempotencia como test (2026-07-14, cierre del plan de mejora)
+
+Tres piezas de "nunca fallar en silencio" que cierran el plan del día:
+
+1. **Drift check diario automático** (idea de IDEAS.md, pendiente desde
+   2026-07-03): el watchdog corre `suno-selector-drift.js` una vez por día
+   (6 AM, antes del digest) — SOLO con el pipeline ocioso (stage=completed o
+   sin state), porque el script navega/recarga suno.com/create y hacerlo con
+   una canción en vuelo podría pisar el formulario recién llenado
+   (`shouldRunDriftCheck`, pura, testeada). Exit codes: 0 limpio · 2 drift
+   (push high + línea en el digest) · 1 no se pudo correr (Chrome apagado —
+   solo log, sin spam). Los ítems del menú ⋯ (Download/MP3) no cuentan como
+   drift: el script es de solo lectura y Radix no los renderiza sin abrir el
+   menú.
+2. **npm test como gate de `--loop`**: la suite es offline y tarda ~3s;
+   correrla al arrancar el loop atrapa un edit roto del día (la migración a
+   Haiku dejó 6 tests rotos sin que nadie corriera la suite) ANTES de dejar
+   la noche sola. Falla → el loop no arranca + push urgente. Detrás corre el
+   smoke de API real (entrada anterior).
+3. **`test/idempotency-inventory.test.js`**: el inventario COMPLETO de
+   acciones irreversibles (Create, retry de Create, Submit, upload, notas,
+   hoja, galería) con sus guards como test-tabla — chequeos textuales que
+   rompen con nombre y apellido si un refactor borra un guard, más dos
+   chequeos de ORDEN (el intent write-ahead debe escribirse ANTES del click,
+   o pierde su razón de ser). No prueban comportamiento (eso lo hacen los
+   tests de las funciones puras) — prueban que la pieza no desapareció.

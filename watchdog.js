@@ -256,6 +256,7 @@ async function sendDigest({ lookbackHours = 12 } = {}) {
   const watchdogEvents = readJsonlEntries(WATCHDOG_EVENTS_PATH).filter(withinWindow);
   const restarts = watchdogEvents.filter((e) => e.event === 'restart').length;
   const circuitBreakerTripped = watchdogEvents.some((e) => e.event === 'circuit-breaker-tripped');
+  const driftDetected = watchdogEvents.some((e) => e.event === 'drift-check' && e.code === 2);
 
   // Resumen por canción (2026-07-14): antes el digest solo contaba submits y
   // reinicios — una canción que falló en la GENERACIÓN (sin tocar al
@@ -268,7 +269,7 @@ async function sendDigest({ lookbackHours = 12 } = {}) {
   const currentState = state.read();
   const diskProblem = checkDiskSpace();
 
-  const allOk = failedSubmits === 0 && blockedSubmits === 0 && restarts === 0 && !circuitBreakerTripped && !diskProblem && failedSongs.length === 0;
+  const allOk = failedSubmits === 0 && blockedSubmits === 0 && restarts === 0 && !circuitBreakerTripped && !diskProblem && failedSongs.length === 0 && !driftDetected;
   const lines = [
     allOk && confirmedSubmits > 0 ? '✅ Noche limpia — nada requiere tu atención.' : null,
     `• Canciones completadas: ${completedSongs.length}${completedSongs.length > 0 ? ` (${completedSongs.map((e) => `"${e.titulo}"`).join(', ')})` : ''}`,
@@ -277,6 +278,7 @@ async function sendDigest({ lookbackHours = 12 } = {}) {
     failedSubmits > 0 ? `• Submits FALLIDOS: ${failedSubmits} ⚠️ revisar en el Flow` : null,
     blockedSubmits > 0 ? `• Submits BLOQUEADOS (sin MP3 subido): ${blockedSubmits} 🛑 acción manual pendiente` : null,
     `• Reinicios del watchdog: ${restarts}${circuitBreakerTripped ? ' (🛑 circuit breaker se activó — revisar logs/watchdog-events.jsonl)' : ''}`,
+    driftDetected ? '• 🚨 Drift de selectores de Suno detectado — revisar selector-drift-report.md ANTES de la próxima canción' : null,
     currentState?.titulo ? `• Última canción conocida: "${currentState.titulo}" (etapa: ${currentState.stage})` : null,
     diskProblem ? `• ⚠️ ${diskProblem}` : null,
   ].filter(Boolean).join('\n');
@@ -415,6 +417,50 @@ async function collectFactVerdicts() {
   }
 }
 
+// ─── Drift check diario de selectores de Suno (2026-07-14) ──────────────────
+// Corre suno-selector-drift.js (100% solo lectura — jamás clickea) una vez
+// por día, SOLO con el pipeline ocioso: el script navega/recarga
+// suno.com/create si la pestaña no está ahí, y hacerlo con una canción en
+// vuelo podría pisar el formulario recién llenado. Con canción activa
+// (stage ≠ completed) se saltea y se reintenta en el próximo tick del día.
+// Exit codes del script: 0 limpio · 2 drift (push high) · 1 no se pudo
+// correr (Chrome apagado — solo log + evento, sin spam de push).
+const DRIFT_CHECK_HOUR = 6; // antes del digest de las 7 — el resultado entra al resumen
+
+function shouldRunDriftCheck({ now, lastDriftDate, stateObj, hour = DRIFT_CHECK_HOUR }) {
+  if (now.getHours() < hour) return false;
+  if (lastDriftDate === todayLocalDateStr(now)) return false;
+  if (stateObj && stateObj.stage && stateObj.stage !== 'completed') return false;
+  return true;
+}
+
+async function maybeRunDailyDriftCheck() {
+  try {
+    const now = new Date();
+    const wstate = readWatchdogState();
+    if (!shouldRunDriftCheck({ now, lastDriftDate: wstate.lastDriftDate, stateObj: state.read() })) return;
+
+    console.log('[watchdog] Drift check diario de selectores de Suno (solo lectura)...');
+    const res = spawnSync('node', ['suno-selector-drift.js'], { cwd: __dirname, timeout: 3 * 60 * 1000, encoding: 'utf-8' });
+    const code = res.status;
+    logEvent({ event: 'drift-check', code });
+    if (code === 2) {
+      await notify(
+        '🚨 Drift de selectores de Suno detectado: al menos un selector crítico ya no existe en suno.com/create. Revisá selector-drift-report.md y lib/suno-selectors.js ANTES de la próxima canción — el pipeline va a fallar a mitad de un Create si no.',
+        { title: 'Drift de selectores de Suno', priority: 'high', tags: 'satellite' }
+      ).catch(() => {});
+    } else if (code === 0) {
+      console.log('[watchdog] Drift check: selectores OK.');
+    } else {
+      console.log(`[watchdog] Drift check no se pudo correr (exit ${code}) — probablemente Chrome apagado; queda registrado, sin push.`);
+    }
+    wstate.lastDriftDate = todayLocalDateStr(now);
+    writeWatchdogState(wstate);
+  } catch (e) {
+    console.log(`[watchdog] Drift check falló (no fatal): ${e.message}`);
+  }
+}
+
 async function main() {
   const args = process.argv.slice(2);
 
@@ -454,6 +500,7 @@ async function main() {
     }
     await maybeSendDailyDigest();
     await collectFactVerdicts();
+    await maybeRunDailyDriftCheck();
     await new Promise((r) => setTimeout(r, CHECK_INTERVAL_MS));
   }
 }
@@ -476,6 +523,7 @@ module.exports = {
   isWatchdogRunning,
   stopWatchdogIfRunning,
   parseFactVerdict,
+  shouldRunDriftCheck,
   WATCHDOG_PID_PATH,
   FACT_VERDICTS_PATH,
 };

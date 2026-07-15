@@ -942,3 +942,17 @@ hardValidate (ver el bug multi-destinatario en LESSONS.md).
   es el objetivo.
 - Respondé corto y directo. No re-expliques diseño ya establecido (REDO, verificación
   visual, etc.) — ya está acordado.
+
+## Higiene automatizada (2026-07-14)
+
+- **Drift check diario**: el watchdog corre `suno-selector-drift.js` (solo
+  lectura) 1×/día a las 6 AM, solo con pipeline ocioso — push si hay drift,
+  línea en el digest. Manual: `node suno-selector-drift.js` (exit 2 = drift).
+- **Gate de arranque de `--loop`**: `npm test` (offline, ~3s) + smoke de API
+  real (1 llamada Haiku). Cualquiera falla → el loop NO arranca + push
+  urgente. `node lib/preflight.js --with-api` lo corre a mano.
+- **`test/idempotency-inventory.test.js`**: inventario de TODAS las acciones
+  irreversibles con sus guards. Si agregás una acción que gasta plata /
+  publica / escribe afuera, registrala ahí con su guard — el test rompe si
+  un refactor borra un guard o si el intent write-ahead deja de escribirse
+  antes del click.

@@ -181,3 +181,25 @@ test('parseFactVerdict: ignora respuestas de pausa y basura (no colisiona con el
   assert.equal(parseFactVerdict(''), null);
   assert.equal(parseFactVerdict(null), null);
 });
+
+// ─── shouldRunDriftCheck: drift check diario solo con pipeline ocioso ─────────
+
+const { shouldRunDriftCheck } = require('../watchdog');
+
+test('shouldRunDriftCheck: pasada la hora, sin corrida hoy y pipeline ocioso → true', () => {
+  const now = new Date('2026-07-14T08:30:00');
+  assert.equal(shouldRunDriftCheck({ now, lastDriftDate: '2026-07-13', stateObj: { stage: 'completed' } }), true);
+  assert.equal(shouldRunDriftCheck({ now, lastDriftDate: null, stateObj: null }), true);
+});
+
+test('shouldRunDriftCheck: JAMÁS con una canción en vuelo (goto podría pisar el formulario de Suno)', () => {
+  const now = new Date('2026-07-14T08:30:00');
+  for (const stage of ['generated', 'suno-filled', 'flow-filled']) {
+    assert.equal(shouldRunDriftCheck({ now, lastDriftDate: null, stateObj: { stage } }), false, `stage=${stage} debería bloquear el drift check`);
+  }
+});
+
+test('shouldRunDriftCheck: una sola vez por día y nunca antes de la hora', () => {
+  assert.equal(shouldRunDriftCheck({ now: new Date('2026-07-14T08:30:00'), lastDriftDate: '2026-07-14', stateObj: null }), false);
+  assert.equal(shouldRunDriftCheck({ now: new Date('2026-07-14T03:00:00'), lastDriftDate: null, stateObj: null }), false);
+});

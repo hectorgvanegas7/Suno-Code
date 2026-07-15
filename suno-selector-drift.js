@@ -28,6 +28,7 @@ async function main() {
   // Darle un poco de tiempo para asegurar que el DOM este listo
   await page.waitForTimeout(2000);
 
+  let driftCount = 0;
   const report = [];
   report.push('# Reporte de Selectores de Suno (Drift Detector)\n');
   report.push(`Fecha: ${new Date().toISOString()}\n`);
@@ -66,6 +67,10 @@ async function main() {
 
       let status = '❌';
       let obs = '';
+      // Los ítems del menú ⋯ (Download/MP3) no se renderizan hasta abrir el
+      // menú, y este script es de SOLO lectura (jamás clickea) — su ausencia
+      // es esperada y no cuenta como drift.
+      const isExpectedHidden = check.name.includes('Download') || check.name.includes('MP3');
 
       if (count > 0 && isVisible) {
         status = '✅';
@@ -73,14 +78,14 @@ async function main() {
       } else if (count > 0 && !isVisible) {
         status = '⚠️';
         obs = `Existe en el DOM (${count} matches), pero 0 visibles.`;
-        if (check.name.includes('Download') || check.name.includes('MP3')) {
-          obs += ' (Esperado: menú ⋯ no abierto por regla de solo lectura)';
-        }
+        if (isExpectedHidden) obs += ' (Esperado: menú ⋯ no abierto por regla de solo lectura)';
       } else {
         status = '❌';
         obs = 'No encontrado en el DOM.';
-        if (check.name.includes('Download') || check.name.includes('MP3')) {
+        if (isExpectedHidden) {
           obs += ' (Esperado: Radix UI no renderiza el menú hasta abrirlo, no clickeado por regla de solo lectura)';
+        } else {
+          driftCount++;
         }
       }
 
@@ -89,6 +94,7 @@ async function main() {
     } catch (e) {
       report.push(`| ${check.name} | ❌ | Error al evaluar: ${e.message} |`);
       console.log(`❌ ${check.name}: Error al evaluar: ${e.message}`);
+      if (!(check.name.includes('Download') || check.name.includes('MP3'))) driftCount++;
     }
   }
 
@@ -96,6 +102,18 @@ async function main() {
   fs.writeFileSync('selector-drift-report.md', reportText);
   console.log('\nReporte guardado en selector-drift-report.md');
   await browser.close().catch(() => {});
+
+  // Códigos de salida para el corredor automático (watchdog, 2026-07-14):
+  //   0 = sin drift · 2 = drift detectado (selector crítico ausente) ·
+  //   1 = no se pudo correr (Chrome/puerto — ya manejado arriba con exit(1)).
+  if (driftCount > 0) {
+    console.log(`\n🚨 DRIFT: ${driftCount} selector(es) crítico(s) no encontrados — revisar lib/suno-selectors.js antes de la próxima canción.`);
+    process.exit(2);
+  }
+  process.exit(0);
 }
 
-main().catch(console.error);
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});

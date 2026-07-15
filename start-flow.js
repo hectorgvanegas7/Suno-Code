@@ -2469,6 +2469,30 @@ function explainResume() {
     // Todo el ciclo funciona de principio a fin sin requerir atención.
     console.log('🔁 Modo --loop: canciones en continuo. Todo el proceso es ahora 100% AUTOMÁTICO (incluso el Submit to QA). Ctrl+C para salir.\n');
 
+    // CI local mínimo (2026-07-14): npm test es 100% offline y tarda ~3s —
+    // correrlo al arrancar --loop atrapa un edit roto del día (propio o de
+    // otro agente — pasó con la migración a Haiku, que dejó 6 tests rotos
+    // sin que nadie corriera la suite) ANTES de dejar la noche corriendo.
+    // Falla → el loop NO arranca, push urgente.
+    {
+      const { spawnSync } = require('child_process');
+      console.log('🧪 Corriendo npm test (offline, ~3s) antes de arrancar la noche...');
+      const testRun = spawnSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['test', '--silent'], {
+        cwd: __dirname, encoding: 'utf-8', timeout: 5 * 60 * 1000, shell: process.platform === 'win32',
+      });
+      if (testRun.status !== 0) {
+        const tail = String(testRun.stdout || '').split('\n').filter((l) => /not ok|fail/i.test(l)).slice(0, 5).join('\n');
+        console.error(`\n🛑 npm test FALLÓ (exit ${testRun.status}) — el loop no arranca con la suite rota.`);
+        if (tail) console.error(tail);
+        await notify(
+          `🛑 npm test falló al arrancar --loop (exit ${testRun.status}) — hay código roto; el loop NO arranca. Corré npm test en la PC para ver el detalle.`,
+          { title: 'Loop no arrancó — tests rotos', priority: 'urgent', tags: 'no_entry,test_tube' }
+        ).catch(() => {});
+        process.exit(1);
+      }
+      console.log('✅ npm test en verde.');
+    }
+
     // Smoke de API real UNA vez por arranque del loop (2026-07-14, lección
     // "migración Haiku rota desde el día 1"): una llamada mínima a Haiku
     // (fracción de centavo) atrapa key vencida/sin saldo/schema roto a las
