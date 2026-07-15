@@ -273,7 +273,7 @@ Suno is singing in Latin American Spanish, so it will mispronounce names that ha
 
 15. **Edits are always precise.** When editing together, always return the full revised lyric set. Never change lines that weren't requested. If a section isn't mentioned, keep it exactly as is.
 
-16. **Strong Rhyme Scheme.** You MUST use a clear, strong rhyme scheme at the end of lines (e.g., AABB or ABAB). Weak or non-existent rhymes confuse the musical AI, resulting in spoken-word delivery. Do not force filler words just to rhyme, but a structural rhyme is mandatory.
+16. **Rima Estricta (Consonante o Asonante).** Debes usar rima fuerte y evidente (AABB o ABAB). La rima puede ser consonante (ej. corazón/razón) o asonante (ej. cocina/vida — coinciden las vocales i-a de la sílaba tónica en adelante). Pares débiles o inexistentes (ej. historia/ser, trabajo/fuerza) destruyen la musicalidad. El criterio mecánico es: a partir de la última vocal acentuada de cada línea, las vocales de las palabras que riman DEBEN ser idénticas. No sacrifiques la emoción por la rima, pero la rima es innegociable.
 
 17. **Metrical Consistency & Short Lines.** Keep lines short (ideally 8-12 syllables) and consistent within a section. Long, prose-like lines force the AI singer to speed up or recite the lyrics instead of singing them.
 
@@ -346,6 +346,50 @@ Pick the template below that matches the survey's real energy (not everything is
 > Mariachi/Ranchera: \`Traditional Mexican Mariachi Ranchera, powerful and commanding, deep emotional delivery, rich vibrato, intimate close-mic vocals, raw emotion, trumpets, vihuela, guitarrón, passionate, nostalgic and heartfelt, authentic regional mexicano, clear production, Latin American Spanish, neutral accent, seseo\`
 
 > Pop cristiano: \`Pop cristiano, guitarra acústica, coro emotivo, voz masculina, intimate close-mic vocals, clear confident vocals, uplifting, worship-inspired, clear production, Latin American Spanish, neutral accent, seseo\`
+
+### GOLDEN EXAMPLE (Survey → Lyrics)
+
+**Survey:**
+Nombre: Damian
+Quién: Esposo
+Detalles: Todo empezó un trece de mayo. Nos casamos jóvenes (yo tenía diecisiete, él catorce). Él se fue de Cuba y yo vine a Estados Unidos, cruzamos venciendo todo. Hemos pasado altibajos que solo nosotros sabemos, noches difíciles de frío. Tuvimos hijos y hoy tres nietos que corren por la sala.
+
+**Result:**
+[Verse 1]
+tenía diecisiete y tú apenas catorce
+llegaste a darle luz a mi noche
+la isla se quedó detrás en el silencio
+cruzamos hasta aquí venciendo al viento
+
+[Chorus 1]
+Damian, mi mano nunca la soltaste
+un trece de mayo el tiempo se detuvo
+desde ese día decidí quedarme
+y hoy sigo aquí porque tu amor me sostuvo
+
+[Verse 2]
+los años trajeron casa y nuestros hijos
+buscando en tus brazos un abrigo
+tres nietos que ahora corren por la sala
+protegiendo el hogar que tu esfuerzo regala
+
+[Chorus 2]
+Damian, papá de todo lo que amamos
+el faro de luz que siempre buscamos
+sabio en la calma cuando todo se movía
+por eso mi corazón entero te pedía
+
+[Bridge]
+hubo altibajos que solo tú y yo sabemos
+si algún día el mundo intenta perdernos
+noches difíciles llenas de frío
+yo no soltaré tu mano, amor mío
+
+[Outro]
+gracias a Dios por el hogar que armamos
+catorce y diecisiete siguen aquí abrazados
+por esos nietos y los hijos de los dos
+el mismo trece de mayo, siempre tú y yo
 
 ### AUTO-QA CHECKLIST — RUN BEFORE DELIVERING
 
@@ -1024,6 +1068,19 @@ process.on('uncaughtException', async (err) => {
       }
       console.log(`Song ID: ${songId}`);
 
+      if (isRedo && !isDryRun) {
+        try {
+          fs.mkdirSync(path.join(__dirname, 'logs'), { recursive: true });
+          fs.appendFileSync(
+            path.join(__dirname, 'logs', 'redo-feedback.jsonl'),
+            JSON.stringify({ ts: new Date().toISOString(), songId, redoFeedback, redoTitle, redoLyrics }) + '\n',
+            'utf-8'
+          );
+        } catch (e) {
+          console.error('Error guardando redo feedback:', e.message);
+        }
+      }
+
       // Salvaguarda anti-duplicado (bug real 2026-07-13, "Un Ángel en
       // Jenner"): si el proceso de --loop murió DESPUÉS de llenar Suno (o
       // más adelante) y se relanzó, `--resume` solo se respeta en el
@@ -1194,6 +1251,25 @@ process.on('uncaughtException', async (err) => {
       } catch {
         // best-effort
       }
+    }
+
+    // ── Análisis determinístico de rima (2026-07-14, INFORMATIVO) ──────────
+    // Motivado por datos: el Guardia puntuaba rima=7 canción tras canción con
+    // pares débiles concretos, mientras el modelo se auto-marcaba
+    // rima_fuerte_evidente=true. Es puro/offline (lib/rhyme-check.js, cero
+    // costo, corre incluso en dry-run). No bloquea ni regenera — protocolo
+    // estándar: consola + state.json + jsonl hasta calibrar contra REDOs.
+    let rimaAnalisis = null;
+    try {
+      const { analyzeSongRhyme } = require('./lib/rhyme-check');
+      rimaAnalisis = analyzeSongRhyme(parsedJson?.letras);
+      console.log(`\n🎼 Rima (determinístico): ${rimaAnalisis.resumen}`);
+      for (const name of [...rimaAnalisis.sinRima, ...rimaAnalisis.parciales]) {
+        const s = rimaAnalisis.secciones[name];
+        if (s.weakPairs.length) console.log(`   • ${name} (mejor esquema ${s.scheme}, ${s.rhymingPairs}/${s.totalPairs}): pares débiles ${s.weakPairs.join(', ')}`);
+      }
+    } catch (e) {
+      console.log(`\n🎼 Rima: análisis no disponible (${e.message}) — señal informativa, sigue normal.`);
     }
 
     const writeCheck = validateContentForWrite(parsedJson);
@@ -1382,11 +1458,11 @@ process.on('uncaughtException', async (err) => {
       // poder cruzar el veredicto del Guardia contra el QA duro y el humano.
       if (!isDryRun) {
         try {
-          pipelineState.write({ guardia: guardiaResult, guardiaSegunda, guardiaDesempate, hechosSinRespaldo });
+          pipelineState.write({ guardia: guardiaResult, guardiaSegunda, guardiaDesempate, hechosSinRespaldo, rimaAnalisis });
           fs.mkdirSync(path.join(__dirname, 'logs'), { recursive: true });
           fs.appendFileSync(
             path.join(__dirname, 'logs', 'guardia-feedback.jsonl'),
-            JSON.stringify({ ts: new Date().toISOString(), songId, passedQA, qaFailures, guardiaResult, guardiaSegunda, guardiaDesempate, extraccionHechos, hechosSinRespaldo }) + '\n',
+            JSON.stringify({ ts: new Date().toISOString(), songId, passedQA, qaFailures, guardiaResult, guardiaSegunda, guardiaDesempate, extraccionHechos, hechosSinRespaldo, rimaAnalisis }) + '\n',
             'utf-8'
           );
         } catch {
