@@ -53,10 +53,15 @@ const readinessMode = args.includes('--readiness');
 //   3. Cero falsos positivos confirmados: ningún veredicto 'fp' en
 //      logs/fact-verdicts.jsonl (los botones ❌/🚨 del celular), y las
 //      alarmas sin veredicto humano no cuentan como limpias.
-// Imprime el estado de cada condición y READY/NOT READY. 100% offline.
-function runReadiness() {
-  const feedbackPath = path.join(__dirname, 'logs', 'guardia-feedback.jsonl');
-  const verdictsPath = path.join(__dirname, 'logs', 'fact-verdicts.jsonl');
+//
+// computeFactGateReadiness (2026-07-15): extraída como función pura — antes
+// vivía inline en runReadiness() y solo se corría si alguien se acordaba de
+// ejecutar `node guardia-benchmark.js --readiness` a mano. Ahora watchdog.js
+// la importa y la corre sola en el digest de las 7am (ver sendDigest) — el
+// aviso "ya se puede activar FACT_GATE=regen" llega solo, sin que nadie
+// tenga que acordarse de chequear. Paths inyectables para poder testearla
+// contra fixtures temporales sin tocar golden/ ni logs/ reales.
+function computeFactGateReadiness({ goldenDir = GOLDEN_DIR, feedbackPath = path.join(__dirname, 'logs', 'guardia-feedback.jsonl'), verdictsPath = path.join(__dirname, 'logs', 'fact-verdicts.jsonl') } = {}) {
   const readJsonl = (p) => {
     try {
       return fs.readFileSync(p, 'utf-8').split('\n').filter(Boolean)
@@ -64,11 +69,11 @@ function runReadiness() {
     } catch { return []; }
   };
 
-  const cases = fs.existsSync(GOLDEN_DIR)
-    ? fs.readdirSync(GOLDEN_DIR).filter((d) => fs.existsSync(path.join(GOLDEN_DIR, d, 'expect.json')))
+  const cases = fs.existsSync(goldenDir)
+    ? fs.readdirSync(goldenDir).filter((d) => fs.existsSync(path.join(goldenDir, d, 'expect.json')))
     : [];
   const goldenGood = cases.filter((c) => {
-    try { return JSON.parse(fs.readFileSync(path.join(GOLDEN_DIR, c, 'expect.json'), 'utf-8')).letraEsBuena; } catch { return false; }
+    try { return JSON.parse(fs.readFileSync(path.join(goldenDir, c, 'expect.json'), 'utf-8')).letraEsBuena; } catch { return false; }
   }).length;
   const goldenBad = cases.length - goldenGood;
 
@@ -80,15 +85,19 @@ function runReadiness() {
   const unjudgedAlarms = Math.max(0, alarms.length - verdicts.length);
 
   const conditions = [
-    { ok: cases.length >= 10 && goldenBad >= 4 && goldenGood >= 5, label: `Banco dorado: ${cases.length} caso(s) (${goldenBad} malas, ${goldenGood} buenas) — se exige ≥10 (≥4 malas, ≥5 buenas)` },
-    { ok: feedback.length >= 15, label: `Producción: ${feedback.length} canción(es) con extracción en guardia-feedback.jsonl — se exige ≥15` },
-    { ok: fpCount === 0, label: `Falsos positivos confirmados (botón ❌ del celular): ${fpCount} — se exige 0` },
-    { ok: unjudgedAlarms === 0, label: `Alarmas sin veredicto humano: ${unjudgedAlarms} (TP confirmados: ${tpCount}) — se exige 0 (una alarma sin juzgar no cuenta como limpia)` },
+    { key: 'golden', ok: cases.length >= 10 && goldenBad >= 4 && goldenGood >= 5, label: `Banco dorado: ${cases.length} caso(s) (${goldenBad} malas, ${goldenGood} buenas) — se exige ≥10 (≥4 malas, ≥5 buenas)` },
+    { key: 'produccion', ok: feedback.length >= 15, label: `Producción: ${feedback.length} canción(es) con extracción en guardia-feedback.jsonl — se exige ≥15` },
+    { key: 'falsos-positivos', ok: fpCount === 0, label: `Falsos positivos confirmados (botón ❌ del celular): ${fpCount} — se exige 0` },
+    { key: 'alarmas-sin-juzgar', ok: unjudgedAlarms === 0, label: `Alarmas sin veredicto humano: ${unjudgedAlarms} (TP confirmados: ${tpCount}) — se exige 0 (una alarma sin juzgar no cuenta como limpia)` },
   ];
 
+  return { ready: conditions.every((c) => c.ok), conditions };
+}
+
+function runReadiness() {
+  const { ready, conditions } = computeFactGateReadiness();
   console.log('🎓 Readiness de FACT_GATE=regen:\n');
   for (const c of conditions) console.log(`  ${c.ok ? '✅' : '❌'} ${c.label}`);
-  const ready = conditions.every((c) => c.ok);
   console.log(ready
     ? '\n🟢 READY — activá con FACT_GATE=regen (kill-switch: FACT_GATE=warn). Corré también `node guardia-benchmark.js` completo antes, para confirmar el banco en verde.'
     : '\n🔴 NOT READY — seguir calibrando en modo warn (los botones 🚨/❌ del celular alimentan logs/fact-verdicts.jsonl).');
@@ -116,6 +125,12 @@ function coincide(esperado, encontrados) {
   return encontrados.some((v) => normalizeForMatch(v).includes(e));
 }
 
+// require.main guard (2026-07-15): watchdog.js ahora hace
+// require('./guardia-benchmark') para reusar computeFactGateReadiness en el
+// digest — sin este guard, el simple require() dispararía el IIFE de abajo
+// (que puede leer golden/ y hasta llamar process.exit) como efecto
+// secundario no deseado. Mismo patrón que lib/preflight.js.
+if (require.main === module) {
 (async () => {
   if (readinessMode) {
     runReadiness();
@@ -204,3 +219,6 @@ function coincide(esperado, encontrados) {
   console.log(fallos === 0 ? '🏆 Banco dorado: TODO en verde.' : `❌ Banco dorado: ${fallos} chequeo(s) fallaron.`);
   process.exit(fallos === 0 ? 0 : 1);
 })();
+}
+
+module.exports = { computeFactGateReadiness };

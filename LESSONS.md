@@ -3207,3 +3207,39 @@ no minimizar tokens.
 cubren tanto la versión estrecha original (que se mantiene como clasificador
 de "es esto ambigüedad pura o no" para calibración futura, aunque ya no
 gatea la decisión) como la general nueva.
+
+## Readiness de FACT_GATE automática en el digest — la primera de las "próximas capas de automatización" (2026-07-15)
+
+De la conversación de fondo de esta noche ("el propósito es automatizar, no
+tener que hacerlo yo"): tres palancas propuestas para el siguiente nivel —
+(1) chequear solo la readiness de señales calibradas, (2) auto-arrancar el
+loop por horario, (3) minar `redo-feedback.jsonl` en busca de patrones para
+mejorar el prompt. Hector pidió implementar SOLO la (1) ahora (segura,
+infraestructura ya construida); (2) y (3) quedan anotadas para más adelante
+— (3) explícitamente necesita más días de datos reales antes de tener
+sentido.
+
+**Implementado:** `computeFactGateReadiness` se extrajo de
+`guardia-benchmark.js --readiness` (que antes solo corría si alguien se
+acordaba de ejecutarlo a mano) a una función pura con paths inyectables
+(6 tests nuevos con fixtures temporales, nunca tocan `golden/`/`logs/`
+reales). `watchdog.js` la llama sola en cada `sendDigest()` — pero SOLO si
+`FACT_GATE` todavía no está en `regen` (no tiene sentido avisar de algo ya
+activo). Si el resultado es NOT READY, el digest muestra una línea
+silenciosa de progreso ("2/4 condiciones"). Si es READY por primera vez,
+sube la prioridad de la notificación a `high` y destaca la línea — y queda
+marcado en `watchdog-state.json` (`factGateReadyAnnouncedAt`) para que las
+noches siguientes, si sigue sin activarse, solo aparezca como recordatorio
+tranquilo en vez de repetir el aviso grande cada vez.
+
+**Detalle técnico:** `guardia-benchmark.js` no tenía guard
+`require.main === module` — era un script CLI puro que ejecutaba su IIFE
+apenas se cargaba. Sin el guard, el simple `require('./guardia-benchmark')`
+de watchdog.js habría disparado el chequeo de `golden/` (y potencialmente
+un `process.exit`) como efecto secundario del require. Se agregó el mismo
+guard que ya tiene `lib/preflight.js` — el CLI (`node guardia-benchmark.js
+--readiness`) sigue funcionando exactamente igual, verificado en vivo.
+
+Verificado en vivo con `node watchdog.js --digest` (real, contra el estado
+actual del repo): con `FACT_GATE` sin activar muestra "1/4 condiciones"; con
+`FACT_GATE=regen` forzado, la línea desaparece del todo.

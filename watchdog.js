@@ -269,6 +269,39 @@ async function sendDigest({ lookbackHours = 12 } = {}) {
   const currentState = state.read();
   const diskProblem = checkDiskSpace();
 
+  // Readiness de FACT_GATE=regen, chequeada SOLA cada noche (2026-07-15) —
+  // antes alguien tenía que acordarse de correr
+  // `node guardia-benchmark.js --readiness` a mano. Solo tiene sentido
+  // avisar si el gate no está YA activo. La primera vez que da READY se
+  // resalta fuerte (prioridad alta + marca en watchdog-state.json para no
+  // repetir el aviso grande cada noche); después queda como línea de
+  // recordatorio silenciosa hasta que Hector lo active.
+  let factGateReadyLine = null;
+  let factGateJustBecameReady = false;
+  const factGateMode = String(process.env.FACT_GATE || 'warn').toLowerCase();
+  if (factGateMode !== 'regen') {
+    try {
+      const { computeFactGateReadiness } = require('./guardia-benchmark');
+      const { ready, conditions } = computeFactGateReadiness();
+      const wstateForFactGate = readWatchdogState();
+      if (ready) {
+        factGateJustBecameReady = !wstateForFactGate.factGateReadyAnnouncedAt;
+        factGateReadyLine = factGateJustBecameReady
+          ? '🟢 FACT_GATE=regen YA SE PUEDE ACTIVAR — las 4 condiciones de calibración se cumplieron (ver `node guardia-benchmark.js --readiness`). Activalo con FACT_GATE=regen en .env cuando quieras.'
+          : '🎓 FACT_GATE=regen sigue listo para activar (sin cambios — mismo aviso de noches anteriores).';
+        if (factGateJustBecameReady) {
+          wstateForFactGate.factGateReadyAnnouncedAt = new Date().toISOString();
+          writeWatchdogState(wstateForFactGate);
+        }
+      } else {
+        const faltan = conditions.filter((c) => !c.ok).length;
+        factGateReadyLine = `🎓 FACT_GATE readiness: ${conditions.length - faltan}/${conditions.length} condiciones (corré \`node guardia-benchmark.js --readiness\` para el detalle)`;
+      }
+    } catch (e) {
+      console.log(`[watchdog] No se pudo chequear FACT_GATE readiness (no fatal): ${e.message}`);
+    }
+  }
+
   const allOk = failedSubmits === 0 && blockedSubmits === 0 && restarts === 0 && !circuitBreakerTripped && !diskProblem && failedSongs.length === 0 && !driftDetected;
   const lines = [
     allOk && confirmedSubmits > 0 ? '✅ Noche limpia — nada requiere tu atención.' : null,
@@ -281,12 +314,13 @@ async function sendDigest({ lookbackHours = 12 } = {}) {
     driftDetected ? '• 🚨 Drift de selectores de Suno detectado — revisar selector-drift-report.md ANTES de la próxima canción' : null,
     currentState?.titulo ? `• Última canción conocida: "${currentState.titulo}" (etapa: ${currentState.stage})` : null,
     diskProblem ? `• ⚠️ ${diskProblem}` : null,
+    factGateReadyLine ? `• ${factGateReadyLine}` : null,
   ].filter(Boolean).join('\n');
 
   console.log(lines);
   await notify(lines, {
     title: `🌙 Resumen de la noche (${lookbackHours}h) — Cancioneterna`,
-    priority: allOk ? 'default' : 'high',
+    priority: factGateJustBecameReady ? 'high' : (allOk ? 'default' : 'high'),
     tags: 'crescent_moon',
   }).catch(() => {});
 }
