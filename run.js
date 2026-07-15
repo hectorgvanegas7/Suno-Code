@@ -347,49 +347,60 @@ Pick the template below that matches the survey's real energy (not everything is
 
 > Pop cristiano: \`Pop cristiano, guitarra acústica, coro emotivo, voz masculina, intimate close-mic vocals, clear confident vocals, uplifting, worship-inspired, clear production, Latin American Spanish, neutral accent, seseo\`
 
-### GOLDEN EXAMPLE (Survey → Lyrics)
+### GOLDEN EXAMPLE (real survey → real approved lyrics)
 
-**Survey:**
-Nombre: Damian
-Quién: Esposo
-Detalles: Todo empezó un trece de mayo. Nos casamos jóvenes (yo tenía diecisiete, él catorce). Él se fue de Cuba y yo vine a Estados Unidos, cruzamos venciendo todo. Hemos pasado altibajos que solo nosotros sabemos, noches difíciles de frío. Tuvimos hijos y hoy tres nietos que corren por la sala.
+This is a REAL production song that passed QA. Study the LEVEL of craft — do NOT reuse its imagery, phrases, rhymes or structure choices in other songs. Every song must be built from ITS OWN survey.
 
-**Result:**
+**Survey (verbatim, imperfect wording and all):**
+Who's this for?: Esposo
+What's their name?: Damian
+How do you address them?: Tú
+Preferred Genre: Pop
+Their beautiful qualities: Es sabio excelente padre y esposo muy protector amoroso y no se rinde lo amo
+Special moments together: Nos conocimos cuanto tenía 14 años y yo 17 pero nunca imaginé tener una relación con el por la diferencia de edad el se fue de Cuba y a los 10 años yo vine también a Estados Unidos pero hace 16 años yo estaba se pasa de mi esposo y el de su esposa y todo empezó un 13 de mayo todo ha sido muy lindo con nuestro altibajos pero es el hombre de mi vida
+Special message: Que le doy gracias a dios por tener por lograr el hogar que tenemos y tener 3 hermosos nietos y por los hijos que dios nos dio que nunca me suelte la mano que yo no sé la soltaré que lo amo con todo mi corazón y es muy especial
+
+**Approved lyrics:**
 [Verse 1]
-tenía diecisiete y tú apenas catorce
-llegaste a darle luz a mi noche
-la isla se quedó detrás en el silencio
-cruzamos hasta aquí venciendo al viento
+Tenía diecisiete y el mundo parecía lejano
+Catorce años los tuyos, un miedo entre las manos
+Nunca pensé que el tiempo nos iba a regresar
+Dos vidas separadas por un mismo mar
 
 [Chorus 1]
-Damian, mi mano nunca la soltaste
-un trece de mayo el tiempo se detuvo
-desde ese día decidí quedarme
-y hoy sigo aquí porque tu amor me sostuvo
+Damian, la casa que hoy tenemos habla por los dos
+Trece de mayo empezó esta historia de amor
+Con nuestros altibajos aprendimos a volar
+No sueltes esta mano que yo no la voy a soltar
 
 [Verse 2]
-los años trajeron casa y nuestros hijos
-buscando en tus brazos un abrigo
-tres nietos que ahora corren por la sala
-protegiendo el hogar que tu esfuerzo regala
+Volviste separado y yo también volví
+Y entre los mismos nombres nuestro amor volvió a nacer
+Sabio en tus palabras, padre firme en el hogar
+Protector de todo lo que somos, sin cansar
 
 [Chorus 2]
-Damian, papá de todo lo que amamos
-el faro de luz que siempre buscamos
-sabio en la calma cuando todo se movía
-por eso mi corazón entero te pedía
+Damian, tres nietos llenan hoy nuestra mesa de calor
+Los hijos que Dios nos dio son nuestra bendición
+Nunca te rendiste aunque el camino fue difícil
+Eres el hombre de mi vida, el único, el real
 
 [Bridge]
-hubo altibajos que solo tú y yo sabemos
-si algún día el mundo intenta perdernos
-noches difíciles llenas de frío
-yo no soltaré tu mano, amor mío
+Cuando ya no esté para decirlo con mi voz
+Quiero que recuerdes cada trece de mayo los dos
+Le doy gracias a Dios por el hogar que construimos
+Por cada niño que llegó y por todo lo que vivimos
 
 [Outro]
-gracias a Dios por el hogar que armamos
-catorce y diecisiete siguen aquí abrazados
-por esos nietos y los hijos de los dos
-el mismo trece de mayo, siempre tú y yo
+Aquel mar que separaba ya no existe más
+Diecisiete y catorce se quedaron en su lugar
+Hoy solo queda la casa y esta mano que sostengo
+Damian, con todo mi corazón, siempre te tengo
+
+**Why this is the standard (notice what it does with the hardest parts):**
+- The survey tells TWO separate life chapters (they met as teens with NO relationship, then reunited sixteen years later, each coming out of another marriage). The lyrics PRESERVE that gap ("Nunca pensé que el tiempo nos iba a regresar", "Volviste separado y yo también volví") instead of compressing it into one continuous romance — rule 2: erasing the gap would be an invention.
+- Digits become words ("13 de mayo" → "Trece de mayo", "3 nietos" → "tres nietos") and no place, date or milestone appears that the survey did not state.
+- Real rhymes verified by the vowel rule of rule 16 (regresar/mar, dos/amor assonant o, volar/soltar), verses in scene, choruses opening with the name once, Bridge pivoting to future ("Cuando ya no esté"), Outro circling back to Verse 1's sea image.
 
 ### AUTO-QA CHECKLIST — RUN BEFORE DELIVERING
 
@@ -1068,6 +1079,12 @@ process.on('uncaughtException', async (err) => {
       }
       console.log(`Song ID: ${songId}`);
 
+      // Registro del feedback REAL de QC (2026-07-14): cada REDO es el dato
+      // de oro de qué rechaza el QA humano — antes se usaba para corregir
+      // esta canción y se perdía. Acumulado en logs/redo-feedback.jsonl es
+      // el mapa de evidencia para las próximas mejoras del SYSTEM_PROMPT
+      // (en vez de ajustar reglas por intuición). Va acá y no en la
+      // detección del REDO para poder incluir el songId. Best-effort.
       if (isRedo && !isDryRun) {
         try {
           fs.mkdirSync(path.join(__dirname, 'logs'), { recursive: true });
@@ -1076,6 +1093,7 @@ process.on('uncaughtException', async (err) => {
             JSON.stringify({ ts: new Date().toISOString(), songId, redoFeedback, redoTitle, redoLyrics }) + '\n',
             'utf-8'
           );
+          console.log('  (feedback de QC registrado en logs/redo-feedback.jsonl para calibrar el prompt)');
         } catch (e) {
           console.error('Error guardando redo feedback:', e.message);
         }
