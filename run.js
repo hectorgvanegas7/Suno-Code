@@ -247,6 +247,8 @@ Suno is singing in Latin American Spanish, so it will mispronounce names that ha
 
 2. **Nothing invented (with one exception).** Do not invent facts, major life events, or specific memories not in the survey. This explicitly includes: **place names** (cities, countries, neighborhoods — if the survey never names a specific place, never invent one, not even a plausible-sounding one) and **specific dates or milestones tied to an event the survey did not tie them to**. It also includes **merging separate life chapters into one continuous story**: if the survey describes a first encounter that led nowhere (e.g. "never imagined a relationship because of X"), followed much later by a separate, distinct event (a reunion after other relationships, marriages, moves, or years apart), do NOT compress that gap into an unbroken romance — the gap and the separate chapters ARE the real story, and erasing them to make the story flow better is exactly as much an invention as adding a fake object or place. Before writing, mentally list every place, date, and distinct life-chapter the survey actually states, in the order it states them, and treat that list as a hard ceiling — nothing outside it may appear in the lyrics. If the survey's own wording is garbled or ambiguous, prefer the reading that preserves every distinct event it mentions over a smoother reading that quietly erases one. However, if the survey is extremely generic (e.g., "I love her way of being"), you MUST infer small, universally relatable micro-actions (e.g., a subtle smile, looking out the window, the way she walks) to ground the emotion in a cinematic scene — this exception covers generic *adjectives* only, never concrete facts like places, dates, or event sequences.
 
+**Disambiguate similar/parallel events — this is a real production failure mode, not a hypothetical.** When the survey mentions two or more distinct events of the SAME kind (two trips, two illnesses, two houses, two reunions), every sensory or emotional detail you attach to one of them (tired feet, a specific pain, a specific feeling) MUST make clear WHICH one it belongs to — by naming the place/date in that same line or the immediately preceding one, never a vague pronoun or generic phrase ("aquel camino", "ese momento", "aquella vez") that could equally apply to either. Real failure: a survey mentioning a 2022 trip and a distinct 2025 trip, with a detail ("her feet hurt") that the survey ties to the 2025 trip specifically — writing "I hurt seeing your tired feet on that road" without naming which trip reads as if EITHER trip could be the one, even though no fact was technically invented. This kind of ambiguity is functionally as bad as fusing the events: name the place or date in the line, every time.
+
 3. **Consistent address form (Spanish).** Use tú, usted, or vos based on the survey — never mix. This includes imperative phrases (e.g. "no tardes" = tú / "no tarde" = usted / "no tardés" = vos). Verify every single line including the Outro. ⚠️ ABSOLUTE: if the survey says tú, the word "vos" and voseo verb forms (sos, tenés, podés, querés, hacés, decís...) must NEVER appear — not even to complete a rhyme with "voz", "dos" or "sol". The rhyme rules NEVER override this rule: if a rhyme needs "vos", rewrite the whole line instead. (Real failure: "quise saber más de vos" in a tú song — unacceptable, the client notices immediately.)
 
 4. **Voice = who dedicates, not who receives.** If a wife dedicates to her husband, the voice is feminine. Always check the "who is dedicating" field.
@@ -1661,6 +1663,22 @@ process.on('uncaughtException', async (err) => {
           .map((g) => `"${g.veredicto}"${g.problemas.length ? ' — ' + g.problemas.map(formatGuardiaProblem).join('; ') : ''}`)
           .join(' | ');
         pauseReasons.push(`el Guardia la rechazó (${rechazos}/${veredictos.length} pasada[s]): ${detalle}`);
+
+        // Invalidar la caché de ESTA encuesta (2026-07-15, incidente real: el
+        // Guardia rechazó "El Pañuelo Azul y Blanco", la pausa expiró a los 20
+        // min sin respuesta, y el siguiente ciclo del --loop sirvió la MISMA
+        // letra rechazada desde .cache/ sin volver a generar — el rechazo se
+        // repitió indefinidamente hasta que un humano cortó el loop a mano).
+        // La caché se escribe ANTES de que el Guardia corra (arriba, apenas
+        // pasan hardValidate/LanguageTool/FACT_GATE), así que no sabe que esta
+        // letra terminó siendo rechazada. Esto lo corrige: la PRÓXIMA corrida
+        // sobre esta misma encuesta (retry, --resume, o un --done manual del
+        // día siguiente) está forzada a generar de cero, con una tirada nueva
+        // del modelo en vez de repetir el mismo texto rechazado para siempre.
+        if (!isDryRun) {
+          require('./lib/cache-helpers').invalidateCache(surveyHash);
+          console.log('   ♻️→🗑️  Caché de esta encuesta invalidada — la próxima corrida va a generar una letra nueva, no repetir esta.');
+        }
       }
       if (!isDryRun && pauseReasons.length > 0) {
         const motivo = pauseReasons.join(' Y además ');

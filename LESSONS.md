@@ -3034,3 +3034,61 @@ vuelo):**
    archivo → chequeo desactivado en silencio, jamás rompe una generación.
    Verificado contra el calco real de producción (lo detecta) y contra letras
    sin relación (cero falsos positivos), + 7 tests en test/example-bleed.test.js.
+
+## El Guardia rechazó una letra y el loop la sirvió IDÉNTICA desde caché para siempre — la caché no sabía del rechazo (2026-07-15, "El Pañuelo Azul y Blanco")
+
+**Incidente real:** el Guardia rechazó "El Pañuelo Azul y Blanco" por mayoría
+(2/3 pasadas) con un motivo de fidelidad ("fusiona dos viajes separados,
+2022 y 2025, sin aclaración temporal") — la pausa humana expiró a los 20 min
+(nadie respondió a tiempo) y la canción se abandonó. El siguiente ciclo del
+`--loop` volvió a tomar la MISMA asignación (seguía activa en el Flow, nadie
+había hecho Submit) y sirvió la letra desde `.cache/` **sin volver a generar**
+— exactamente el mismo texto rechazado, camino a rechazarse de nuevo. Un
+humano cortó el loop con Ctrl+C antes de que terminara la segunda consulta.
+
+**Diagnóstico:** no fue un hecho inventado — la capa de extracción determinística
+(la que juzga en código) encontró las 13 afirmaciones de la letra **todas
+respaldadas por la encuesta**. El problema real era una AMBIGÜEDAD: la línea
+"Me dolió ver tus pies cansados en aquel camino" no aclaraba a cuál de los dos
+viajes se refería (la encuesta lo ata específicamente al de 2025), y eso
+confundió a las dos pasadas CIEGAS del Guardia (la pasada informada, con más
+contexto, sí había aprobado). Cero invención, pero una redacción real y
+evitable que el propio Guardia no podía distinguir de una fusión de capítulos.
+
+**Root cause del "para siempre" — el bug de verdad:** `writeCache()` en run.js
+se llama apenas la letra pasa hardValidate + LanguageTool + FACT_GATE +
+example-bleed — TODO eso corre ANTES de consultar al Guardia. La caché
+(indexada por hash de encuesta, sin metadata de resultado) no tiene forma de
+saber que esa letra terminó siendo rechazada más adelante en la misma
+corrida. Cualquier corrida futura sobre la misma encuesta (retry del
+--loop, --resume, o simplemente correr run.js de nuevo mañana) la sirve
+igual, atascando la canción en un rechazo que se repite indefinidamente sin
+que nadie lo note hasta que alguien mira los logs.
+
+**Fix (dos capas, mismo principio del repo — la garantía vive en código):**
+1. `lib/cache-helpers.js`: nueva `invalidateCache(hash)` (borra el archivo,
+   best-effort, nunca lanza). `run.js` la llama apenas `guardiaRechaza` queda
+   confirmado en `true` (después de que el reprompt de Haiku ya tuvo su
+   oportunidad de arreglarla y no lo logró) — así la PRÓXIMA corrida sobre
+   esa encuesta está forzada a generar de cero, con sampleo nuevo del modelo,
+   en vez de repetir el texto rechazado. 3 tests nuevos en
+   `test/cache-helpers.test.js`.
+2. SYSTEM_PROMPT, regla 2 (`run.js`): nueva cláusula explícita —"cuando la
+   encuesta menciona dos eventos del mismo tipo (dos viajes, dos casas, dos
+   enfermedades), cada detalle sensorial/emocional atado a UNO de ellos debe
+   nombrar cuál es (lugar o fecha en la misma línea o la anterior), nunca un
+   pronombre genérico que podría aplicar a cualquiera" — con el caso real de
+   esta noche como ejemplo textual de la falla. No es una garantía dura
+   (vive en el prompt, no en código), pero ataca la causa raíz de por qué el
+   Guardia se confundió en primer lugar, reduciendo la tasa de este tipo de
+   falso positivo en vez de solo mitigar sus consecuencias.
+
+**Lo que NO se tocó (a propósito):** el veto del Guardia sigue teniendo poder
+de bloqueo — la lección de "Miami" (juicio de fidelidad puede fallar, pero
+sigue siendo la única señal contra fusiones de eventos sin hechos aislados
+inventados) sigue vigente. Debilitar el gate para que este caso pasara habría
+sido la solución equivocada: la letra SÍ tenía una ambigüedad real que valía
+la pena arreglar, y el pedido explícito de Hector fue "arreglalo generalizado
+para que nunca vuelva a pasar" — no "dejá pasar más letras". El fix ataca el
+bug real (la caché ciega al rechazo) y la causa raíz de la ambigüedad
+(instrucción de prompt), sin tocar el criterio de aprobación.

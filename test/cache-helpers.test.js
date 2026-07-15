@@ -9,7 +9,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
-const { getSurveyHash, readCache, writeCache } = require('../lib/cache-helpers');
+const { getSurveyHash, readCache, writeCache, invalidateCache } = require('../lib/cache-helpers');
 
 const CACHE_DIR = path.join(__dirname, '..', '.cache');
 
@@ -67,5 +67,37 @@ test('readCache: JSON corrupto devuelve null en vez de lanzar (self-healing)', (
     assert.equal(result, null);
   } finally {
     fs.rmSync(cachePath, { force: true });
+  }
+});
+
+// ─── invalidateCache: incidente real 2026-07-15 ("El Pañuelo Azul y Blanco")──
+// El Guardia rechazó una letra, la pausa expiró y el siguiente ciclo del
+// --loop la sirvió de nuevo IDÉNTICA desde la caché (escrita ANTES de que el
+// Guardia corriera) — el mismo rechazo se repetía para siempre. run.js llama
+// invalidateCache(surveyHash) apenas el Guardia confirma el rechazo.
+
+test('invalidateCache: borra una entrada existente — la próxima lectura es un miss', () => {
+  const hash = 'test-invalidate-' + process.pid;
+  writeCache(hash, { titulo: 'Letra rechazada por el Guardia' });
+  assert.notEqual(readCache(hash), null); // confirma que quedó escrita
+  invalidateCache(hash);
+  assert.equal(readCache(hash), null, 'invalidateCache no borró la entrada — el próximo run.js volvería a servir la letra rechazada');
+});
+
+test('invalidateCache: hash sin cache no lanza (idempotente)', () => {
+  assert.doesNotThrow(() => invalidateCache('hash-que-nunca-existio-' + process.pid));
+});
+
+test('invalidateCache: no deja huérfano .tmp ni afecta otras entradas de caché', () => {
+  const hashA = 'test-invalidate-a-' + process.pid;
+  const hashB = 'test-invalidate-b-' + process.pid;
+  try {
+    writeCache(hashA, { titulo: 'A' });
+    writeCache(hashB, { titulo: 'B' });
+    invalidateCache(hashA);
+    assert.equal(readCache(hashA), null);
+    assert.deepEqual(readCache(hashB), { titulo: 'B' }); // intacta
+  } finally {
+    fs.rmSync(testCachePath(hashB), { force: true });
   }
 });
