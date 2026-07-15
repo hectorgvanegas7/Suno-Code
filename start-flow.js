@@ -107,7 +107,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const { chromium } = require('playwright');
-const { isLoggedIn, clickByText, isPortUp, confirmToContinue, pauseForHumanInteraction } = require('./lib/playwright-helpers');
+const { isLoggedIn, clickByText, isPortUp, confirmToContinue, pauseForHumanInteraction, HumanTimeoutError, HumanAbortError } = require('./lib/playwright-helpers');
 const { enterFlowAndEnsureAssignment, FLOW_URL, shouldAutoSubmit } = require('./lib/flow-helpers');
 const { runPreflight, checkDiskSpace } = require('./lib/preflight');
 const { notify } = require('./lib/ntfy');
@@ -166,11 +166,30 @@ if (process.argv.includes('--loop') && !process.argv.includes('--no-watchdog')) 
       const watchdogChild = spawn('node', ['watchdog.js'], { cwd: __dirname, detached: true, stdio: 'ignore', windowsHide: true });
       watchdogChild.unref();
       console.log(`🐕 Watchdog lanzado automáticamente (pid ${watchdogChild.pid}) — corré con --no-watchdog para desactivarlo.`);
+      // Verificación diferida (2026-07-14): si el watchdog murió al nacer
+      // (node roto, crash temprano), la noche entera queda SIN supervisor y
+      // nadie se entera — la ausencia de avisos es indistinguible de "todo
+      // bien". Un chequeo a los 10s con push urgente cierra ese silencio.
+      setTimeout(() => {
+        try {
+          if (!isWatchdogRunning()) {
+            console.log('🛑 El watchdog se lanzó pero NO está corriendo 10s después — la noche queda sin supervisor.');
+            notify(
+              '🛑 El watchdog NO quedó corriendo tras lanzarlo — si el pipeline se cuelga esta noche, nadie lo va a reiniciar ni avisar. Probá: node watchdog.js --once',
+              { title: 'Watchdog no arrancó', priority: 'urgent', tags: 'dog,warning' }
+            ).catch(() => {});
+          }
+        } catch { /* best-effort */ }
+      }, 10000).unref();
     } else {
       console.log('🐕 Watchdog ya estaba corriendo — no se lanzó uno nuevo.');
     }
   } catch (e) {
     console.log(`⚠️ No se pudo auto-lanzar el watchdog (no crítico): ${e.message}`);
+    notify(
+      `⚠️ No se pudo auto-lanzar el watchdog (${String(e.message).slice(0, 80)}) — la corrida sigue pero SIN supervisor. Lanzalo a mano: node watchdog.js`,
+      { title: 'Watchdog no se pudo lanzar', priority: 'high', tags: 'dog,warning' }
+    ).catch(() => {});
   }
 }
 
@@ -195,12 +214,12 @@ if (process.argv.includes('--loop')) {
   process.on('SIGTERM', () => gracefulLoopStop('SIGTERM', 143));
 }
 
-async function checkpoint(summary, nextAction) {
+async function checkpoint(summary, nextAction, { screenshotPaths = [] } = {}) {
   if (!PAUSE_MODE) {
     console.log(`\n▶️  ${nextAction} (sin pausa — corré con --pause si querés confirmar con ENTER acá)\n`);
     return;
   }
-  await confirmToContinue(summary, { nextAction });
+  await confirmToContinue(summary, { nextAction, screenshotPaths });
 }
 const POLL_PORT  = 9333;   // Mismo puerto, reusamos el navegador abierto
 const FLOW_CREATE_URL = 'https://cancioneterna.com/artists/flow/create';
@@ -252,6 +271,19 @@ const AUTO_SUBMIT_LOG_PATH = path.join(AUTO_VERIFY_LOG_DIR, 'auto-submit-events.
 function logAutoSubmitEvent(event) {
   try {
     fs.appendFileSync(AUTO_SUBMIT_LOG_PATH, JSON.stringify({ ts: new Date().toISOString(), ...event }) + '\n', 'utf-8');
+  } catch {
+    // best-effort
+  }
+}
+
+// Resumen por canción para el digest matutino (2026-07-14): antes el digest
+// solo contaba submits y reinicios del watchdog — una canción que falló en la
+// GENERACIÓN (sin reiniciar nada) no aparecía en el resumen de la mañana.
+// Una línea por desenlace de canción/ciclo; watchdog.js la lee en sendDigest.
+const PIPELINE_SUMMARY_LOG_PATH = path.join(AUTO_VERIFY_LOG_DIR, 'pipeline-summary.jsonl');
+function logPipelineSummary(event) {
+  try {
+    fs.appendFileSync(PIPELINE_SUMMARY_LOG_PATH, JSON.stringify({ ts: new Date().toISOString(), ...event }) + '\n', 'utf-8');
   } catch {
     // best-effort
   }
@@ -947,6 +979,12 @@ async function runDone(passedCompletion = null) {
       (pending.length > 0 ? `\nQueda a mano: ${pending.join(', ')}.` : '\nNada pendiente a mano. 🎉'),
       { title: `✅ Canción cerrada — ${result.titulo}`, priority: 'default', tags: 'white_check_mark' }
     ).catch(() => {});
+    logPipelineSummary({
+      outcome: 'completed',
+      songId: current?.songId || null,
+      titulo: result.titulo,
+      isRedo: !!current?.isRedo,
+    });
 
     if (result.remark) {
       console.log(`📝 Remarks auto-completado: "${result.remark}"`);
@@ -1243,7 +1281,11 @@ async function runFlowInner({ resume = false } = {}, hb) {
   }
 
   if (!skipSunoFill) {
-    hb.setStage('sesion-suno', { maxMinutes: 10 });
+    // 25 min (antes 10): waitUntilSunoLoggedIn espera hasta 5 min de login
+    // manual, y la regla de convivencia (lib/heartbeat.js) exige que todo
+    // techo que pueda contener espera humana supere los 20 min del timeout
+    // humano — con 10 min el watchdog mataba antes de que ese timeout actuara.
+    hb.setStage('sesion-suno', { maxMinutes: 25 });
     console.log('\n=== Paso 2/4: verificando sesión de Suno ===');
     if (await checkSunoSessionReady()) {
       console.log('Sesión de Suno confirmada.');
@@ -1306,7 +1348,10 @@ async function runFlowInner({ resume = false } = {}, hb) {
         'Verificá los screenshots antes de gastar créditos:\n' +
         '  • suno-verify-overview.png (título/estilo/sliders)\n' +
         '  • suno-verify-lyrics-top.png (letra desde Verse 1)',
-        'clickear Create en Suno (gasta créditos) y descargar los 2 MP3'
+        'clickear Create en Suno (gasta créditos) y descargar los 2 MP3',
+        // Screenshots adjuntos al ntfy (2026-07-14): permite verificar la
+        // letra y aprobar el gasto de créditos desde el celular, sin PC.
+        { screenshotPaths: [path.join(__dirname, 'suno-verify-overview.png'), path.join(__dirname, 'suno-verify-lyrics-top.png')] }
       );
     } else {
       console.log('\n  (Auto-descarga activa por --loop: omitiendo confirmación humana para gastar créditos)');
@@ -1405,6 +1450,38 @@ async function runFlowInner({ resume = false } = {}, hb) {
             `🛑 Create/descarga falló ${createAttempt} veces seguidas en "${tituloActual}" — necesita intervención manual${clickedAt ? ' (OJO: Create YA se clickeó, los créditos están gastados — descargá de suno.com, NO vuelvas a crear)' : ' (node suno-create.js + upload-to-flow.js)'}. No se subió nada automáticamente.`,
             { title: 'Create/descarga falló — acción manual necesaria', priority: 'urgent', tags: 'warning' }
           ).catch(() => {});
+
+          // Aprobación humana EXPLÍCITA para una acción más (2026-07-14, reply
+          // channel): desde el celular o con ENTER. Si Create nunca prendió,
+          // el ✅ autoriza UN re-Create (la única forma de re-clickear —
+          // jamás automático); si ya prendió, el ✅ solo reintenta descarga.
+          // Timeout (20 min en --loop) → comportamiento de siempre: seguir
+          // sin subir nada (el gate de upload bloquea el auto-Submit).
+          // 🛑 remoto → abandonar la canción entera ya mismo.
+          let approvedRetry = false;
+          try {
+            await pauseForHumanInteraction(
+              clickedAt
+                ? `Create/descarga falló ${createAttempt} veces en "${tituloActual}". Create YA se clickeó (créditos gastados): verificá suno.com/create — si las versiones están generadas, ✅ reintenta SOLO la descarga.`
+                : `Create falló ${createAttempt} veces en "${tituloActual}" sin llegar a clickear. ✅ autoriza UN re-Create (GASTA créditos) — revisá el formulario en suno.com/create antes.`,
+              {
+                verbs: [
+                  { verb: 'ok', label: clickedAt ? '🔁 Reintentar descarga' : '✅ Re-Create (gasta créditos)' },
+                  { verb: 'abort', label: '🛑 Abandonar canción' },
+                ],
+              }
+            );
+            approvedRetry = true;
+          } catch (pauseErr) {
+            if (pauseErr instanceof HumanAbortError) throw pauseErr; // abandona la canción entera
+            if (!(pauseErr instanceof HumanTimeoutError)) throw pauseErr;
+            // timeout: seguir sin subir nada (igual que antes del rediseño)
+          }
+          if (approvedRetry) {
+            console.log('  ✅ Autorización humana recibida — un intento más.');
+            createAttempt = 0; // presupuesto fresco, autorizado explícitamente
+            continue;
+          }
           break;
         }
       }
@@ -1640,9 +1717,15 @@ async function runFlowInner({ resume = false } = {}, hb) {
   // Fallback manual de siempre: node start-flow.js --done.
 
   // La espera del Submit es indefinida por diseño y su loop escribe su propio
-  // heartbeat en cada tick de 5s — el techo enorme de esta "etapa" solo evita
-  // que el ticker de 30s compita reportando una etapa vencida.
-  hb.setStage('esperando-submit', { maxMinutes: 24 * 60 });
+  // heartbeat en cada tick de 5s. Techo del TICKER bajado de 24h a 10 min
+  // (auditoría 2026-07-14): con 24h, si el loop de espera se colgaba (un
+  // evaluate de Playwright trabado), el ticker de 30s seguía latiendo un día
+  // entero y el watchdog quedaba ciego. Ahora el ticker cubre solo el
+  // arranque (armar iframe/pre-chequeos) y después el ÚNICO pulso es el del
+  // loop real: si deja de latir >5 min, el watchdog mata y relanza — y
+  // gracias a los intents de submit, ese relanzamiento es seguro (verifica
+  // en el Flow antes de tocar nada, jamás doble Submit).
+  hb.setStage('esperando-submit', { maxMinutes: 10 });
 
   console.log('\n==================================================================');
   console.log('🤖 Auto-Submit ACTIVO. Se enviará automáticamente entre el min 26 y 31.');
@@ -2411,6 +2494,14 @@ function explainResume() {
           }
         } else {
           console.error(`\n❌ --loop: el ciclo ${ciclo} falló: ${err.message}`);
+          const stFail = state.read();
+          logPipelineSummary({
+            outcome: 'failed',
+            songId: stFail?.songId || null,
+            titulo: stFail?.titulo || null,
+            isRedo: !!stFail?.isRedo,
+            error: String(err.message).slice(0, 200),
+          });
           await notify(
             `❌ --loop: el ciclo ${ciclo} falló (${String(err.message).slice(0, 140)}). Reintento con la próxima canción en 60s. Ctrl+C para frenar.`,
             { title: 'Loop: ciclo falló', priority: 'urgent', tags: 'rotating_light' }

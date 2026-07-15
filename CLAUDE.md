@@ -39,8 +39,10 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
 
 3. **Suno** — `suno-fill.js` llena el formulario (título/letra/estilo/sliders).
    Si falla un selector de la UI, cae a un fallback interactivo (`pauseForHumanInteraction`
-   en `lib/playwright-helpers.js`): pausa, avisa por ntfy y espera un ENTER en la
-   terminal en vez de matar el proceso. `start-flow.js` luego corre
+   en `lib/playwright-helpers.js`): pausa, avisa por ntfy con **botones de
+   respuesta remota** (✅ continuar / 🛑 abandonar — se responde desde el
+   celular sin ir a la PC, ver "Reply channel" abajo) y espera un ENTER en la
+   terminal o la respuesta remota, en vez de matar el proceso. `start-flow.js` luego corre
    `lib/suno-create-dl.js` automáticamente: chequea créditos de Suno, verifica el
    formulario, clickea Create una vez (Suno v5.5 genera 2 versiones por click) y
    descarga ambos MP3 a `Downloads/suno/`. Con `--no-auto-create` se saltea este
@@ -174,6 +176,27 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
   instancia sobre el mismo perfil.
 - **Clockify** = solo reuniones, nunca canciones. **Flow Screenshot** = siempre
   obligatorio. **Clockify Screenshot** = solo si hubo reuniones ese día.
+
+## Reply channel — responder pausas desde el celular (2026-07-14)
+
+Toda pausa humana (`pauseForHumanInteraction` / `confirmToContinue`) ahora se
+puede resolver de DOS formas: ENTER local en la terminal, o los **botones de
+la notificación ntfy** en el celular (action `http` de la API JSON: cada botón
+postea `<requestId>:<ok|abort>` al tópico de respuestas `REPLY_TOPIC` de
+`lib/ntfy.js`, separado del principal para no generar eco). El pipeline pollea
+ese tópico cada 15s (`waitForNtfyReply`) y solo acepta el nonce de la pausa
+vigente (`parseReply`, puro y testeado). `ok` remoto = ENTER; `abort` remoto =
+`HumanAbortError` (subclase de `HumanTimeoutError` a propósito: todos los
+catch existentes ya tratan eso como "abandonar esta canción"). Las pausas con
+evidencia visual adjuntan screenshots (`notifyAttachment`, PUT binario —
+header `Filename` ASCII puro, jamás emoji en headers): el checkpoint
+pre-Create manda los suno-verify-*.png y las pausas de upload los
+flow-upload-*.png. La rama give-up del retry de Create ofrece por esta vía la
+ÚNICA forma de autorizar un re-Create (gasta créditos) — nunca automático.
+Si se cambia cualquiera de los dos tópicos: Hector tiene que re-suscribirse
+en la app (solo al principal — el de respuestas no se suscribe) y hay que
+anotarlo acá. Validado en vivo contra la API real el 2026-07-14 (ver
+LESSONS.md).
 
 ## Archivos clave
 

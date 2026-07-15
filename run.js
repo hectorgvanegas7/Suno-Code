@@ -550,6 +550,15 @@ async function runGrammarGate(parsedJson, surveyContent) {
 
     if (!result.ok) {
       console.warn(`\n⚠️ LanguageTool no disponible (${result.error}) — se entrega con advertencia de revisión manual en vez de asumir que la letra está limpia.`);
+      // Aviso push (2026-07-14): antes esta degradación solo quedaba en la
+      // consola — con --loop desatendido, LanguageTool podía estar caído
+      // TODA la noche (todas las canciones sin Capa 2) sin que llegara nada
+      // al celular. Un solo aviso por corrida (esta función corre una vez
+      // por canción), prioridad default: informativo, no urgente.
+      await notify(
+        `⚠️ LanguageTool no disponible (${String(result.error).slice(0, 80)}) — esta canción se entrega SIN la Capa 2 de ortografía/gramática. Revisala a mano antes de que la vea QC.`,
+        { title: 'Capa 2 (LanguageTool) degradada', priority: 'default', tags: 'warning' }
+      ).catch(() => {});
       return {
         clean: false,
         unavailable: true,

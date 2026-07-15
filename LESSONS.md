@@ -2868,3 +2868,60 @@ flujo); `checkLanguageTool` avisa como warning si la Capa 2 va a degradar
 (antes se apagaba en silencio); y un preflight fallido ahora NOTIFICA por
 ntfy urgente (antes solo consola — en --loop desatendido reintentaba toda
 la noche sin que llegara ningún push). `runPreflight` pasó a ser async.
+
+## Canal de respuestas remoto por ntfy: las pausas ahora se resuelven desde el celular — validado en vivo contra la API real antes de confiar (2026-07-14)
+
+Hasta hoy ntfy era estrictamente SALIENTE: toda pausa (`pauseForHumanInteraction`
+/ `confirmToContinue`) solo se resolvía con un ENTER físico en la terminal, y
+en `--loop` el timeout de 20 min abandonaba la canción aunque Hector hubiera
+visto la notificación en el celular a los 30 segundos. Cerrado con el **reply
+channel** (lib/ntfy.js):
+
+- **Tópico de respuestas separado** (`REPLY_TOPIC`, sufijo aleatorio propio) —
+  separado del principal a propósito: publicar la respuesta en el mismo tópico
+  generaría una notificación-eco por cada botón tocado.
+- **Botones en la notificación** (campo `actions` de la API JSON de ntfy,
+  action `http`): cada botón postea `<requestId>:<ok|abort>` al tópico de
+  respuestas directo desde la app — sin abrir nada.
+- **`waitForNtfyReply`**: poll corto cada 15s (`?poll=1&since=`) — más robusto
+  en Windows/red doméstica que un long-poll abierto 20 min. Nunca lanza.
+- **Seguridad**: tópico impredecible + nonce por pausa (`requestId`, 4 bytes) +
+  `since` acotado — un replay viejo o un mensaje ajeno no matchea nada
+  (`parseReply` es puro y testeado). Si algún día hace falta más, el formato
+  admite un HMAC como tercer campo sin romper el parser.
+- **Integración**: `waitForHumanResponse` corre `Promise.race` entre el ENTER
+  local y el poll remoto, con cleanup garantizado del perdedor (el listener de
+  stdin mantiene vivo el event loop — dejarlo colgado tras un reply remoto era
+  un leak real en diseño). `ok` remoto = ENTER; `abort` remoto = nueva
+  `HumanAbortError`, que **extiende HumanTimeoutError A PROPÓSITO**: todos los
+  catch existentes del repo ya tratan eso como "abandonar esta canción y
+  seguir" — cero callers tocados.
+- **Screenshots adjuntos** (`notifyAttachment`, PUT binario + header
+  `Filename` ASCII puro — mismo bug de ByteString/emoji ya documentado): el
+  checkpoint pre-Create manda suno-verify-overview/lyrics-top.png y las pausas
+  de upload mandan flow-upload-verify/diagnosis.png — se decide desde el
+  celular mirando la evidencia.
+- **Re-Create con aprobación explícita**: la rama give-up del retry de Create
+  ahora ofrece botones (🔁 solo descarga si Create ya prendió / ✅ re-Create
+  con gasto de créditos si no) — la ÚNICA forma de re-clickear Create, jamás
+  automática. Timeout → comportamiento de siempre (seguir sin subir, gate
+  bloquea el submit).
+
+**Validación en vivo (protocolo del caso Haiku del mismo día):** antes de
+confiar, se corrió el ciclo completo contra la API REAL de ntfy con tópicos
+descartables: POST con `actions` (200), POST del reply simulando el botón
+(200), `waitForNtfyReply` real lo levantó y parseó (`ok`), y el PUT de
+attachment devolvió el objeto attachment correcto. Los mocks offline de
+npm test NO prueban nada de esto.
+
+**Más señales para la noche desatendida (mismo día):** preflight fallido,
+watchdog que no arrancó (chequeo diferido a los 10s — la ausencia de avisos
+era indistinguible de "todo bien"), y LanguageTool caído ahora notifican.
+El digest de las 7am suma canciones completadas y ciclos fallidos
+(`logs/pipeline-summary.jsonl` — antes una canción que fallaba en la
+generación no aparecía en el resumen). Techos de heartbeat corregidos:
+`sesion-suno` 10→25 min (violaba la regla de convivencia con el timeout
+humano de 20 min) y `esperando-submit` 24h→10 min de ticker (con 24h, un
+loop de espera colgado dejaba al watchdog ciego un día entero; ahora el
+único pulso sostenido es el del loop real, y gracias a los intents de
+submit el relanzamiento del watchdog en esa etapa es seguro).

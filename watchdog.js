@@ -60,6 +60,7 @@ const LOGS_DIR = path.join(__dirname, 'logs');
 const WATCHDOG_STATE_PATH = path.join(LOGS_DIR, 'watchdog-state.json');
 const WATCHDOG_EVENTS_PATH = path.join(LOGS_DIR, 'watchdog-events.jsonl');
 const AUTO_SUBMIT_EVENTS_PATH = path.join(LOGS_DIR, 'auto-submit-events.jsonl');
+const PIPELINE_SUMMARY_PATH = path.join(LOGS_DIR, 'pipeline-summary.jsonl');
 const WATCHDOG_PID_PATH = path.join(LOGS_DIR, 'watchdog.pid');
 const DIGEST_HOUR = 7; // hora local a la que se manda el resumen matutino, sin Tarea Programada
 const DISK_NOTIFY_COOLDOWN_MS = 60 * 60 * 1000; // aviso de disco máx. 1 vez/hora (antes spameaba cada 2 min)
@@ -256,12 +257,22 @@ async function sendDigest({ lookbackHours = 12 } = {}) {
   const restarts = watchdogEvents.filter((e) => e.event === 'restart').length;
   const circuitBreakerTripped = watchdogEvents.some((e) => e.event === 'circuit-breaker-tripped');
 
+  // Resumen por canción (2026-07-14): antes el digest solo contaba submits y
+  // reinicios — una canción que falló en la GENERACIÓN (sin tocar al
+  // watchdog) no aparecía en el resumen de la mañana.
+  const songEvents = readJsonlEntries(PIPELINE_SUMMARY_PATH).filter(withinWindow);
+  const completedSongs = songEvents.filter((e) => e.outcome === 'completed');
+  const failedSongs = songEvents.filter((e) => e.outcome === 'failed');
+  const failedTitles = [...new Set(failedSongs.map((e) => e.titulo).filter(Boolean))];
+
   const currentState = state.read();
   const diskProblem = checkDiskSpace();
 
-  const allOk = failedSubmits === 0 && blockedSubmits === 0 && restarts === 0 && !circuitBreakerTripped && !diskProblem;
+  const allOk = failedSubmits === 0 && blockedSubmits === 0 && restarts === 0 && !circuitBreakerTripped && !diskProblem && failedSongs.length === 0;
   const lines = [
     allOk && confirmedSubmits > 0 ? '✅ Noche limpia — nada requiere tu atención.' : null,
+    `• Canciones completadas: ${completedSongs.length}${completedSongs.length > 0 ? ` (${completedSongs.map((e) => `"${e.titulo}"`).join(', ')})` : ''}`,
+    failedSongs.length > 0 ? `• Ciclos FALLIDOS: ${failedSongs.length}${failedTitles.length > 0 ? ` — ${failedTitles.map((t) => `"${t}"`).join(', ')}` : ''} ⚠️ revisar logs` : null,
     `• Submits confirmados: ${confirmedSubmits}`,
     failedSubmits > 0 ? `• Submits FALLIDOS: ${failedSubmits} ⚠️ revisar en el Flow` : null,
     blockedSubmits > 0 ? `• Submits BLOQUEADOS (sin MP3 subido): ${blockedSubmits} 🛑 acción manual pendiente` : null,

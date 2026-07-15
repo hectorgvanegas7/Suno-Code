@@ -229,7 +229,10 @@ function parseArgs(argv) {
       const diagPath = path.join(__dirname, 'flow-upload-diagnosis.png');
       await page.screenshot({ path: diagPath, fullPage: true }).catch(() => {});
       console.error(`\n❌ No se encontró ningún campo de carga de archivo en el Flow (tras ${RETRY_WAITS_MS.length} intentos). Screenshot: ${diagPath}`);
-      await pauseForHumanInteraction('No se encontró el botón para subir el MP3 en la interfaz del Flow. Por favor, súbelo manualmente y presiona ENTER.');
+      await pauseForHumanInteraction(
+        'No se encontró el botón para subir el MP3 en la interfaz del Flow. Por favor, súbelo manualmente y presiona ENTER.',
+        { screenshotPaths: [diagPath] }
+      );
     }
   }
 
@@ -359,7 +362,10 @@ function parseArgs(argv) {
     // abandona la canción por timeout en vez de auto-submitear una subida sin
     // confirmar (ver LESSONS.md, 2026-07-10).
     console.log('  ⚠️  No se pudo confirmar que el archivo quedó en la UI tras 12s de poll (revisá flow-upload-verify.png).');
-    await pauseForHumanInteraction('No se pudo confirmar que el MP3 quedó visible en el Flow tras subirlo. Revisá flow-upload-verify.png y confirmá a mano que el archivo correcto está cargado antes de continuar.');
+    await pauseForHumanInteraction(
+      'No se pudo confirmar que el MP3 quedó visible en el Flow tras subirlo. Revisá flow-upload-verify.png (adjunto) y confirmá a mano que el archivo correcto está cargado antes de continuar.',
+      { screenshotPaths: [path.join(__dirname, 'flow-upload-verify.png')] }
+    );
     // Tras el ENTER humano, re-verificar en el DOM: solo si AHORA se ve el
     // archivo se registra la verificación — un ENTER "para destrabar" sin
     // haber subido nada ya no habilita el auto-Submit.
