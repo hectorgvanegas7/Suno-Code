@@ -3005,3 +3005,32 @@ Tres piezas de "nunca fallar en silencio" que cierran el plan del día:
    chequeos de ORDEN (el intent write-ahead debe escribirse ANTES del click,
    o pierde su razón de ser). No prueban comportamiento (eso lo hacen los
    tests de las funciones puras) — prueban que la pieza no desapareció.
+
+## Sangrado del Golden Example en producción la misma noche — y el gate determinístico que lo generaliza (2026-07-15)
+
+El Golden Example (encuesta real → letra real aprobada) entró al SYSTEM_PROMPT
+y en la SEGUNDA canción generada ("Keyla") el Bridge abrió con "cuando ya no
+esté para decirlo de frente" — casi calco del Bridge del ejemplo ("Cuando ya
+no esté para decirlo con mi voz"). El riesgo conocido del few-shot, confirmado
+en horas: el ejemplo pesa más que las reglas, para bien (la rima subió de 3/12
+pares a 6/12 en esa misma canción) y para mal (copia).
+
+**Fix en dos capas (pedido de Hector: "generalizado", sin tocar la canción en
+vuelo):**
+1. Prompt: la advertencia anti-copia del ejemplo nombra el caso visto y exige
+   reescribir cualquier frase reconocible. NO es la garantía.
+2. La garantía: `lib/example-bleed.js` (`findExampleBleed`, puro/offline/cero
+   LLM) compara cada línea generada contra las líneas del ejemplo — calco si
+   comparten un n-grama de 5+ palabras que la ENCUESTA no contiene (si el
+   cliente lo dijo, es material legítimo — exención clave para frases tipo
+   "le doy gracias a dios por"), o si la similitud Jaccard de la línea es
+   ≥80% (mismas palabras, otro orden). Cableado en
+   `generateSongWithSelfCorrection` como gate correctivo desde el día 1 (por
+   ser determinístico y gratis no necesita fase informativa): un calco
+   dispara el mismo regen con instrucciones que el chequeo N, también sobre
+   el resultado del corrector barato (misma letra, misma vara). Fuente
+   canónica de las líneas: golden/2026-07-14-damian-buena/song.txt — si el
+   ejemplo del prompt cambia de canción, actualizar EXAMPLE_SONG_PATH. Sin
+   archivo → chequeo desactivado en silencio, jamás rompe una generación.
+   Verificado contra el calco real de producción (lo detecta) y contra letras
+   sin relación (cero falsos positivos), + 7 tests en test/example-bleed.test.js.

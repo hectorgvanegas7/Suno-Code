@@ -671,6 +671,32 @@ async function generateSongWithSelfCorrection(surveyContent, baseUserMessageOver
   // MAX_GENERATION_ATTEMPTS. La señal caída (API inalcanzable) JAMÁS bloquea
   // (protocolo Capa 3), y decideFactGateAction degrada a warn tras 2 regens
   // de hechos en la misma canción. En --dry-run no corre (cero API).
+  // ── Gate de calcos del ejemplo dorado (2026-07-15, DETERMINÍSTICO) ─────
+  // El Golden Example del SYSTEM_PROMPT ya sangró en producción (el Bridge
+  // de "Keyla" calcó el del ejemplo). La prohibición vive en el prompt PERO
+  // la garantía vive acá (principio del repo): findExampleBleed compara
+  // cada línea generada contra las líneas del ejemplo (n-grama de 5+
+  // palabras compartido no presente en la encuesta, o similitud ≥80%) y un
+  // calco dispara el mismo regen correctivo que un fallo de hardValidate.
+  // Gratis, offline, cero LLM — puede gatear desde el día 1.
+  const runExampleBleedGate = (cleanJson) => {
+    try {
+      const { findExampleBleed } = require('./lib/example-bleed');
+      const bleed = findExampleBleed(cleanJson?.letras, surveyContent);
+      if (bleed.length === 0) return { pass: true };
+      const failures = bleed.map((b) =>
+        `Calco del ejemplo dorado en [${b.seccion}] línea ${b.linea}: "${b.texto}" ${b.motivo}. ` +
+        'Reescribí esa línea con material propio de ESTA encuesta — el ejemplo muestra el nivel, jamás se copia.'
+      );
+      console.log(`\n📋 Calco del ejemplo dorado detectado (${bleed.length} línea[s]) — regen con instrucciones:`);
+      failures.forEach((f) => console.log(`   🚨 ${f}`));
+      return { pass: false, failures };
+    } catch (e) {
+      console.log(`\n📋 Chequeo de calcos no disponible (${e.message}) — sigue normal.`);
+      return { pass: true };
+    }
+  };
+
   let factGateRegens = 0;
   const runFactGate = async (cleanJson) => {
     const mode = String(process.env.FACT_GATE || 'warn').toLowerCase();
@@ -764,13 +790,14 @@ async function generateSongWithSelfCorrection(surveyContent, baseUserMessageOver
 
       const grammarResult = await runGrammarGate(parsedJson, surveyContent);
       if (grammarResult.clean) {
-        const factGate = await runFactGate(grammarResult.parsedJson);
-        if (factGate.pass) {
+        const bleedGate = runExampleBleedGate(grammarResult.parsedJson);
+        const factGate = bleedGate.pass ? await runFactGate(grammarResult.parsedJson) : { pass: true };
+        if (bleedGate.pass && factGate.pass) {
           return { fullResponse: grammarResult.fullResponse, parsedJson: grammarResult.parsedJson, passedQA: true };
         }
-        // Hechos sin respaldo con FACT_GATE=regen: cae al flujo correctivo de
-        // abajo (mismo camino que cualquier fallo del chequeo N).
-        lastFailures = factGate.failures;
+        // Calco del ejemplo o hechos sin respaldo (FACT_GATE=regen): cae al
+        // flujo correctivo de abajo (mismo camino que el chequeo N).
+        lastFailures = [...(bleedGate.failures || []), ...(factGate.failures || [])];
         lastResponse = grammarResult.fullResponse;
         parsedJson = grammarResult.parsedJson;
         considerCandidate(lastResponse, lastFailures, true);
@@ -826,14 +853,15 @@ async function generateSongWithSelfCorrection(surveyContent, baseUserMessageOver
           // distinta para la misma letra (auditoría 2026-07-13).
           const patchedGrammar = await runGrammarGate(revalidated.parsedJson, surveyContent);
           if (patchedGrammar.clean) {
-            // Mismo fact-gate que el camino valid normal — el corrector puede
+            // Mismos gates que el camino valid normal — el corrector puede
             // reescribir líneas enteras y (en teoría) introducir un hecho
-            // nuevo; la misma letra siempre pasa por la misma vara.
-            const patchedFactGate = await runFactGate(patchedGrammar.parsedJson);
-            if (patchedFactGate.pass) {
+            // nuevo o un calco; la misma letra siempre pasa por la misma vara.
+            const patchedBleedGate = runExampleBleedGate(patchedGrammar.parsedJson);
+            const patchedFactGate = patchedBleedGate.pass ? await runFactGate(patchedGrammar.parsedJson) : { pass: true };
+            if (patchedBleedGate.pass && patchedFactGate.pass) {
               return { fullResponse: patchedGrammar.fullResponse, parsedJson: patchedGrammar.parsedJson, passedQA: true };
             }
-            lastFailures = patchedFactGate.failures;
+            lastFailures = [...(patchedBleedGate.failures || []), ...(patchedFactGate.failures || [])];
             lastResponse = patchedGrammar.fullResponse;
             considerCandidate(lastResponse, lastFailures, true);
           } else if (patchedGrammar.unavailable) {
