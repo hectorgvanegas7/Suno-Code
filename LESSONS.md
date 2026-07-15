@@ -3243,3 +3243,39 @@ guard que ya tiene `lib/preflight.js` — el CLI (`node guardia-benchmark.js
 Verificado en vivo con `node watchdog.js --digest` (real, contra el estado
 actual del repo): con `FACT_GATE` sin activar muestra "1/4 condiciones"; con
 `FACT_GATE=regen` forzado, la línea desaparece del todo.
+
+## Endurecido y validado en vivo de punta a punta el loop de recuperación, antes de confiar en dejarlo sin supervisión (2026-07-15, mismo día)
+
+Hector preguntó directo si estaba listo para dejarlo corriendo sin
+supervisión toda la noche. Respuesta honesta: el loop de recuperación
+generalizado (entrada anterior) nunca había corrido de punta a punta con
+datos reales — solo piezas sueltas verificadas. Dos acciones concretas
+antes de responder que sí:
+
+**1. Gap real encontrado y cerrado:** la escritura ORIGINAL de song.txt pasa
+por `validateContentForWrite` (chequeo defensivo contra una respuesta
+truncada/corrupta — falta título, falta una sección entera) ANTES de
+escribir a disco. El bloque nuevo de recuperación escribía song.txt de
+nuevo con el resultado de cada regen SIN pasar por ese mismo chequeo — un
+regen truncado podría haber pisado song.txt con basura. Fix: mismo
+`validateContentForWrite` antes de cada escritura del loop; si falla, se
+descarta el intento y sigue con la última letra buena conocida (nunca con
+la rota).
+
+**2. Smoke test COMPLETO en vivo** (no solo funciones puras sueltas): se
+reprodujo la cadena entera con API real — `validarGuardia` real sobre la
+letra ambigua original (rechazo confirmado, fidelidad=5) →
+`buildGuardiaCorrectiveNote` real → regen real de Sonnet citando la nota →
+`validarGuardia` real sobre el resultado. **Convergió**: la segunda pasada
+aprobó con fidelidad=10, "sin invenciones". Es la primera vez que se prueba
+el MECANISMO completo (no solo que compile) — usando un system prompt
+simplificado para el smoke (el prompt completo de 400 líneas ya está
+probado en vivo por las 3 canciones reales de esta noche); lo que estaba
+sin probar era específicamente si "citarle a Sonnet la queja exacta del
+Guardia" de verdad produce una corrección que el Guardia aprueba, y ahora
+hay evidencia real de que sí.
+
+Con esto: la parte que protege plata (Create/Submit, probada en producción
+2 veces esta noche) y la parte que protege calidad de letra (recuperación
+del Guardia, ahora probada de punta a punta con datos reales) quedan en un
+nivel de confianza comparable antes de dejar el pipeline sin supervisión.

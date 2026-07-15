@@ -1663,7 +1663,18 @@ process.on('uncaughtException', async (err) => {
           console.log(correctiveNote);
           try {
             const retryResult = await generateSongWithSelfCorrection(surveyContent, `${finalBaseUserMessage}\n\n${correctiveNote}`);
-            if (!retryResult.parsedJson?.letras) break; // sin letra parseable, no hay nada que re-consultar
+            // Mismo chequeo defensivo que protege la escritura ORIGINAL de
+            // song.txt (arriba, antes de la primera consulta al Guardia) —
+            // un regen truncado/corrupto (respuesta cortada, sección
+            // faltante) NUNCA debe pisar song.txt con basura solo porque
+            // "parseó algo". Si falla, se corta la recuperación acá y cae al
+            // flujo de pausa de siempre con la letra ANTERIOR (la última
+            // buena conocida), nunca con la rota.
+            const retryWriteCheck = validateContentForWrite(retryResult.parsedJson);
+            if (!retryWriteCheck.ok) {
+              console.log(`⚠️ Intento ${recoveryAttempts} de recuperación dio una respuesta truncada/corrupta (${retryWriteCheck.failures.join('; ')}) — se descarta, sigue con la última letra buena conocida.`);
+              break;
+            }
 
             console.log('\n🛡️  Re-consultando al Guardia sobre la letra corregida...');
             const retryPayload = { letras: retryResult.parsedJson.letras, titulo: retryResult.parsedJson.titulo, survey: surveyContent, estiloSuno: retryResult.parsedJson.estiloSuno };
