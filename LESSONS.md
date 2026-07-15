@@ -3155,3 +3155,55 @@ sin pedir invención. No se gastó en probar el regen completo (reusa
 genuinamente mala en varios frentes, o con un hecho de verdad inventado,
 sigue yendo directo a pausa humana sin ningún atajo — el pedido fue que la
 AMBIGÜEDAD real (no la calidad en general) deje de trabar canciones buenas.
+
+## "El propósito de tener dos modelos es que se corrijan entre ellos" — generalización de la recuperación automática, la misma noche (2026-07-15)
+
+Seguimiento inmediato de la recuperación por ambigüedad (entrada anterior).
+Hector aclaró el objetivo de fondo: el propósito de tener Sonnet (genera) +
+Haiku (audita) separados es que se corrijan ENTRE ELLOS sin que él tenga
+que intervenir manualmente — la pausa humana debe ser el ÚLTIMO recurso, no
+el primero. La versión de la entrada anterior era deliberadamente estrecha
+("solo el perfil de ambigüedad pura, un intento") por priorizar "no
+debilitar el gate" — pero eso dejaba afuera EXACTAMENTE los casos donde más
+falta hacía la auto-corrección (una letra rechazada por varios motivos a la
+vez, o con un hecho realmente inventado).
+
+**Generalización** (`lib/ollama-guardia.js`):
+- `shouldAttemptGuardiaRecovery` reemplaza la condición estrecha por una
+  general: CUALQUIER rechazo del Guardia con al menos un veredicto que
+  rechazó, mientras queden intentos (`MAX_GUARDIA_RECOVERY_ATTEMPTS = 2`).
+  Ya no exige "0 hechos sin respaldo" ni "resto de puntajes buenos" — una
+  letra mala en varios frentes también recibe su oportunidad de corregirse
+  sola.
+- `buildGuardiaCorrectiveNote` reemplaza la nota estrecha (solo fidelidad/
+  coherencia) por una que cita TODOS los tipos de problema, y si
+  `hechosSinRespaldo` tiene algo, agrega una sección separada con
+  instrucción de ELIMINAR el hecho (no solo "aclarar" — es invención real,
+  distinto del caso de ambigüedad).
+- `run.js`: el bloque de recuperación (antes un `if` de un solo tiro) pasó
+  a un `while` acotado por `shouldAttemptGuardiaRecovery` — hasta 2 rondas
+  de regen+re-consulta al Guardia antes de caer a la pausa de siempre. Cada
+  ronda adopta el resultado (apruebe o no) como la nueva "mejor versión" y
+  sobrescribe song.txt; solo si se agotan los 2 intentos sin aprobación cae
+  a `pauseForHumanInteraction`, mostrando la versión más corregida
+  disponible, nunca la original.
+
+**Lo que sigue exactamente igual, sin excepción:** el dominio de Suno/
+créditos. Esta generalización es 100% sobre la LETRA (Sonnet+Haiku,
+centavos de Haiku, nunca Suno) — la regla dura de nunca clickear Create sin
+confirmación humana no se tocó ni se va a tocar por este pedido; son dos
+dominios de automatización completamente separados y Hector fue explícito
+sobre eso.
+
+**Costo:** en el peor caso (letra que rechaza 2 veces seguidas) esto suma
+hasta 2 regens completos de Sonnet + hasta 4 pasadas extra de Haiku sobre
+lo que ya corría — sigue siendo centavos (Haiku) más el costo normal de
+Sonnet que el pipeline ya paga siempre, pero es explícitamente MÁS gasto de
+tokens que la versión anterior a cambio de MENOS pausas. Trade-off
+aceptado a propósito: el objetivo explícito es reducir intervención manual,
+no minimizar tokens.
+
+**19 tests nuevos entre las dos entradas de esta noche** (`test/ollama-guardia.test.js`)
+cubren tanto la versión estrecha original (que se mantiene como clasificador
+de "es esto ambigüedad pura o no" para calibración futura, aunque ya no
+gatea la decisión) como la general nueva.

@@ -635,3 +635,64 @@ test('buildAmbiguityCorrectiveNote: sin problemas de fidelidad/coherencia da un 
   const note = buildAmbiguityCorrectiveNote([{ problemas: [{ seccion: 'Verse 1', linea: 1, tipo: 'rima', gravedad: 'baja', detalle: 'x' }] }]);
   assert.equal(typeof note, 'string');
 });
+
+// ─── shouldAttemptGuardiaRecovery / buildGuardiaCorrectiveNote (2026-07-15) ───
+// Generalización del mismo día: shouldAttemptAmbiguityRecovery arriba nació
+// estrecho (solo ambigüedad pura). Pedido explícito de Hector: CUALQUIER
+// rechazo del Guardia debe darle a Sonnet varios intentos de corregirse solo
+// antes de pasar a un humano — la pausa es el último recurso.
+
+const { shouldAttemptGuardiaRecovery, buildGuardiaCorrectiveNote, MAX_GUARDIA_RECOVERY_ATTEMPTS } = require('../lib/ollama-guardia');
+
+const LETRA_MALA_EN_VARIOS_FRENTES = {
+  aprobada: false, coherencia: 4, rima: 3, tono: 5, fidelidad: 4, gancho: 3,
+  problemas: [{ seccion: 'Verse 1', linea: 1, tipo: 'coherencia', gravedad: 'alta', detalle: 'la línea no tiene sentido' }],
+};
+
+test('shouldAttemptGuardiaRecovery: dispara para CUALQUIER rechazo, no solo ambigüedad pura (a diferencia de shouldAttemptAmbiguityRecovery)', () => {
+  // Este caso — mala en varios frentes — es EXACTAMENTE el que
+  // shouldAttemptAmbiguityRecovery excluía a propósito. La versión general
+  // SÍ le da una oportunidad, porque el pedido fue "que se corrijan solos".
+  assert.equal(shouldAttemptGuardiaRecovery({ rejectingVeredictos: [LETRA_MALA_EN_VARIOS_FRENTES], attemptsUsed: 0 }), true);
+});
+
+test('shouldAttemptGuardiaRecovery: se agota tras MAX_GUARDIA_RECOVERY_ATTEMPTS (nunca un loop sin fondo)', () => {
+  assert.equal(MAX_GUARDIA_RECOVERY_ATTEMPTS, 2);
+  assert.equal(shouldAttemptGuardiaRecovery({ rejectingVeredictos: [LETRA_MALA_EN_VARIOS_FRENTES], attemptsUsed: 0 }), true);
+  assert.equal(shouldAttemptGuardiaRecovery({ rejectingVeredictos: [LETRA_MALA_EN_VARIOS_FRENTES], attemptsUsed: 1 }), true);
+  assert.equal(shouldAttemptGuardiaRecovery({ rejectingVeredictos: [LETRA_MALA_EN_VARIOS_FRENTES], attemptsUsed: 2 }), false);
+  assert.equal(shouldAttemptGuardiaRecovery({ rejectingVeredictos: [LETRA_MALA_EN_VARIOS_FRENTES], attemptsUsed: 99 }), false);
+});
+
+test('shouldAttemptGuardiaRecovery: sin veredictos rechazados no dispara (nada que corregir)', () => {
+  assert.equal(shouldAttemptGuardiaRecovery({ rejectingVeredictos: [], attemptsUsed: 0 }), false);
+  assert.equal(shouldAttemptGuardiaRecovery({ attemptsUsed: 0 }), false);
+});
+
+test('buildGuardiaCorrectiveNote: incluye TODOS los tipos de problema (no filtra a fidelidad/coherencia como la versión de ambigüedad)', () => {
+  const veredicto = {
+    problemas: [
+      { seccion: 'Chorus 1', linea: 2, tipo: 'rima', gravedad: 'alta', detalle: 'rima pobre entre X e Y' },
+      { seccion: 'Bridge', linea: 1, tipo: 'gancho', gravedad: 'media', detalle: 'el gancho no engancha' },
+    ],
+  };
+  const note = buildGuardiaCorrectiveNote([veredicto], null);
+  assert.match(note, /rima pobre entre X e Y/);
+  assert.match(note, /el gancho no engancha/);
+  assert.match(note, /\[Chorus 1 línea 2\]/);
+});
+
+test('buildGuardiaCorrectiveNote: hechos sin respaldo piden ELIMINAR (invención), distinto de ambigüedad', () => {
+  const note = buildGuardiaCorrectiveNote(
+    [{ problemas: [] }],
+    { sinRespaldo: [{ tipo: 'lugar', valor: 'Miami', motivo: 'no está en la encuesta' }] }
+  );
+  assert.match(note, /INVENCIÓN real/);
+  assert.match(note, /ELIMINALAS/);
+  assert.match(note, /Miami/);
+});
+
+test('buildGuardiaCorrectiveNote: sin hechosSinRespaldo no menciona invención (solo ambigüedad si aplica)', () => {
+  const note = buildGuardiaCorrectiveNote([{ problemas: [{ seccion: '', linea: 0, tipo: 'tono', gravedad: 'baja', detalle: 'x' }] }], null);
+  assert.doesNotMatch(note, /INVENCIÓN real/);
+});
