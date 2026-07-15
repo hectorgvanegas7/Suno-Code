@@ -511,3 +511,39 @@ test('compararHechosConEncuesta: dato temporal/numérico SIN respaldo sí se mar
   assert.equal(sinRespaldo.length, 1, JSON.stringify(sinRespaldo));
   assert.equal(sinRespaldo[0].valor, 'veinte años juntos');
 });
+
+// ─── decideFactGateAction: graduación del gate de hechos (2026-07-14) ─────────
+
+const { decideFactGateAction } = require('../lib/ollama-guardia');
+
+test('decideFactGateAction: default (sin env) es warn — el modo histórico informativo', () => {
+  assert.equal(decideFactGateAction({ sinRespaldoCount: 3, mode: undefined }), 'warn');
+  assert.equal(decideFactGateAction({ sinRespaldoCount: 3, mode: null }), 'warn');
+});
+
+test('decideFactGateAction: modo desconocido cae a warn (fail-safe, nunca a regen)', () => {
+  assert.equal(decideFactGateAction({ sinRespaldoCount: 3, mode: 'yolo' }), 'warn');
+});
+
+test('decideFactGateAction: off apaga la señal aunque haya hechos sin respaldo', () => {
+  assert.equal(decideFactGateAction({ sinRespaldoCount: 5, mode: 'off' }), 'off');
+});
+
+test('decideFactGateAction: sin hechos sin respaldo → pass (en warn y en regen)', () => {
+  assert.equal(decideFactGateAction({ sinRespaldoCount: 0, mode: 'warn' }), 'pass');
+  assert.equal(decideFactGateAction({ sinRespaldoCount: 0, mode: 'regen' }), 'pass');
+});
+
+test('decideFactGateAction: regen dispara con hechos sin respaldo y presupuesto disponible', () => {
+  assert.equal(decideFactGateAction({ sinRespaldoCount: 1, mode: 'regen', regenCount: 0 }), 'regen');
+  assert.equal(decideFactGateAction({ sinRespaldoCount: 1, mode: 'regen', regenCount: 1 }), 'regen');
+});
+
+test('decideFactGateAction: degradación automática tras 2 regens en la misma canción (protege la cola nocturna)', () => {
+  assert.equal(decideFactGateAction({ sinRespaldoCount: 1, mode: 'regen', regenCount: 2 }), 'degrade-warn');
+  assert.equal(decideFactGateAction({ sinRespaldoCount: 4, mode: 'regen', regenCount: 5 }), 'degrade-warn');
+});
+
+test('decideFactGateAction: el modo es case-insensitive (REGEN de un .env de Windows vale)', () => {
+  assert.equal(decideFactGateAction({ sinRespaldoCount: 1, mode: 'REGEN', regenCount: 0 }), 'regen');
+});

@@ -2468,6 +2468,26 @@ function explainResume() {
     // próxima — solo Ctrl+C (o cerrar Chrome sin reabrir) lo frena.
     // Todo el ciclo funciona de principio a fin sin requerir atención.
     console.log('🔁 Modo --loop: canciones en continuo. Todo el proceso es ahora 100% AUTOMÁTICO (incluso el Submit to QA). Ctrl+C para salir.\n');
+
+    // Smoke de API real UNA vez por arranque del loop (2026-07-14, lección
+    // "migración Haiku rota desde el día 1"): una llamada mínima a Haiku
+    // (fracción de centavo) atrapa key vencida/sin saldo/schema roto a las
+    // 22:00 en vez de a las 3 AM con el loop solo. Falla → aborta el loop
+    // con push urgente ANTES de tocar nada.
+    {
+      const { checkAnthropicApi } = require('./lib/preflight');
+      const apiProblem = await checkAnthropicApi();
+      if (apiProblem) {
+        console.error(`\n🛑 ${apiProblem}`);
+        await notify(
+          `🛑 El smoke de API real falló al arrancar --loop: ${apiProblem}\nEl loop NO arranca — resolvé la API antes de dejar la noche corriendo.`,
+          { title: 'Loop no arrancó — API rota', priority: 'urgent', tags: 'no_entry' }
+        ).catch(() => {});
+        process.exit(1);
+      }
+      console.log('✅ Smoke de API real OK (Haiku respondió) — el loop arranca.\n');
+    }
+
     let ciclo = 0;
     while (true) {
       ciclo++;

@@ -371,6 +371,50 @@ function stopWatchdogIfRunning() {
   return false;
 }
 
+// ─── Recolector de veredictos de calibración FP/TP (2026-07-14) ──────────────
+// Cuando la extracción de hechos marca algo sin respaldo (informativo), run.js
+// manda una notificación con botones "🚨 Bien detectado" / "❌ Falso positivo"
+// que postean "fact:<songId>:<tp|fp>" al reply topic. run.js es efímero y no
+// puede esperar la respuesta — el watchdog (que vive toda la noche) pollea el
+// tópico en cada tick y persiste los veredictos en logs/fact-verdicts.jsonl.
+// Ese jsonl es la evidencia para graduar FACT_GATE a 'regen'
+// (guardia-benchmark.js --readiness). Best-effort: nunca rompe el tick.
+const FACT_VERDICTS_PATH = path.join(LOGS_DIR, 'fact-verdicts.jsonl');
+
+function parseFactVerdict(rawMessage) {
+  const m = /^fact:(.+):(tp|fp)$/.exec(String(rawMessage || '').trim());
+  if (!m) return null;
+  return { songId: m[1], verdict: m[2] };
+}
+
+async function collectFactVerdicts() {
+  try {
+    const { REPLY_TOPIC } = require('./lib/ntfy');
+    const wstate = readWatchdogState();
+    const since = wstate.lastFactPollEpoch || Math.floor(Date.now() / 1000) - 24 * 3600;
+    const res = await fetch(`https://ntfy.sh/${REPLY_TOPIC}/json?poll=1&since=${since}`, { signal: AbortSignal.timeout(10000) });
+    if (!res.ok) return;
+    const text = await res.text();
+    let appended = 0;
+    for (const line of String(text).split('\n')) {
+      if (!line.trim()) continue;
+      let evt;
+      try { evt = JSON.parse(line); } catch { continue; }
+      if (evt.event && evt.event !== 'message') continue;
+      const verdict = parseFactVerdict(evt.message);
+      if (verdict) {
+        fs.appendFileSync(FACT_VERDICTS_PATH, JSON.stringify({ ts: new Date().toISOString(), ...verdict }) + '\n', 'utf-8');
+        appended++;
+      }
+    }
+    if (appended > 0) console.log(`[watchdog] ${appended} veredicto(s) de calibración FP/TP guardado(s) en logs/fact-verdicts.jsonl.`);
+    wstate.lastFactPollEpoch = Math.floor(Date.now() / 1000);
+    writeWatchdogState(wstate);
+  } catch {
+    // best-effort — un poll fallido se reintenta en el próximo tick
+  }
+}
+
 async function main() {
   const args = process.argv.slice(2);
 
@@ -409,6 +453,7 @@ async function main() {
       console.error(`[watchdog] Error en el chequeo (no fatal): ${e.message}`);
     }
     await maybeSendDailyDigest();
+    await collectFactVerdicts();
     await new Promise((r) => setTimeout(r, CHECK_INTERVAL_MS));
   }
 }
@@ -430,5 +475,7 @@ module.exports = {
   sendDigest,
   isWatchdogRunning,
   stopWatchdogIfRunning,
+  parseFactVerdict,
   WATCHDOG_PID_PATH,
+  FACT_VERDICTS_PATH,
 };

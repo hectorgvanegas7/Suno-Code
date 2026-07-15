@@ -20,11 +20,16 @@
 //   node guardia-benchmark.js --judgment  → suma el juicio de fidelidad del
 //                                           Guardia (lento; documenta su tasa
 //                                           de acierto, hoy conocida como mala)
+//   node guardia-benchmark.js --readiness → imprime READY/NOT READY para
+//                                           activar FACT_GATE=regen, con el
+//                                           criterio medible completo (banco +
+//                                           jsonl de producción + veredictos
+//                                           FP/TP del celular). Sin red.
 //
 // Sale con código 1 si algún caso falla — sirve para verificar en frío que
 // un cambio de prompt no rompió lo que ya funcionaba.
 //
-// NUNCA toca el pipeline ni state.json — 100% lectura de golden/.
+// NUNCA toca el pipeline ni state.json — 100% lectura de golden/ y logs/.
 
 const fs = require('fs');
 const path = require('path');
@@ -36,6 +41,59 @@ const GOLDEN_DIR = path.join(__dirname, 'golden');
 const args = process.argv.slice(2);
 const offline = args.includes('--offline');
 const includeJudgment = args.includes('--judgment');
+const readinessMode = args.includes('--readiness');
+
+// ─── --readiness: ¿se puede activar FACT_GATE=regen? (2026-07-14) ────────────
+// Criterio medible y completo — la lección del banco dorado ("cero falsos
+// positivos solo se afirma con casos reales, nunca con 1-2 corridas
+// manuales") aplicada a la graduación del gate:
+//   1. golden/ con ≥10 casos (≥4 malas con hechos esperados, ≥5 buenas).
+//   2. Producción: ≥15 canciones en logs/guardia-feedback.jsonl con la señal
+//      de extracción corrida.
+//   3. Cero falsos positivos confirmados: ningún veredicto 'fp' en
+//      logs/fact-verdicts.jsonl (los botones ❌/🚨 del celular), y las
+//      alarmas sin veredicto humano no cuentan como limpias.
+// Imprime el estado de cada condición y READY/NOT READY. 100% offline.
+function runReadiness() {
+  const feedbackPath = path.join(__dirname, 'logs', 'guardia-feedback.jsonl');
+  const verdictsPath = path.join(__dirname, 'logs', 'fact-verdicts.jsonl');
+  const readJsonl = (p) => {
+    try {
+      return fs.readFileSync(p, 'utf-8').split('\n').filter(Boolean)
+        .map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+    } catch { return []; }
+  };
+
+  const cases = fs.existsSync(GOLDEN_DIR)
+    ? fs.readdirSync(GOLDEN_DIR).filter((d) => fs.existsSync(path.join(GOLDEN_DIR, d, 'expect.json')))
+    : [];
+  const goldenGood = cases.filter((c) => {
+    try { return JSON.parse(fs.readFileSync(path.join(GOLDEN_DIR, c, 'expect.json'), 'utf-8')).letraEsBuena; } catch { return false; }
+  }).length;
+  const goldenBad = cases.length - goldenGood;
+
+  const feedback = readJsonl(feedbackPath).filter((e) => e.extraccionHechos || e.hechosSinRespaldo);
+  const alarms = feedback.filter((e) => (e.hechosSinRespaldo?.sinRespaldo || []).length > 0);
+  const verdicts = readJsonl(verdictsPath);
+  const fpCount = verdicts.filter((v) => v.verdict === 'fp').length;
+  const tpCount = verdicts.filter((v) => v.verdict === 'tp').length;
+  const unjudgedAlarms = Math.max(0, alarms.length - verdicts.length);
+
+  const conditions = [
+    { ok: cases.length >= 10 && goldenBad >= 4 && goldenGood >= 5, label: `Banco dorado: ${cases.length} caso(s) (${goldenBad} malas, ${goldenGood} buenas) — se exige ≥10 (≥4 malas, ≥5 buenas)` },
+    { ok: feedback.length >= 15, label: `Producción: ${feedback.length} canción(es) con extracción en guardia-feedback.jsonl — se exige ≥15` },
+    { ok: fpCount === 0, label: `Falsos positivos confirmados (botón ❌ del celular): ${fpCount} — se exige 0` },
+    { ok: unjudgedAlarms === 0, label: `Alarmas sin veredicto humano: ${unjudgedAlarms} (TP confirmados: ${tpCount}) — se exige 0 (una alarma sin juzgar no cuenta como limpia)` },
+  ];
+
+  console.log('🎓 Readiness de FACT_GATE=regen:\n');
+  for (const c of conditions) console.log(`  ${c.ok ? '✅' : '❌'} ${c.label}`);
+  const ready = conditions.every((c) => c.ok);
+  console.log(ready
+    ? '\n🟢 READY — activá con FACT_GATE=regen (kill-switch: FACT_GATE=warn). Corré también `node guardia-benchmark.js` completo antes, para confirmar el banco en verde.'
+    : '\n🔴 NOT READY — seguir calibrando en modo warn (los botones 🚨/❌ del celular alimentan logs/fact-verdicts.jsonl).');
+  process.exit(ready ? 0 : 1);
+}
 
 function parseSectionsFromSongTxt(content) {
   const sections = {};
@@ -59,6 +117,10 @@ function coincide(esperado, encontrados) {
 }
 
 (async () => {
+  if (readinessMode) {
+    runReadiness();
+    return;
+  }
   if (!fs.existsSync(GOLDEN_DIR)) {
     console.error('❌ No existe la carpeta golden/ — nada que medir.');
     process.exit(1);

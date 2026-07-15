@@ -2925,3 +2925,56 @@ humano de 20 min) y `esperando-submit` 24h→10 min de ticker (con 24h, un
 loop de espera colgado dejaba al watchdog ciego un día entero; ahora el
 único pulso sostenido es el del loop real, y gracias a los intents de
 submit el relanzamiento del watchdog en esa etapa es seguro).
+
+## FACT_GATE: el camino medible de la extracción de hechos a gate automático + smoke de API real al arrancar el loop (2026-07-14)
+
+Continuación directa del caso "Miami" y su lección ("cuando un LLM falla
+juzgando, pedile datos y juzgá en código"). La extracción cerrada de hechos ya
+funcionaba como señal informativa — ahora tiene el camino COMPLETO a gate, con
+criterio medible en vez de "cuando se sienta listo":
+
+- **`FACT_GATE=off|warn|regen`** (default `warn` = comportamiento histórico).
+  Con `regen`, el gate corre DENTRO de `generateSongWithSelfCorrection`
+  (run.js), sobre la letra que ya pasó hardValidate + LanguageTool y justo
+  antes de devolverla como buena: extrae hechos (Haiku) + compara EN CÓDIGO
+  contra la encuesta; un hecho sin respaldo dispara el mismo regen correctivo
+  que el chequeo N, dentro del presupuesto de 3 intentos. La decisión es
+  `decideFactGateAction` (lib/ollama-guardia.js, pura, 7 tests): señal caída
+  JAMÁS bloquea, modo desconocido cae a warn (fail-safe), y tras 2 regens de
+  hechos en la misma canción degrada a warn (un gate mal calibrado a las 3 AM
+  no quema la cola). El mismo gate corre sobre el resultado del corrector
+  barato (que puede reescribir líneas enteras) — misma letra, misma vara.
+  Kill-switch: FACT_GATE=warn.
+- **Calibración con botones en el celular**: cuando la señal informativa marca
+  "HECHO SIN RESPALDO", run.js manda ntfy con botones 🚨 Bien detectado /
+  ❌ Falso positivo que postean `fact:<songId>:<tp|fp>` al reply topic. Como
+  run.js es efímero, los veredictos los junta el WATCHDOG (vive toda la
+  noche) en cada tick → `logs/fact-verdicts.jsonl`.
+- **`node guardia-benchmark.js --readiness`**: imprime READY/NOT READY con el
+  criterio completo — banco dorado ≥10 casos (≥4 malas/≥5 buenas), ≥15
+  canciones reales con extracción en guardia-feedback.jsonl, 0 veredictos FP,
+  y 0 alarmas sin juzgar (una alarma sin veredicto humano NO cuenta como
+  limpia). Hoy: NOT READY (2 casos dorados, 2 canciones, 2 alarmas sin
+  juzgar) — el modo warn + los botones van juntando la evidencia solos.
+  **Pendiente de datos reales:** ampliar golden/ exige letras reales de
+  incidentes/QA aprobado — no se pueden inventar casos sintéticos sin
+  violar la lección del banco ("solo casos reales").
+
+**Robustez del proveedor (misma tanda):** el fetch del generador en
+lib/llm-provider.js ahora lleva `AbortSignal.timeout(120000)` — sin signal,
+un socket colgado de la API trababa la corrida hasta el techo de etapa de
+25 min + kill del watchdog. Y `node lib/preflight.js --with-api` corre UNA
+llamada real mínima a Haiku (fracción de centavo): `--loop` la ejecuta al
+arrancar y NO arranca si falla (push urgente) — key vencida/sin saldo se
+descubre a las 22:00, no a las 3 AM. Verificado en vivo (exit 0, Haiku
+respondió; y el clásico crash de libuv por process.exit en el mismo tick
+que el cierre del socket se evitó con el patrón exitAfterDelay de siempre).
+
+**Decisión documentada — prompt caching del Guardia: NO por ahora.** El
+prompt del Guardia pone el contenido dinámico (encuesta/letra) ANTES de las
+instrucciones estáticas; cachear exigiría reestructurarlo (instrucciones →
+system con cache_control), y un cambio de estructura de prompt en un
+componente que gatea exige recalibrar contra el banco dorado. Ahorro
+estimado: centavos/día (Haiku). Riesgo/beneficio no cierra hoy; si el banco
+crece a ≥10 casos, rehacerlo midiendo antes/después. `estiloCoincide` ya lo
+juzga el propio Guardia (campo del schema) — no hace falta un juez aparte.

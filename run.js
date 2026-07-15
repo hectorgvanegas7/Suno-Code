@@ -606,6 +606,50 @@ async function generateSongWithSelfCorrection(surveyContent, baseUserMessageOver
   let maxTokens = DEFAULT_MAX_TOKENS;
   const surveyFirstNames = extractFirstNames(surveyContent);
 
+  // ── FACT_GATE (2026-07-14): gate de hechos DENTRO del loop de intentos ──
+  // Solo activo con FACT_GATE=regen (default 'warn' = informativo post-QA,
+  // como siempre). Corre sobre la letra que YA pasó hardValidate +
+  // LanguageTool, justo antes de devolverla como buena: extrae los hechos
+  // (Haiku, extracción cerrada) y los compara EN CÓDIGO contra la encuesta.
+  // Un hecho sin respaldo dispara el mismo camino correctivo que cualquier
+  // fallo del chequeo N — regen con instrucciones, dentro del presupuesto de
+  // MAX_GENERATION_ATTEMPTS. La señal caída (API inalcanzable) JAMÁS bloquea
+  // (protocolo Capa 3), y decideFactGateAction degrada a warn tras 2 regens
+  // de hechos en la misma canción. En --dry-run no corre (cero API).
+  let factGateRegens = 0;
+  const runFactGate = async (cleanJson) => {
+    const mode = String(process.env.FACT_GATE || 'warn').toLowerCase();
+    if (mode !== 'regen' || isDryRun) return { pass: true };
+    try {
+      const { extraerHechosLetra, compararHechosConEncuesta, decideFactGateAction } = require('./lib/ollama-guardia');
+      const extraccion = await extraerHechosLetra({ letras: cleanJson.letras, titulo: cleanJson.titulo });
+      if (!extraccion.ok) {
+        console.log(`\n🧾 FACT_GATE: extracción no disponible (${extraccion.error}) — la señal caída nunca bloquea.`);
+        return { pass: true };
+      }
+      const comparacion = compararHechosConEncuesta(extraccion, surveyContent, { firstNames: surveyFirstNames });
+      const action = decideFactGateAction({ sinRespaldoCount: comparacion.sinRespaldo.length, mode, regenCount: factGateRegens });
+      if (action === 'pass') {
+        console.log(`\n🧾 FACT_GATE: ${comparacion.evaluados} afirmación(es) evaluada(s), todas respaldadas por la encuesta. ✅`);
+        return { pass: true };
+      }
+      if (action === 'degrade-warn') {
+        console.log(`\n🧾 FACT_GATE: ${comparacion.sinRespaldo.length} hecho(s) sin respaldo PERO ya hubo ${factGateRegens} regens de hechos en esta canción — degradado a warn (no quema más intentos; queda para el QA humano y el Guardia).`);
+        return { pass: true };
+      }
+      factGateRegens++;
+      const failures = comparacion.sinRespaldo.map((h) =>
+        `Hecho sin respaldo en la encuesta (${h.tipo}): "${h.valor}" — ${h.motivo}. Eliminá esta afirmación o reemplazala por algo que la encuesta realmente diga.`
+      );
+      console.log(`\n🧾 FACT_GATE: ${failures.length} hecho(s) sin respaldo — regen (${factGateRegens}/2 permitidos por canción):`);
+      failures.forEach((f) => console.log(`   🚨 ${f}`));
+      return { pass: false, failures };
+    } catch (e) {
+      console.log(`\n🧾 FACT_GATE: error inesperado (${e.message}) — la señal nunca bloquea.`);
+      return { pass: true };
+    }
+  };
+
   // Mejor candidato entre TODOS los intentos (2026-07-13): cada regen es una
   // tirada nueva que puede arreglar una cosa y romper otra — bug real ("El
   // Lago Donde Aprendí a Quedarme"): el intento 2 corrigió la tilde pero
@@ -665,24 +709,32 @@ async function generateSongWithSelfCorrection(surveyContent, baseUserMessageOver
 
       const grammarResult = await runGrammarGate(parsedJson, surveyContent);
       if (grammarResult.clean) {
-        return { fullResponse: grammarResult.fullResponse, parsedJson: grammarResult.parsedJson, passedQA: true };
-      }
-      if (grammarResult.unavailable) {
+        const factGate = await runFactGate(grammarResult.parsedJson);
+        if (factGate.pass) {
+          return { fullResponse: grammarResult.fullResponse, parsedJson: grammarResult.parsedJson, passedQA: true };
+        }
+        // Hechos sin respaldo con FACT_GATE=regen: cae al flujo correctivo de
+        // abajo (mismo camino que cualquier fallo del chequeo N).
+        lastFailures = factGate.failures;
+        lastResponse = grammarResult.fullResponse;
+        parsedJson = grammarResult.parsedJson;
+        considerCandidate(lastResponse, lastFailures, true);
+      } else if (grammarResult.unavailable) {
         // Problema de red, no de contenido — gastar los MAX_GENERATION_ATTEMPTS
         // regenerando la letra entera no lo arregla. Se entrega de una con la
         // advertencia en vez de quemar reintentos/tokens en vano.
         const fullResponse = JSON.stringify(grammarResult.parsedJson);
         return { fullResponse, parsedJson: grammarResult.parsedJson, passedQA: false, lastFailures: grammarResult.failures };
+      } else {
+        // LanguageTool sí respondió pero quedaron errores tras sus propias
+        // rondas de parcheo — cae al flujo normal de abajo (logueo +
+        // instrucciones correctivas para el próximo intento), igual que
+        // cualquier otro fallo de hardValidate.
+        lastFailures = grammarResult.failures;
+        lastResponse = JSON.stringify(grammarResult.parsedJson);
+        parsedJson = grammarResult.parsedJson;
+        considerCandidate(lastResponse, lastFailures, true);
       }
-
-      // LanguageTool sí respondió pero quedaron errores tras sus propias
-      // rondas de parcheo — cae al flujo normal de abajo (logueo +
-      // instrucciones correctivas para el próximo intento), igual que
-      // cualquier otro fallo de hardValidate.
-      lastFailures = grammarResult.failures;
-      lastResponse = JSON.stringify(grammarResult.parsedJson);
-      parsedJson = grammarResult.parsedJson;
-      considerCandidate(lastResponse, lastFailures, true);
     }
 
     console.log(`❌ Fallos en intento ${attempt}:`);
@@ -719,15 +771,24 @@ async function generateSongWithSelfCorrection(surveyContent, baseUserMessageOver
           // distinta para la misma letra (auditoría 2026-07-13).
           const patchedGrammar = await runGrammarGate(revalidated.parsedJson, surveyContent);
           if (patchedGrammar.clean) {
-            return { fullResponse: patchedGrammar.fullResponse, parsedJson: patchedGrammar.parsedJson, passedQA: true };
-          }
-          if (patchedGrammar.unavailable) {
+            // Mismo fact-gate que el camino valid normal — el corrector puede
+            // reescribir líneas enteras y (en teoría) introducir un hecho
+            // nuevo; la misma letra siempre pasa por la misma vara.
+            const patchedFactGate = await runFactGate(patchedGrammar.parsedJson);
+            if (patchedFactGate.pass) {
+              return { fullResponse: patchedGrammar.fullResponse, parsedJson: patchedGrammar.parsedJson, passedQA: true };
+            }
+            lastFailures = patchedFactGate.failures;
+            lastResponse = patchedGrammar.fullResponse;
+            considerCandidate(lastResponse, lastFailures, true);
+          } else if (patchedGrammar.unavailable) {
             const fullResponse = JSON.stringify(patchedGrammar.parsedJson);
             return { fullResponse, parsedJson: patchedGrammar.parsedJson, passedQA: false, lastFailures: patchedGrammar.failures };
+          } else {
+            lastFailures = patchedGrammar.failures;
+            lastResponse = JSON.stringify(patchedGrammar.parsedJson);
+            considerCandidate(lastResponse, lastFailures, true);
           }
-          lastFailures = patchedGrammar.failures;
-          lastResponse = JSON.stringify(patchedGrammar.parsedJson);
-          considerCandidate(lastResponse, lastFailures, true);
         } else {
           console.log(`⚠️ El parche no dejó todo limpio (${revalidated.failures.length} fallo[s] restante[s]) — sigue el flujo normal.`);
           considerCandidate(patchedText, revalidated.failures, false);
@@ -1274,6 +1335,30 @@ process.on('uncaughtException', async (err) => {
             for (const h of hechosSinRespaldo.sinRespaldo) {
               console.warn(`   🚨 HECHO SIN RESPALDO en la encuesta (${h.tipo}): "${h.valor}" — ${h.motivo} (informativo — revisar antes de confiar; ver LESSONS.md 2026-07-14)`);
             }
+            // Calibración remota (2026-07-14, camino de graduación a gate):
+            // botones TP/FP en el celular. El veredicto lo postea la app al
+            // reply topic con formato "fact:<songId>:<tp|fp>" y lo junta el
+            // WATCHDOG en logs/fact-verdicts.jsonl (este proceso es
+            // efímero, no puede quedarse esperando la respuesta). Cuando el
+            // jsonl acumule ≥15 canciones sin FP, FACT_GATE=regen se activa
+            // con evidencia (guardia-benchmark.js --readiness).
+            const songIdForVerdict = pipelineState.read()?.songId || 'sin-id';
+            const { notifyWithReplyActions } = require('./lib/ntfy');
+            await notifyWithReplyActions(
+              `🧾 "${parsedJson.titulo}": la extracción de hechos marcó ${hechosSinRespaldo.sinRespaldo.length} afirmación(es) sin respaldo en la encuesta:\n` +
+              hechosSinRespaldo.sinRespaldo.map((h) => `• (${h.tipo}) "${h.valor}" — ${h.motivo}`).join('\n') +
+              '\n\nEs solo informativo (la canción sigue normal). Tu veredicto calibra el gate automático:',
+              {
+                requestId: 'fact',
+                title: 'Calibración: ¿hecho inventado real?',
+                priority: 'default',
+                tags: 'receipt',
+                verbs: [
+                  { verb: 'tp', label: '🚨 Bien detectado', body: `fact:${songIdForVerdict}:tp` },
+                  { verb: 'fp', label: '❌ Falso positivo', body: `fact:${songIdForVerdict}:fp` },
+                ],
+              }
+            ).catch(() => {});
           }
         } else {
           console.log(`\n🧾 Extracción de hechos no disponible (${extraccionHechos.error}) — sin esta señal.`);

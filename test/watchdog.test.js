@@ -164,3 +164,20 @@ test('looksLikeNodeProcess: el propio proceso del test (Node) es reconocido como
 test('looksLikeNodeProcess: un PID inexistente devuelve false', () => {
   assert.equal(looksLikeNodeProcess(999999999), false);
 });
+
+// ─── parseFactVerdict: veredictos de calibración FP/TP (2026-07-14) ───────────
+
+const { parseFactVerdict } = require('../watchdog');
+
+test('parseFactVerdict: parsea fact:<songId>:<tp|fp> (songId con guiones/UUID)', () => {
+  assert.deepEqual(parseFactVerdict('fact:PS0180:tp'), { songId: 'PS0180', verdict: 'tp' });
+  assert.deepEqual(parseFactVerdict('fact:333d963b-1601-4281-bf87-ad626964a482:fp'), { songId: '333d963b-1601-4281-bf87-ad626964a482', verdict: 'fp' });
+});
+
+test('parseFactVerdict: ignora respuestas de pausa y basura (no colisiona con el formato <requestId>:<ok|abort>)', () => {
+  assert.equal(parseFactVerdict('a1b2c3d4:ok'), null);
+  assert.equal(parseFactVerdict('fact:PS0180:yes'), null);
+  assert.equal(parseFactVerdict('hola'), null);
+  assert.equal(parseFactVerdict(''), null);
+  assert.equal(parseFactVerdict(null), null);
+});

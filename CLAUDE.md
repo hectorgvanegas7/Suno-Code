@@ -177,6 +177,22 @@ Ver `start-flow.js` en "Archivos clave" para los flags que saltean pasos.
 - **Clockify** = solo reuniones, nunca canciones. **Flow Screenshot** = siempre
   obligatorio. **Clockify Screenshot** = solo si hubo reuniones ese día.
 
+## FACT_GATE — gate de hechos inventados (2026-07-14)
+
+Env `FACT_GATE=off|warn|regen` (default **warn** = solo informativo, el modo
+histórico). Con `regen`, un hecho sin respaldo en la encuesta (extracción
+cerrada Haiku + comparación en código) dispara el mismo regen que el chequeo
+N, dentro del presupuesto de 3 intentos (`decideFactGateAction` en
+lib/ollama-guardia.js — pura; degrada a warn tras 2 regens por canción; la
+señal caída jamás bloquea). **NO activar `regen` hasta que
+`node guardia-benchmark.js --readiness` diga READY** (banco dorado ≥10 casos,
+≥15 canciones reales, 0 falsos positivos confirmados). La calibración corre
+sola: cada alarma informativa manda botones 🚨/❌ al celular y el watchdog
+persiste los veredictos en `logs/fact-verdicts.jsonl`. Kill-switch:
+`FACT_GATE=warn`. El smoke de API real (`node lib/preflight.js --with-api`,
+una llamada Haiku mínima) corre automáticamente al arrancar `--loop` y lo
+aborta con push urgente si la API está rota.
+
 ## Reply channel — responder pausas desde el celular (2026-07-14)
 
 Toda pausa humana (`pauseForHumanInteraction` / `confirmToContinue`) ahora se
